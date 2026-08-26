@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+build/
+dist/
+
+# Generated types from contracts (never commit)
+pipeline/src/narumi/contracts/_generated/
+
+# Swift
+app/.build/
+app/*.xcodeproj
+app/*.xcworkspace
+app/DerivedData/
+app/dist/
+
+# Local data / secrets
+.env
+.env.*
+*.local.json
+narumi.db
+narumi.db-*
+data/
+
+# OS
+.DS_Store

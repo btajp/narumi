@@ -1,0 +1,42 @@
+[project]
+name = "narumi-workspace"
+version = "0.0.0"
+description = "narumi (鳴海探偵事務所) uv workspace root"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["pipeline", "server"]
+
+[tool.uv.sources]
+narumi = { workspace = true }
+narumi-server = { workspace = true }
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "ruff>=0.8",
+  "datamodel-code-generator>=0.28",
+  "narumi[whisper-mlx,whisper-faster,claude,anthropic,html]",
+  "narumi-server",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["pipeline/tests", "server/tests"]
+asyncio_mode = "auto"
+markers = [
+  "real: opt-in tests that hit real engines/providers (deselected by default)",
+]
+addopts = "-m 'not real'"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["pipeline/src/narumi/contracts/_generated"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "W"]
