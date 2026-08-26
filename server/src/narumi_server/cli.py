@@ -10,6 +10,7 @@ contract / handler mismatch print the structured error as JSON on stderr and exi
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import sys
@@ -27,7 +28,9 @@ from narumi_server.transports import (
     DEFAULT_PATH,
     TRANSPORT_HTTP,
     TRANSPORT_STDIO,
+    ShutdownRequested,
     ensure_loopback,
+    graceful_sigterm,
     run_http,
     run_stdio,
 )
@@ -119,19 +122,27 @@ def cli(
     except NarumiError as exc:
         click.echo(json.dumps(exc.to_payload(), ensure_ascii=False), err=True)
         sys.exit(ERROR_EXIT_CODE)
-    try:
-        server = build_server(ctx)
-        if transport == TRANSPORT_HTTP:
-            run_http(server, host=host, port=port, path=path, log_level=log_level)
-        else:
-            run_stdio(server)
-    except NarumiError as exc:
-        click.echo(json.dumps(exc.to_payload(), ensure_ascii=False), err=True)
-        sys.exit(ERROR_EXIT_CODE)
-    except KeyboardInterrupt:
-        log.info("interrupted; shutting down")
-    finally:
-        ctx.close()
+    # --http: SIGTERM (what narumi.app sends on quit) unwinds as ShutdownRequested after
+    # uvicorn's graceful shutdown and stays handled through ctx.close(), so a running recording
+    # is finalized (see transports.graceful_sigterm). --stdio keeps the default SIGTERM action:
+    # its stdin reader thread cannot be interrupted, and MCP clients end it by closing stdin.
+    sigterm = graceful_sigterm() if transport == TRANSPORT_HTTP else contextlib.nullcontext()
+    with sigterm:
+        try:
+            server = build_server(ctx)
+            if transport == TRANSPORT_HTTP:
+                run_http(server, host=host, port=port, path=path, log_level=log_level)
+            else:
+                run_stdio(server)
+        except NarumiError as exc:
+            click.echo(json.dumps(exc.to_payload(), ensure_ascii=False), err=True)
+            sys.exit(ERROR_EXIT_CODE)
+        except KeyboardInterrupt:
+            log.info("interrupted; shutting down")
+        except ShutdownRequested as exc:
+            log.info("%s; shutting down", exc)
+        finally:
+            ctx.close()
 
 
 def main() -> None:

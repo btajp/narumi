@@ -40,19 +40,29 @@ class ServerContext:
     idempotency: IdempotencyStore = field(init=False, repr=False)
     locks: MeetingLocks = field(default_factory=MeetingLocks, repr=False)
     """Per-meeting write locks shared by jobs and tool handlers (see ``narumi_server.locks``)."""
+    _closed: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.idempotency = IdempotencyStore(self.catalog)
 
     def close(self) -> None:
-        """Stop jobs, finalize a running recording and close the catalog (reverse creation order).
+        """Finalize a running recording, stop jobs and close the catalog. Idempotent.
 
         A recording that is still running is stopped through the ``stop_recording`` handler
         (without a process job) so its tracks are finalized and hashed into the manifest; only
         when that fails is the recorder aborted (which still lets it finalize its files).
+
+        The recording goes first: it is the one thing that cannot be redone, and waiting for a
+        running job (a transcription can take minutes) would let narumi.app's stop timeout
+        SIGKILL the server before the manifest is updated. Jobs are re-runnable (they are marked
+        failed at shutdown and stages are idempotent), and a job never holds the lock of the
+        meeting being recorded, so the order is safe.
         """
-        self.jobs.shutdown(wait=True)
+        if self._closed:
+            return
+        self._closed = True
         self.finalize_recording()
+        self.jobs.shutdown(wait=True)
         self.catalog.close()
 
     def finalize_recording(self) -> None:

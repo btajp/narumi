@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import os
+import signal
 import socket
+import subprocess
 import sys
 import threading
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +22,12 @@ from mcp import StdioServerParameters
 from mcp.client import Client
 from mcp.server import Server
 from narumi.errors import InvalidArgumentError
-from narumi_server.transports import build_http_app, ensure_loopback
+from narumi_server.transports import (
+    ShutdownRequested,
+    build_http_app,
+    ensure_loopback,
+    graceful_sigterm,
+)
 
 
 def free_port() -> int:
@@ -91,3 +101,88 @@ async def test_streamable_http(server: Server[Any]):
     finally:
         http_server.should_exit = True
         thread.join(timeout=15)
+
+
+def test_graceful_sigterm_raises_once_then_ignores():
+    """The handler unwinds the first SIGTERM as an exception and swallows repeats (no signal is
+    sent to another process: ``raise_signal`` delivers it to this thread synchronously)."""
+    before = signal.getsignal(signal.SIGTERM)
+    with graceful_sigterm():
+        assert signal.getsignal(signal.SIGTERM) is not before
+        with pytest.raises(ShutdownRequested) as caught:
+            signal.raise_signal(signal.SIGTERM)
+        assert caught.value.signum == signal.SIGTERM
+        assert "SIGTERM" in str(caught.value)
+        signal.raise_signal(signal.SIGTERM)  # while finalizing: ignored, must not raise
+    assert signal.getsignal(signal.SIGTERM) is before
+    assert not issubclass(ShutdownRequested, Exception)  # `except Exception` must not eat it
+
+
+async def wait_for_http(url: str, proc: subprocess.Popen[bytes], timeout: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise AssertionError(f"narumi-server exited early with {proc.returncode}")
+        try:
+            async with Client(url) as client:
+                await client.list_tools()
+            return
+        except Exception:  # noqa: BLE001 - not listening yet
+            await anyio.sleep(0.1)
+    raise AssertionError("narumi-server did not start listening")
+
+
+async def test_http_sigterm_finalizes_recording(home: Path, tmp_path: Path):
+    """What narumi.app does on quit: SIGTERM to ``narumi-server --http`` while recording.
+
+    uvicorn re-raises the captured SIGTERM after its graceful shutdown; without the CLI's
+    handler that killed the process before ``ctx.close()``, leaving the meeting in status
+    ``recording`` with no ``stopped_at`` (observed on 2026-08-27). The server must instead exit
+    0 with the recording finalized and the recorder process gone.
+    """
+    port = free_port()
+    url = f"http://127.0.0.1:{port}/mcp"
+    log_path = tmp_path / "server.log"
+    with log_path.open("wb") as log:
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "narumi_server.cli",
+                "--http",
+                "--port",
+                str(port),
+                "--data-root",
+                str(home),
+                "--recorder",
+                str(FAKE_RECORDER),
+                "--log-level",
+                "INFO",
+            ],
+            env=dict(os.environ),
+            stdout=log,
+            stderr=log,
+        )
+        try:
+            await wait_for_http(url, proc)
+            async with Client(url) as client:
+                started = await client.call_tool(
+                    "start_recording",
+                    {"meeting_name": "SIGTERM 中の会議", "request_id": str(uuid.uuid4())},
+                )
+                assert not started.is_error, started.structured_content
+                meeting_id = started.structured_content["meeting_id"]
+            proc.send_signal(signal.SIGTERM)
+            returncode = await anyio.to_thread.run_sync(proc.wait, 40)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+    text = log_path.read_text(encoding="utf-8")
+    assert returncode == 0, text
+    assert "received SIGTERM; shutting down" in text
+    assert f"finalized recording {meeting_id} at shutdown" in text
+    manifest = json.loads((home / "meetings" / meeting_id / "manifest.json").read_text("utf-8"))
+    assert manifest["status"] == "recorded"
+    assert manifest["recording"]["stopped_at"] is not None
+    assert (home / "meetings" / meeting_id / "tracks" / "recorder.json").is_file()
