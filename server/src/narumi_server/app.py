@@ -27,7 +27,7 @@ from narumi_server.handlers.common import Handler, jsonable
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "narumi"
-SERVER_TITLE = "narumi (鳴海探偵事務所)"
+SERVER_TITLE = "narumi"
 INSTRUCTIONS = (
     "narumi records meetings locally (screen / mic / system audio as separate tracks) and "
     "generates minutes. Call get_server_info first; start_recording / stop_recording drive the "

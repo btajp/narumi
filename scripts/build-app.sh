@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the Swift package in release mode and assemble dist/鳴海探偵事務所.app
+# Build the Swift package in release mode and assemble dist/narumi.app
 # (menu bar UI + narumi-recorder helper) with a minimal Info.plist and an ad-hoc signature.
 #
 # Usage: scripts/build-app.sh [--skip-build]
@@ -9,7 +9,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_DIR="$ROOT/app"
 DIST_DIR="${DIST_DIR:-$ROOT/dist}"
-APP_NAME="鳴海探偵事務所"
+APP_NAME="narumi"
 BUNDLE_ID="jp.btajp.narumi"
 BUNDLE="$DIST_DIR/$APP_NAME.app"
 VERSION="0.1.0"

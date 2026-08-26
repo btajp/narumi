@@ -6,7 +6,7 @@
 |---|---|---|
 | `NarumiRecorderKit` | ライブラリ | ScreenCaptureKit キャプチャ → AVAssetWriter で **別ファイル** 書き出し。イベント型・引数解析・ディスプレイ選択などの純粋ロジックはこの中の SCK 非依存な型に置き、`swift test` で検証する |
 | `narumi-recorder` | CLI | server がサブプロセスとして起動する録画ヘルパー。stdout に JSON Lines でイベントを出す |
-| `NarumiMenuBar` | メニューバーアプリ「鳴海探偵事務所」 | MCP クライアント。server の公開ツール（`start_recording` / `stop_recording` / `get_server_info`）を呼ぶだけで、ファイルや recorder には触れない（AGENTS.md 絶対原則 3） |
+| `NarumiMenuBar` | メニューバーアプリ `narumi.app` | MCP クライアント。server の公開ツール（`start_recording` / `stop_recording` / `get_server_info`）を呼ぶだけで、ファイルや recorder には触れない（AGENTS.md 絶対原則 3） |
 
 ## ビルドとテスト
 
@@ -15,7 +15,7 @@ cd app
 swift build                 # debug
 swift build -c release      # app/.build/release/narumi-recorder を生成（server が探すパス）
 swift test                  # XCTest（下記の注意を参照）
-scripts/build-app.sh        # リポジトリ直下から。dist/鳴海探偵事務所.app を組み立てて ad-hoc 署名
+scripts/build-app.sh        # リポジトリ直下から。dist/narumi.app を組み立てて ad-hoc 署名
 ```
 
 - 要件: macOS 15 以降、Swift 6.0 以降のツールチェーン。外部パッケージ依存なし（引数解析は自前）。
@@ -57,7 +57,7 @@ narumi-recorder help
 TCC は「責任プロセス」単位で許可を記録する。
 
 - **素の CLI（`app/.build/release/narumi-recorder`）**: Terminal から直接起動した場合は Terminal.app が責任プロセスになり、Terminal に対して画面収録・マイクの許可が求められる。server（`uv run narumi-server`）経由で起動した場合も、その server を起動した親アプリ（Terminal 等）が責任プロセスになる。初回の `record` で `SCShareableContent` の照会と `AVCaptureDevice.requestAccess` がプロンプトを出す。拒否されると `permission_denied` を返す（黙って続行しない）。launchd などプロンプトを出せない環境では、あらかじめ「システム設定 > プライバシーとセキュリティ」で許可しておく。
-- **`.app`（`dist/鳴海探偵事務所.app`）**: `Info.plist` に `NSMicrophoneUsageDescription` / `NSScreenCaptureUsageDescription` を持ち、`jp.btajp.narumi` として許可が記録される。同梱の `Contents/MacOS/narumi-recorder` をこの .app から起動する構成にすると許可が .app に紐づく。ただし現状のメニューバー UI は recorder を直接起動しない（server が起動する）ため、.app の許可は UI 自身の動作にのみ効く。
+- **`.app`（`dist/narumi.app`）**: `Info.plist` に `NSMicrophoneUsageDescription` / `NSScreenCaptureUsageDescription` を持ち、`jp.btajp.narumi` として許可が記録される。同梱の `Contents/MacOS/narumi-recorder` をこの .app から起動する構成にすると許可が .app に紐づく。ただし現状のメニューバー UI は recorder を直接起動しない（server が起動する）ため、.app の許可は UI 自身の動作にのみ効く。
 - ad-hoc 署名（`codesign --sign -`）はビルドのたびに署名が変わるため、TCC の許可が再度求められることがある。
 
 ## server から recorder を見つける方法
@@ -68,7 +68,7 @@ server の `RecordingController` は次の順で実行ファイルを探す。
 2. `app/.build/release/narumi-recorder`
 3. `app/.build/debug/narumi-recorder`
 
-いずれも無ければ `recorder_unavailable` エラー。開発時は `cd app && swift build -c release` を一度実行しておけばよい。`.app` 版を使う場合は `NARUMI_RECORDER=/path/to/dist/鳴海探偵事務所.app/Contents/MacOS/narumi-recorder` を指定する。
+いずれも無ければ `recorder_unavailable` エラー。開発時は `cd app && swift build -c release` を一度実行しておけばよい。`.app` 版を使う場合は `NARUMI_RECORDER=/path/to/dist/narumi.app/Contents/MacOS/narumi-recorder` を指定する。
 
 ## メニューバーアプリ（NarumiMenuBar）
 

@@ -5,7 +5,7 @@ import Foundation
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static let appVersion = "0.1.0"
-    static let displayName = "鳴海探偵事務所"
+    static let displayName = "narumi"
     static let idleIcon = "🕵️"
     static let recordingIcon = "⏺"
     static let pollInterval: TimeInterval = 5

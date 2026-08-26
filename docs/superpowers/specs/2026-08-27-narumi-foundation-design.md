@@ -45,7 +45,7 @@ narumi/
 │   ├── Package.swift
 │   ├── Sources/NarumiRecorderKit/   # ScreenCaptureKit キャプチャ → ファイル（ライブラリ）
 │   ├── Sources/narumi-recorder/     # 録画 CLI ヘルパー（server が起動）
-│   ├── Sources/NarumiMenuBar/       # メニューバーアプリ「鳴海探偵事務所」（MCP クライアント）
+│   ├── Sources/NarumiMenuBar/       # メニューバーアプリ `narumi.app`（MCP クライアント）
 │   └── Tests/
 └── scripts/                  # dev.sh / gen-types.sh / build-app.sh
 ```
@@ -169,7 +169,7 @@ meetings/<meeting_id>/
 
 - `narumi-recorder`（CLI）: `record --output <dir> [--display <id>] [--no-video] [--mic <device-uid>]` / `check`（権限状態）/ `list-displays`。SCStream で `screen`・`audio`（システム音声、`excludesCurrentProcessAudio`）・`microphone`（macOS 15+ `captureMicrophone`）を別々の出力として受け、AVAssetWriter で `screen.mp4`（H.264）/ `system.m4a`（AAC）/ `mic.m4a`（AAC）に**別ファイル**で書く。開始・停止時刻と各ファイルの実尺を `recorder.json` に残す（`stopped` の内容 + `started_at` + `recorder_version`。失敗時は `error` オブジェクト）。stdin がパイプで EOF になった場合（親プロセス消滅）も finalize する。1 フレームも取れなかった `screen` は `bytes: 0` でファイル無しとして報告し、server はそのトラックを manifest から落とす
 - SIGINT / SIGTERM / stdin の `stop` 行で finalize。イベントは stdout に JSON Lines。録画途中でキャプチャが失敗しても音声トラックを finalize できた場合は `stopped` を出してから `error` を出す（server は会議を `recorded` にし、`recording.recorder.error` に失敗を残す）。server 終了時は `stop_recording` 相当で finalize し、SIGKILL は最後の手段
-- `NarumiMenuBar`: NSStatusItem。「録画開始 / 停止」「会議名入力」「サーバー状態」。MCP Streamable HTTP（`http://127.0.0.1:8765/mcp`）へ `initialize` → `tools/call` を行う最小 JSON-RPC クライアントを同梱。表示名「鳴海探偵事務所」
+- `NarumiMenuBar`: NSStatusItem。「録画開始 / 停止」「会議名入力」「サーバー状態」。MCP Streamable HTTP（`http://127.0.0.1:8765/mcp`）へ `initialize` → `tools/call` を行う最小 JSON-RPC クライアントを同梱。表示名「narumi」
 - 配布時の署名・公証・`.app` 化は `scripts/build-app.sh` で最小 Info.plist（`LSUIElement`, `NSMicrophoneUsageDescription`, `NSScreenCaptureUsageDescription`）を付けてバンドルする
 
 ## 9. カタログ（`narumi.db`）
