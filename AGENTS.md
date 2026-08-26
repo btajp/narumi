@@ -15,7 +15,7 @@
 ## 絶対原則
 1. ファイルが正本、DB は索引: 会議ごとに 1 セッションバンドル（`manifest.json` + `tracks/ preprocess/ transcripts/ diarization/ merged/ minutes/ context/`）。`narumi.db` は再構築可能なカタログ＋検索索引で、破損時はバンドルから全再構築できること
 2. 決定的処理はスクリプト、LLM は読解・統合・生成のみ: 録画・ffmpeg・文字起こし・pHash・アライメントは固定手順。manifest に入力ハッシュ＋生成パラメータを記録し「同じ入力 → 同じ版」の冪等再生成を守る
-3. UI = API パリティ: UI でできる操作はすべて MCP ツールとして公開する。UI は特権経路を持たない、ただの MCP クライアント
+3. UI = API パリティ: UI でできる操作はすべて MCP ツールとして公開する。UI は特権経路を持たない、ただの MCP クライアント。**アプリ（narumi.app）が最上位の操作面**で、ユーザーの操作は全部アプリだけで完結させる。製品 CLI `narumi` は契約から生成した MCP ツールの 1:1 写像（ライブラリ直叩きは `narumi-dev` のみ）。新機能は「アプリの操作 → 契約 → サーバー → CLI → アプリ」の順で足す（`docs/superpowers/specs/2026-08-27-narumi-surface-parity-design.md`）
 4. 外部送信は会議プロファイルで明示制御: 既定はローカル完結（Whisper 系＋pyannote）。音声・テキストを外部に送るエンジン / LLM は能力プロファイル（送信先明記）＋明示オプトイン必須。`external_send_policy` に反するプロバイダ選択はエラーにする（黙ってフォールバックしない）
 5. gaia-library への書き込みは propose_update 経由のみ（承認は人間ロールのみ）。内部専用経路は作らない
 
