@@ -1,12 +1,13 @@
 # narumi app（Swift Package）
 
-録画 MVP（Step 1）の Swift 側。3 つのターゲットからなる。
+録画 MVP（Step 1）の Swift 側。4 つのターゲットからなる。
 
 | ターゲット | 種別 | 役割 |
 |---|---|---|
 | `NarumiRecorderKit` | ライブラリ | ScreenCaptureKit キャプチャ → AVAssetWriter で **別ファイル** 書き出し。イベント型・引数解析・ディスプレイ選択などの純粋ロジックはこの中の SCK 非依存な型に置き、`swift test` で検証する |
 | `narumi-recorder` | CLI | server がサブプロセスとして起動する録画ヘルパー。stdout に JSON Lines でイベントを出す |
-| `NarumiMenuBar` | メニューバーアプリ `narumi.app` | MCP クライアント。server の公開ツール（`start_recording` / `stop_recording` / `get_server_info`）を呼ぶだけで、ファイルや recorder には触れない（AGENTS.md 絶対原則 3） |
+| `NarumiMenuBarCore` | ライブラリ（Foundation のみ） | メニューバーアプリの純粋ロジック。サーバー設定の解決（`ServerConfig`）、起動コマンドの組み立て（`ServerCommand`）、サーバー状態と表示文言（`ServerState` / `ServerStatusText`）。AppKit に依存せず `swift test` で検証する |
+| `NarumiMenuBar` | メニューバーアプリ `narumi.app` | MCP クライアント。server の公開ツール（`start_recording` / `stop_recording` / `get_server_info`）を呼ぶだけで、ファイルや recorder には触れない（AGENTS.md 絶対原則 3）。加えて `narumi-server` の**プロセス**を起動・停止する（`ServerLauncher`。後述「起動フロー」） |
 
 ## ビルドとテスト
 
@@ -20,7 +21,7 @@ scripts/build-app.sh        # リポジトリ直下から。dist/narumi.app を�
 
 - 要件: macOS 15 以降、Swift 6.0 以降のツールチェーン。外部パッケージ依存なし（引数解析は自前）。
 - **`swift test` には Xcode が必要**。`xcode-select -p` が `/Library/Developer/CommandLineTools` を指している環境では XCTest が無く `no such module 'XCTest'` になる。切り替えずに実行するには `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test`。ビルド（`swift build`）は Command Line Tools だけで通る。
-- テストは ScreenCaptureKit・TCC・ネットワークに依存しない（イベント JSON の厳密一致、引数解析、ディスプレイ選択、ファイル名、`recorder.json` の書き出し）。
+- テストは ScreenCaptureKit・TCC・ネットワークに依存しない（イベント JSON の厳密一致、引数解析、ディスプレイ選択、ファイル名、`recorder.json` の書き出し。`NarumiMenuBarCore` はリポジトリ解決の優先順位、起動コマンドの argv / 環境変数、ポートからの URL 導出、ログパス、状態遷移と表示文言）。
 
 ## `narumi-recorder` CLI
 
@@ -57,7 +58,7 @@ narumi-recorder help
 TCC は「責任プロセス」単位で許可を記録する。
 
 - **素の CLI（`app/.build/release/narumi-recorder`）**: Terminal から直接起動した場合は Terminal.app が責任プロセスになり、Terminal に対して画面収録・マイクの許可が求められる。server（`uv run narumi-server`）経由で起動した場合も、その server を起動した親アプリ（Terminal 等）が責任プロセスになる。初回の `record` で `SCShareableContent` の照会と `AVCaptureDevice.requestAccess` がプロンプトを出す。拒否されると `permission_denied` を返す（黙って続行しない）。launchd などプロンプトを出せない環境では、あらかじめ「システム設定 > プライバシーとセキュリティ」で許可しておく。
-- **`.app`（`dist/narumi.app`）**: `Info.plist` に `NSMicrophoneUsageDescription` / `NSScreenCaptureUsageDescription` を持ち、`jp.btajp.narumi` として許可が記録される。同梱の `Contents/MacOS/narumi-recorder` をこの .app から起動する構成にすると許可が .app に紐づく。ただし現状のメニューバー UI は recorder を直接起動しない（server が起動する）ため、.app の許可は UI 自身の動作にのみ効く。
+- **`.app`（`dist/narumi.app`）**: `Info.plist` に `NSMicrophoneUsageDescription` / `NSScreenCaptureUsageDescription` を持ち、`jp.btajp.narumi` として許可が記録される。`narumi.app` は server を自分で起動し、server には同梱の `Contents/MacOS/narumi-recorder` を `--recorder` で渡す（後述「起動フロー」）。この構成では recorder の祖先プロセスが `.app` なので、TCC の責任プロセスは `narumi.app` になり許可が .app に紐づく想定（実機での確認は未了）。
 - ad-hoc 署名（`codesign --sign -`）はビルドのたびに署名が変わるため、TCC の許可が再度求められることがある。
 
 ## server から recorder を見つける方法
@@ -72,8 +73,32 @@ server の `RecordingController` は次の順で実行ファイルを探す。
 
 ## メニューバーアプリ（NarumiMenuBar）
 
-- `NSStatusItem`: 待機中 🕵️ / 録画中 ⏺。メニューは「録画開始…」「録画停止」「サーバー: <状態>」「終了」。
-- 「録画開始…」は `NSAlert` で会議名を聞き、`start_recording {meeting_name, request_id}` を呼ぶ。「録画停止」は `stop_recording {request_id[, meeting_id]}`。`request_id` は UUID を毎回発番する。
-- 「サーバー: …」は 5 秒ごとに `get_server_info` を呼んで更新する（`version` / `contract_version` があれば表示。応答に `recording` があればアイコンにも反映）。
-- 接続先は環境変数 `NARUMI_SERVER_URL`（既定 `http://127.0.0.1:8765/mcp`）。`MCPClient` は `initialize`（protocolVersion `2025-06-18`）→ `notifications/initialized` → `tools/call` を JSON-RPC 2.0 の POST で行い、`Mcp-Session-Id` を保持して送り返す。応答は `application/json` と `text/event-stream`（`data:` 行から同じ id の応答を取り出す）の両方を受け付ける。
+- `NSStatusItem`: 待機中 🕵️ / 録画中 ⏺。メニューは「録画開始…」「録画停止」/「サーバー: <状態>」/「サーバーを再起動」「リポジトリを選択…」「ログを開く」/「終了」。
+- 「録画開始…」は `NSAlert` で会議名を聞き、`start_recording {meeting_name, request_id}` を呼ぶ。「録画停止」は `stop_recording {request_id}`。`request_id` は UUID を毎回発番する。「録画開始…」はサーバーが稼働中（または外部サーバーに接続中）のときだけ有効。
+- 「サーバー: …」はサーバーが稼働中 / 外部サーバーに接続中のとき 5 秒ごとに `get_server_info` を呼んで更新する（`server_version` / `contract_version` があれば表示。`capabilities.recording` が false なら「録画不可」）。それ以外の状態（起動中・停止・起動失敗・未設定）はランチャーの状態をそのまま表示する。
+- 接続先は `NARUMI_SERVER_URL` があればそれ、無ければ `http://127.0.0.1:<NARUMI_SERVER_PORT または 8765>/mcp`（起動するサーバーのポートと必ず一致する）。`MCPClient` は `initialize`（protocolVersion `2025-06-18`）→ `notifications/initialized` → `tools/call` を JSON-RPC 2.0 の POST で行い、`Mcp-Session-Id` を保持して送り返す。応答は `application/json` と `text/event-stream`（`data:` 行から同じ id の応答を取り出す）の両方を受け付ける。
 - ツールエラー（`isError` / 構造化 `{"error":{code,message}}`）は `NSAlert` で表示する。
+
+## 起動フロー（narumi.app がサーバーを起動する）
+
+`narumi.app` を開くと、メニューバー UI 自身が `narumi-server` の**プロセス**を起動し、終了時に停止する。Terminal は不要（録画ボタンを押すだけ）。データ操作はこれまで通りすべて MCP ツール呼び出しで、アプリはバンドル・カタログ・録画ファイルに触れない（AGENTS.md 絶対原則 3）。新しい責務は「サーバープロセスの起動と停止」だけで、`ServerLauncher`（AppKit 側）と `NarumiMenuBarCore` の純粋ロジックに分かれている。
+
+1. **外部サーバーの検出**: 起動時にまず接続先 URL へ `get_server_info` を投げる。応答があれば状態は「外部サーバーに接続」になり、アプリは何も起動せず、終了時にも触れない。**アプリによるサーバー起動を無効にしたいときは、先に自分のサーバー（`scripts/dev.sh` など）を起動しておく。**
+2. **リポジトリの解決**（優先順）: 環境変数 `NARUMI_REPO` → `UserDefaults` の `narumi.repoPath`（「リポジトリを選択…」で保存）→ バンドル位置のヒューリスティック（`.app` が `<repo>/dist/narumi.app` にあり、`<repo>/pyproject.toml` と `<repo>/server/pyproject.toml` が**両方**ある）→ 未設定。未設定なら「未設定（リポジトリを選択してください）」と表示して起動しない。指定先に 2 つのファイルが無い場合は「起動失敗（ログ参照）」。
+3. **起動コマンド**: `/bin/zsh -lc 'exec uv run --project "$1" narumi-server --http --host 127.0.0.1 --port "$2" --recorder "$3"' narumi-server <repo> <port> <recorder>`。リポジトリ・ポート・recorder はシェル文字列に埋め込まず**位置パラメータ**（argv）で渡す（空白や日本語を含むパスでも壊れない）。環境変数で渡さないのは、ログインシェルの `~/.zshenv` / `~/.zprofile` がアプリの渡した環境の**後**に評価されるため: プロファイルに `export NARUMI_REPO=…` 等があると黙って上書きされ、別チェックアウトの server が起動したり、アプリがポーリングしないポートで bind されたりする。位置パラメータはプロファイルから書き換えられない。ログインシェル（`-l`）なので `~/.local/bin` / `/opt/homebrew/bin` / nix プロファイルなど利用者の PATH にある `uv` が使える（GUI アプリは launchd の最小限の PATH しか継承しない）。`--recorder` は同梱の `Contents/MacOS/narumi-recorder` があるときだけ付け、無ければ server 側の探索（`NARUMI_RECORDER` → `app/.build/{release,debug}/narumi-recorder`）に任せる。`NARUMI_HOME` が設定されていればそのまま引き継ぐ。カレントディレクトリはリポジトリ。stdin は `/dev/null`。
+4. **ポートと URL**: ポートは `NARUMI_SERVER_PORT`（既定 8765）。接続先 URL は `NARUMI_SERVER_URL` があればそれ、無ければ `http://127.0.0.1:<port>/mcp`。`NARUMI_SERVER_URL` だけが設定されている場合はその URL のポートで起動する。
+5. **起動待ち**: 1 秒ごとに `get_server_info` を最大 30 秒試し、応答したら「稼働中 v… 契約 …」。30 秒で応答が無ければ「起動失敗（ログ参照）」— プロセスが生きていればそのまま残す（終了か再起動で止まる）。プロセスが起動直後に終了した場合（`uv` が見つからない、ポート使用中、リポジトリが `uv sync` 未了など）も「起動失敗（ログ参照）」。稼働後にプロセスが終了すると「停止 (exit N)」。
+
+### サーバー関連のメニュー
+
+- 「サーバーを再起動」: SIGTERM で停止してから起動し直す。外部サーバー / 未設定のときは無効。録画中なら確認ダイアログを出す（停止時に server が録画を確定するが、自動処理はされない）。
+- 「リポジトリを選択…」: `NSOpenPanel` でディレクトリを選ぶ。`pyproject.toml` と `server/pyproject.toml` が無ければエラー。`UserDefaults`（`narumi.repoPath`）に保存して再起動する。`NARUMI_REPO` が設定されている間はそちらが優先される旨を表示する。
+- 「ログを開く」: `~/Library/Logs/narumi/server.log` を既定のアプリで開く（無ければ作る）。server の stdout / stderr と、アプリ側の起動・停止メモ（`narumi.app:` 行）が同じファイルに入る。起動時に 5 MiB を超えていたら切り詰める。
+
+### 終了
+
+「終了」（⌘Q）、SIGTERM / SIGINT（`kill`、Terminal から起動した場合の Ctrl-C）はすべて同じ経路（`applicationShouldTerminate`）を通る。
+
+1. このクライアントが開始した録画が進行中なら「録画中です。停止してから終了しますか？」→「停止して終了」で `stop_recording` を呼ぶ。`auto_process` は、アプリが起動したサーバーを直後に停止する場合は **false**（停止するサーバーに process ジョブを積んでも完走できず、SIGKILL で切られるだけ）、外部サーバーの場合は true（サーバーは生き続けてジョブを実行できる）。「キャンセル」で終了を取りやめる。
+2. アプリが起動したサーバーがあれば SIGTERM を送り、最大 60 秒待つ。server は `--http` の SIGTERM を uvicorn の graceful shutdown（開いたままの MCP GET ストリームは 10 秒で打ち切り）の後に `ctx.close()` へ繋ぎ（`transports.graceful_sigterm`）、進行中の録画があれば確定する（recorder の停止タイムアウト 30 秒 + 終了猶予 10 秒 + トラックのハッシュ計算ぶん掛かりうる）。60 秒で終わらなければプロセスグループ（zsh→uv→python→recorder）ごと SIGKILL。
+3. 外部サーバーには触れない。

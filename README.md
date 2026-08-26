@@ -23,6 +23,20 @@ cd app && swift build -c release && cd ..   # 録画ヘルパー narumi-recorder
 
 `uv run narumi doctor` は ffmpeg / ffprobe が見つからないと終了コード 1 で失敗します。録画ヘルパーは `NARUMI_RECORDER` 環境変数、無ければ `app/.build/{release,debug}/narumi-recorder` の順で探します。
 
+## デスクトップアプリの使い方
+
+```sh
+scripts/build-app.sh     # app/ を release ビルドし、dist/narumi.app を組み立てて ad-hoc 署名
+open dist/narumi.app     # メニューバーに 🕵️ が出る。「録画開始…」で録画
+```
+
+`narumi.app` は起動時に `narumi-server`（Streamable HTTP、`http://127.0.0.1:8765/mcp`）を自分で起動し、終了時に停止します。Terminal でサーバーを起動しておく必要はありません。ただしこれは統合計画の**選択肢 1**（アプリがリポジトリの `uv run narumi-server` を起動する）であり、自己完結した配布物ではありません。動かすマシンには **uv と、このリポジトリのチェックアウト（`uv sync` 済み）** が引き続き必要です。
+
+- リポジトリは `NARUMI_REPO` → 「リポジトリを選択…」で保存した設定 → `.app` が `<repo>/dist/narumi.app` にあるならそのリポジトリ、の順で決まります。`scripts/build-app.sh` の出力をそのまま `open` する限り追加設定は要りません。
+- `scripts/dev.sh` などで先にサーバーを起動しておくと、アプリはそれに接続するだけで自分では起動も停止もしません。
+- ポートは `NARUMI_SERVER_PORT`、データルートは `NARUMI_HOME` で変えられます。ログは `~/Library/Logs/narumi/server.log`（メニューの「ログを開く」）。
+- 詳細（起動コマンド、状態表示、終了時の録画確定）は [app/README.md](app/README.md) の「起動フロー」を参照してください。
+
 ## パイプライン概要
 
 ```
@@ -45,6 +59,7 @@ cd app && swift build -c release && cd ..   # 録画ヘルパー narumi-recorder
 | セッションバンドル / manifest / 冪等ステージ実行 | 実装済み |
 | 契約（`contracts/`）と MCP サーバー（v1 の 12 ツール、stdio / Streamable HTTP） | 実装済み |
 | 録画アプリ / `narumi-recorder` | 実装済み（ScreenCaptureKit の実キャプチャ経路は実機での手動確認が未了） |
+| `narumi.app` によるサーバーの起動・停止（Terminal 不要） | 実装済み（uv とリポジトリのチェックアウトが必要。自己完結配布は未対応） |
 | ffmpeg 分離 → Whisper → プレーン議事録（`narumi.pipeline`） | 実装済み（`fake` エンジンで E2E テスト済み。実エンジンは `-m real` の opt-in smoke） |
 | 外部トランスクリプト突合（Notion AI / Zoom / Meet） | 未実装（`register_context` は原文保存のみ） |
 | キースライド抽出（pHash）/ Vision 読解 / 第 3 層話者判定 | 未実装 |
@@ -62,6 +77,7 @@ uv run narumi --help                                     # dev CLI
 uv run narumi-server --stdio                             # MCP サーバー（stdio dev モード）
 uv run narumi-server --http --port 8765                  # MCP サーバー（Streamable HTTP 常駐）
 scripts/dev.sh                                           # HTTP サーバー起動（GAIA_LIBRARY_CMD があれば gaia-library も）
+scripts/build-app.sh && open dist/narumi.app             # メニューバーアプリ（サーバーはアプリが起動する）
 scripts/gen-types.sh                                     # 契約 → pydantic 型生成（生成物はコミットしない）
 cd app && swift build && swift test                      # 録画アプリ / recorder CLI
 ```
@@ -113,7 +129,7 @@ $NARUMI_HOME/
 ```sh
 # stdio
 claude mcp add --transport stdio narumi -- uv --directory /path/to/narumi run narumi-server --stdio
-# Streamable HTTP（scripts/dev.sh などで常駐させておく）
+# Streamable HTTP（narumi.app を起動しておく、または scripts/dev.sh で常駐させておく）
 claude mcp add --transport http narumi http://127.0.0.1:8765/mcp
 ```
 
