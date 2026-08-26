@@ -317,14 +317,16 @@ async def test_process_job_failure_is_recorded(
     def crashing(bundle: Bundle, **kwargs: Any) -> ProcessResult:
         raise NotImplementedError("wired later")
 
+    # Patch BEFORE enqueuing: the job thread starts immediately, and the real refresh_meeting
+    # would otherwise race the patch (it did on CI: ffmpeg + a real engine import timed out).
     monkeypatch.setattr("narumi.pipeline.process_meeting", crashing)
+    monkeypatch.setattr("narumi.pipeline.refresh_meeting", crashing)
     regen = await call(
         client,
         "regenerate",
         {"meeting_id": stopped["meeting_id"], "request_id": rid()},
     )
     assert regen["meeting_id"] == stopped["meeting_id"]
-    monkeypatch.setattr("narumi.pipeline.refresh_meeting", crashing)
     job = await wait_job(ctx, regen["job_id"])
     assert job["status"] == "failed"
     assert job["error"]["code"] == "internal"
