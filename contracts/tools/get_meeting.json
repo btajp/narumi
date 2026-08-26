@@ -1,0 +1,275 @@
+{
+  "name": "get_meeting",
+  "title": "Get meeting",
+  "description": "Return everything known about one meeting: catalog summary, absolute bundle path, processing config, recording status per track, registered external contexts, the list of generated minutes versions, the latest minutes markdown (when include_minutes=true, the default), export history and the keys of every artifact recorded in the bundle manifest. `scope` must cover the meeting's scope: omitted = only unscoped meetings; a single name = that scope + unscoped; an array of 2+ names = explicit cross-scope lookup (audit-logged). Set include_minutes=false to omit the markdown body (`latest_minutes` is then null). Read-only. On failure returns an error_envelope (isError=true) with code: not_found (unknown meeting_id), scope_denied (the meeting belongs to a scope not covered by `scope`), invalid_argument, internal.",
+  "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "meeting_id": { "$ref": "../defs/common.json#/$defs/meeting_id" },
+      "scope": {
+        "$ref": "../defs/common.json#/$defs/scope",
+        "description": "Omitted = unscoped meetings only. One name = that scope + unscoped. Array of 2+ names = cross-scope lookup (audit-logged)."
+      },
+      "include_minutes": {
+        "type": "boolean",
+        "description": "Include the latest minutes markdown in `latest_minutes` (default true).",
+        "default": true
+      }
+    },
+    "required": ["meeting_id"],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": [
+      "meeting",
+      "bundle_path",
+      "config",
+      "recording",
+      "contexts",
+      "minutes_versions",
+      "latest_minutes",
+      "exports",
+      "artifacts"
+    ],
+    "properties": {
+      "meeting": { "$ref": "../defs/common.json#/$defs/meeting_summary" },
+      "bundle_path": {
+        "type": "string",
+        "description": "Absolute path of the session bundle directory.",
+        "minLength": 1
+      },
+      "config": {
+        "$ref": "../defs/common.json#/$defs/meeting_config",
+        "description": "Effective processing config (manifest.config)."
+      },
+      "recording": {
+        "type": "object",
+        "required": ["started_at", "stopped_at", "duration_sec", "tracks"],
+        "properties": {
+          "started_at": {
+            "oneOf": [{ "$ref": "../defs/common.json#/$defs/timestamp" }, { "type": "null" }]
+          },
+          "stopped_at": {
+            "oneOf": [{ "$ref": "../defs/common.json#/$defs/timestamp" }, { "type": "null" }],
+            "description": "null while still recording."
+          },
+          "duration_sec": {
+            "type": ["number", "null"],
+            "description": "Recording length in seconds; null while still recording.",
+            "minimum": 0
+          },
+          "tracks": {
+            "type": "object",
+            "description": "Track name (screen / mic / system) → file status.",
+            "additionalProperties": { "$ref": "../defs/common.json#/$defs/track_status" }
+          }
+        },
+        "additionalProperties": false
+      },
+      "contexts": {
+        "type": "array",
+        "description": "External context sources registered with register_context, in registration order.",
+        "items": {
+          "type": "object",
+          "required": ["context_id", "source_type", "status", "registered_at"],
+          "properties": {
+            "context_id": { "$ref": "../defs/common.json#/$defs/context_id" },
+            "source_type": { "$ref": "../defs/common.json#/$defs/context_source_type" },
+            "status": {
+              "type": "string",
+              "description": "stored (raw only) | parsed (available as transcript source ext-<context_id>) | failed.",
+              "minLength": 1
+            },
+            "registered_at": { "$ref": "../defs/common.json#/$defs/timestamp" },
+            "label": { "type": ["string", "null"] }
+          },
+          "additionalProperties": false
+        }
+      },
+      "minutes_versions": {
+        "type": "array",
+        "description": "All generated minutes versions, ascending. Versions are append-only and never overwritten.",
+        "items": {
+          "type": "object",
+          "required": ["version", "generated_at", "provider", "path"],
+          "properties": {
+            "version": { "type": "integer", "minimum": 1 },
+            "generated_at": { "$ref": "../defs/common.json#/$defs/timestamp" },
+            "provider": {
+              "type": "string",
+              "description": "LLM provider registry name used for generation (none = plain minutes).",
+              "minLength": 1
+            },
+            "path": {
+              "type": "string",
+              "description": "Path of minutes.md relative to bundle_path (minutes/v<N>/minutes.md).",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "latest_minutes": {
+        "description": "Latest minutes markdown, or null when no minutes exist yet or include_minutes=false.",
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["version", "markdown"],
+            "properties": {
+              "version": { "type": "integer", "minimum": 1 },
+              "markdown": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          { "type": "null" }
+        ]
+      },
+      "exports": {
+        "type": "array",
+        "description": "Export history (manifest.exports), in chronological order.",
+        "items": {
+          "type": "object",
+          "required": ["destination", "ref", "minutes_version", "at"],
+          "properties": {
+            "destination": { "$ref": "../defs/common.json#/$defs/export_destination" },
+            "ref": {
+              "type": "string",
+              "description": "Destination-specific reference to the exported document (file path, URL, page id).",
+              "minLength": 1
+            },
+            "minutes_version": { "type": "integer", "minimum": 1 },
+            "at": { "$ref": "../defs/common.json#/$defs/timestamp" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "artifacts": {
+        "type": "array",
+        "description": "Sorted keys of manifest.artifacts: one per deterministic stage output, each recorded with its input hashes and parameters. Key format is `<bundle subdir>/<name>[/<qualifier>]`; v1 keys in stage order: preprocess/audio/mic, preprocess/audio/system, transcripts/own-mic, transcripts/own-system, transcripts/ext-<context_id> (once parsed), diarization/layer1, diarization/layer2 (engine name in its params; absent when diarization_engine=none), merged/alignment, merged/merged (its speaker_map is also copied to merged/speaker_map.json, which is not an artifact), minutes/v<N> (one per version). Informational; use get_transcript for content.",
+        "items": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]*(/[A-Za-z0-9._-]+)+$"
+        },
+        "uniqueItems": true
+      }
+    },
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "scope": "cloudnative"
+      },
+      {
+        "meeting_id": "20260826T010000Z-0badf00d",
+        "include_minutes": false
+      }
+    ],
+    "output": [
+      {
+        "meeting": {
+          "meeting_id": "20260827T030500Z-a1b2c3d4",
+          "meeting_name": "週次定例",
+          "engagement": "acme-onboarding",
+          "scope": "cloudnative",
+          "status": "ready",
+          "started_at": "2026-08-27T03:05:00Z",
+          "stopped_at": "2026-08-27T04:02:10Z",
+          "latest_minutes_version": 2
+        },
+        "bundle_path": "/Users/me/Library/Application Support/narumi/meetings/20260827T030500Z-a1b2c3d4",
+        "config": {
+          "transcription_engine": "auto",
+          "diarization_engine": "none",
+          "llm_provider": "none",
+          "external_send_policy": "local_only",
+          "language": "ja",
+          "self_name": "岡村",
+          "vocab_hints": ["gaia-library"]
+        },
+        "recording": {
+          "started_at": "2026-08-27T03:05:00Z",
+          "stopped_at": "2026-08-27T04:02:10Z",
+          "duration_sec": 3430.2,
+          "tracks": {
+            "screen": {
+              "path": "tracks/screen.mp4",
+              "sha256": null,
+              "bytes": null,
+              "duration_sec": null,
+              "discarded": true
+            },
+            "mic": {
+              "path": "tracks/mic.m4a",
+              "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+              "bytes": 41943040,
+              "duration_sec": 3430.1,
+              "discarded": false
+            },
+            "system": {
+              "path": "tracks/system.m4a",
+              "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+              "bytes": 41000000,
+              "duration_sec": 3430.1,
+              "discarded": false
+            }
+          }
+        },
+        "contexts": [
+          {
+            "context_id": "ctx-0123abcd",
+            "source_type": "notion_ai_minutes",
+            "status": "stored",
+            "registered_at": "2026-08-27T04:10:00Z",
+            "label": "Notion AI 議事録"
+          }
+        ],
+        "minutes_versions": [
+          {
+            "version": 1,
+            "generated_at": "2026-08-27T04:05:00Z",
+            "provider": "none",
+            "path": "minutes/v1/minutes.md"
+          },
+          {
+            "version": 2,
+            "generated_at": "2026-08-27T04:12:00Z",
+            "provider": "none",
+            "path": "minutes/v2/minutes.md"
+          }
+        ],
+        "latest_minutes": {
+          "version": 2,
+          "markdown": "# 週次定例\n\n## 決定事項\n- オンボーディング資料を来週までに更新する\n"
+        },
+        "exports": [
+          {
+            "destination": "markdown",
+            "ref": "/Users/me/Documents/minutes/週次定例.md",
+            "minutes_version": 2,
+            "at": "2026-08-27T04:15:00Z"
+          }
+        ],
+        "artifacts": [
+          "diarization/layer1",
+          "merged/alignment",
+          "merged/merged",
+          "minutes/v1",
+          "minutes/v2",
+          "preprocess/audio/mic",
+          "preprocess/audio/system",
+          "transcripts/own-mic",
+          "transcripts/own-system"
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,117 @@
+{
+  "name": "get_transcript",
+  "title": "Get transcript",
+  "description": "Return the timestamped transcript segments of one source of a meeting. `source` selects which transcript: `merged` (default) = the integrated transcript (merged/merged.json) with speaker labels resolved to names; `own-mic` / `own-system` = the raw transcription of the microphone / system-audio track; `ext-<context_id>` = a parsed external transcript registered with register_context. `speaker_map` maps speaker labels (me / other / SPEAKER_00 …) to resolved display names (null = unresolved; minutes show such speakers as 話者不明) with a 0..1 confidence. `available_sources` lists every source that currently exists for the meeting. Segment times are seconds from the recording start. Read-only. On failure returns an error_envelope (isError=true) with code: not_found (unknown meeting, or the requested source has not been produced yet — check available_sources and the processing job), scope_denied, invalid_argument (malformed source), internal.",
+  "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "meeting_id": { "$ref": "../defs/common.json#/$defs/meeting_id" },
+      "source": {
+        "type": "string",
+        "description": "Transcript source id: merged (default) | own-mic | own-system | ext-<context_id> (e.g. ext-ctx-0123abcd).",
+        "pattern": "^(merged|own-mic|own-system|ext-ctx-[0-9a-f]{8,32})$",
+        "default": "merged"
+      },
+      "scope": {
+        "$ref": "../defs/common.json#/$defs/scope",
+        "description": "Omitted = unscoped meetings only. One name = that scope + unscoped. Array of 2+ names = cross-scope lookup (audit-logged)."
+      }
+    },
+    "required": ["meeting_id"],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["meeting_id", "source", "segments", "speaker_map", "available_sources"],
+    "properties": {
+      "meeting_id": { "$ref": "../defs/common.json#/$defs/meeting_id" },
+      "source": {
+        "type": "string",
+        "description": "The source id that was returned.",
+        "pattern": "^(merged|own-mic|own-system|ext-ctx-[0-9a-f]{8,32})$"
+      },
+      "segments": {
+        "type": "array",
+        "description": "Segments in time order. For `merged`, `speaker` is the label and `speaker_name` the resolved name (null if unresolved).",
+        "items": { "$ref": "../defs/common.json#/$defs/segment" }
+      },
+      "speaker_map": {
+        "type": "object",
+        "description": "Speaker label → resolved identity.",
+        "additionalProperties": {
+          "type": "object",
+          "required": ["name", "confidence"],
+          "properties": {
+            "name": {
+              "type": ["string", "null"],
+              "description": "Resolved display name, or null when unresolved."
+            },
+            "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "available_sources": {
+        "type": "array",
+        "description": "Source ids that exist for this meeting right now (subset of merged / own-mic / own-system / ext-<context_id>).",
+        "items": { "type": "string", "minLength": 1 },
+        "uniqueItems": true
+      }
+    },
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4"
+      },
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "source": "own-mic",
+        "scope": "cloudnative"
+      },
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "source": "ext-ctx-0123abcd",
+        "scope": ["cloudnative", "btcon"]
+      }
+    ],
+    "output": [
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "source": "merged",
+        "segments": [
+          {
+            "id": "merged:0",
+            "start": 0.0,
+            "end": 4.2,
+            "text": "では定例を始めます。",
+            "speaker": "me",
+            "speaker_name": "岡村",
+            "confidence": 0.93
+          },
+          {
+            "id": "merged:1",
+            "start": 4.5,
+            "end": 9.8,
+            "text": "先週のオンボーディングの進捗から共有します。",
+            "speaker": "other",
+            "speaker_name": null,
+            "confidence": 0.88
+          }
+        ],
+        "speaker_map": {
+          "me": { "name": "岡村", "confidence": 1.0 },
+          "other": { "name": null, "confidence": 0.0 }
+        },
+        "available_sources": ["merged", "own-mic", "own-system"]
+      }
+    ]
+  }
+}

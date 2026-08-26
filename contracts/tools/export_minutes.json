@@ -1,0 +1,100 @@
+{
+  "name": "export_minutes",
+  "title": "Export minutes",
+  "description": "Export one minutes version of a meeting through a registered exporter (call list_export_destinations for the destination names and their per-destination `options` schema). `minutes_version` defaults to the latest version. With run_async=false (default) the export runs synchronously and `result` is returned; with run_async=true an `export` job is enqueued and `job_id` is returned instead — poll get_job_status, whose `result` then has the same shape as `result` here. Exactly one of result / job_id is present. Every completed export is appended to manifest.exports (visible in get_meeting.exports). `options` is validated against the destination's options_schema before anything runs (e.g. {\"output_path\": \"/abs/path/out.md\"} for markdown / html; unknown keys are rejected). File exporters write only to an absolute `output_path` (default <NARUMI_HOME>/exports/<meeting_id>-v<n>.<ext>) and never overwrite an existing file or slides directory unless options.overwrite=true. Destinations that send data off this machine are subject to the meeting's external_send_policy. `scope` is the scope selector (default deny: a scoped meeting needs its scope in the request). `request_id` is the client-generated idempotency key: repeating the call returns the original result / job_id without exporting twice. On failure returns an error_envelope (isError=true) with code: not_found (unknown meeting, minutes_version or destination), scope_denied (the request does not cover the meeting's scope), policy_violation (destination not allowed by external_send_policy), invalid_argument (options rejected by the destination's options_schema, a relative output_path, or an existing target without overwrite=true), busy (a job is queued / running for the meeting), internal.",
+  "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "meeting_id": { "$ref": "../defs/common.json#/$defs/meeting_id" },
+      "scope": { "$ref": "../defs/common.json#/$defs/scope" },
+      "destination": {
+        "$ref": "../defs/common.json#/$defs/export_destination",
+        "description": "Exporter registry name from list_export_destinations (e.g. markdown, html)."
+      },
+      "options": {
+        "type": "object",
+        "description": "Destination-specific options, validated against the exporter's options_schema (e.g. {\"output_path\": \"/path/out.md\"} for markdown).",
+        "additionalProperties": true
+      },
+      "minutes_version": {
+        "type": "integer",
+        "description": "Minutes version to export (see get_meeting.minutes_versions). Defaults to the latest.",
+        "minimum": 1
+      },
+      "request_id": { "$ref": "../defs/common.json#/$defs/request_id" },
+      "run_async": {
+        "type": "boolean",
+        "description": "Enqueue as an export job and return job_id instead of waiting (default false).",
+        "default": false
+      }
+    },
+    "required": ["meeting_id", "destination", "request_id"],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "result": {
+        "type": "object",
+        "description": "Present for synchronous exports.",
+        "required": ["destination", "ref", "minutes_version", "at"],
+        "properties": {
+          "destination": { "$ref": "../defs/common.json#/$defs/export_destination" },
+          "ref": {
+            "type": "string",
+            "description": "Destination-specific reference to the exported document (file path, URL, page id).",
+            "minLength": 1
+          },
+          "minutes_version": { "type": "integer", "minimum": 1 },
+          "at": { "$ref": "../defs/common.json#/$defs/timestamp" }
+        },
+        "additionalProperties": false
+      },
+      "job_id": {
+        "$ref": "../defs/common.json#/$defs/job_id",
+        "description": "Present for run_async=true: the enqueued export job."
+      }
+    },
+    "required": [],
+    "oneOf": [{ "required": ["result"] }, { "required": ["job_id"] }],
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "destination": "markdown",
+        "options": { "output_path": "/Users/me/Documents/minutes/週次定例.md" },
+        "request_id": "c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f"
+      },
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "scope": "cloudnative",
+        "destination": "html",
+        "options": { "output_path": "/Users/me/Documents/minutes/週次定例.html", "overwrite": true },
+        "minutes_version": 1,
+        "request_id": "d2e3f4a5-b6c7-4d8e-9f0a-1b2c3d4e5f6a",
+        "run_async": true
+      }
+    ],
+    "output": [
+      {
+        "result": {
+          "destination": "markdown",
+          "ref": "/Users/me/Documents/minutes/週次定例.md",
+          "minutes_version": 2,
+          "at": "2026-08-27T04:15:00Z"
+        }
+      },
+      {
+        "job_id": "job-fedcba987654"
+      }
+    ]
+  }
+}

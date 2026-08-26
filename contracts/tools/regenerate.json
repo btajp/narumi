@@ -1,0 +1,65 @@
+{
+  "name": "regenerate",
+  "title": "Regenerate minutes",
+  "description": "Bring a meeting's minutes up to date as a background job (kind `regenerate`). The deterministic stages (ffmpeg preprocessing, transcription, diarization) run idempotently first: each is skipped when its recorded input hashes and parameters are unchanged and only runs when it never ran (a meeting stopped with auto_process=false, a process job that failed) or when set_meeting_config changed its parameters (transcription_engine, diarization_engine, language, vocab_hints). Then alignment → LLM integration → minutes generation run with the same idempotency: a new minutes version is appended only when something changed — existing versions are never overwritten. Use it after set_meeting_config or register_context, to process a meeting stopped with auto_process=false, or to retry a failed process job. `force=true` re-runs alignment, integration and generation even when their inputs are unchanged (still appending a new version); preprocessing and transcription are never forced. `reason` is recorded in manifest.regenerations. `scope` is the scope selector (default deny: a scoped meeting needs its scope in the request). `request_id` is the client-generated idempotency key: repeating the call returns the same job_id. On failure returns an error_envelope (isError=true) with code: not_found (unknown meeting), scope_denied (the request does not cover the meeting's scope), busy (the meeting is still recording, or a job is already queued / running for it), policy_violation (the configured llm_provider or engines are not allowed by external_send_policy — nothing is silently downgraded), engine_unavailable (configured engine / provider not installed), invalid_argument, internal. Failures inside the job are reported by get_job_status.",
+  "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "meeting_id": { "$ref": "../defs/common.json#/$defs/meeting_id" },
+      "scope": { "$ref": "../defs/common.json#/$defs/scope" },
+      "request_id": { "$ref": "../defs/common.json#/$defs/request_id" },
+      "force": {
+        "type": "boolean",
+        "description": "Re-run all stages from alignment even if inputs/params are unchanged (default false).",
+        "default": false
+      },
+      "reason": {
+        "type": "string",
+        "description": "Free-text reason recorded in manifest.regenerations (e.g. \"added Notion transcript\").",
+        "minLength": 1,
+        "maxLength": 500
+      }
+    },
+    "required": ["meeting_id", "request_id"],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["job_id", "meeting_id"],
+    "properties": {
+      "job_id": {
+        "$ref": "../defs/common.json#/$defs/job_id",
+        "description": "The enqueued regenerate job; poll with get_job_status."
+      },
+      "meeting_id": { "$ref": "../defs/common.json#/$defs/meeting_id" }
+    },
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "request_id": "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f"
+      },
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "scope": "cloudnative",
+        "request_id": "7d8e9f0a-1b2c-4d3e-9f4a-5b6c7d8e9f0a",
+        "force": true,
+        "reason": "switched llm_provider to claude-agent-sdk"
+      }
+    ],
+    "output": [
+      {
+        "job_id": "job-0123456789ab",
+        "meeting_id": "20260827T030500Z-a1b2c3d4"
+      }
+    ]
+  }
+}

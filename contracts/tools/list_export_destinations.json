@@ -1,0 +1,70 @@
+{
+  "name": "list_export_destinations",
+  "title": "List export destinations",
+  "description": "List the export destinations registered on this server. Each entry gives the registry name to pass as export_minutes.destination, a human-readable description, and — when the exporter declares one — a JSON Schema (`options_schema`) describing the `options` argument of export_minutes. Read-only, takes no arguments. On failure returns an error_envelope (isError=true) with code: internal.",
+  "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "description": "No arguments.",
+    "properties": {},
+    "required": [],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["destinations"],
+    "properties": {
+      "destinations": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["name", "description"],
+          "properties": {
+            "name": { "$ref": "../defs/common.json#/$defs/export_destination" },
+            "description": {
+              "type": "string",
+              "description": "What the exporter produces and where."
+            },
+            "options_schema": {
+              "type": "object",
+              "description": "JSON Schema for export_minutes.options. Absent when the exporter takes no options.",
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [{}, {}],
+    "output": [
+      {
+        "destinations": [
+          {
+            "name": "markdown",
+            "description": "Write minutes.md to a local path (defaults to <NARUMI_HOME>/exports/<meeting_id>-v<n>.md).",
+            "options_schema": {
+              "type": "object",
+              "properties": {
+                "output_path": { "type": "string", "description": "Absolute destination path." },
+                "overwrite": { "type": "boolean", "description": "Replace an existing file (default false)." }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "html",
+            "description": "Render minutes as a standalone HTML file."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,103 @@
+{
+  "name": "list_meetings",
+  "title": "List meetings",
+  "description": "List meetings from the catalog, newest first. `query` is a free-text search over meeting name, engagement and transcript text. `range` filters by recording start time (inclusive from, exclusive to). `scope` is the confidentiality boundary and defaults to deny: omitted = only meetings with no scope; a single scope name = meetings in that scope plus unscoped meetings; an array of 2 or more names = explicit cross-scope query, which is written to the audit log. `limit` caps the number of results (1..500, default 50). Read-only; use get_meeting for details. On failure returns an error_envelope (isError=true) with code: scope_denied, invalid_argument (bad range or limit), internal.",
+  "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "Free-text search (meeting name, engagement, transcript full-text). Omit to list all.",
+        "minLength": 1,
+        "maxLength": 500
+      },
+      "range": {
+        "type": "object",
+        "description": "Filter by recording start time. Both bounds optional.",
+        "properties": {
+          "from": {
+            "$ref": "../defs/common.json#/$defs/timestamp",
+            "description": "Include meetings started at or after this time."
+          },
+          "to": {
+            "$ref": "../defs/common.json#/$defs/timestamp",
+            "description": "Include meetings started before this time."
+          }
+        },
+        "additionalProperties": false
+      },
+      "scope": {
+        "$ref": "../defs/common.json#/$defs/scope",
+        "description": "Omitted = unscoped meetings only. One name = that scope + unscoped. Array of 2+ names = cross-scope query (audit-logged)."
+      },
+      "limit": {
+        "type": "integer",
+        "description": "Maximum number of meetings to return (1..500, default 50).",
+        "minimum": 1,
+        "maximum": 500,
+        "default": 50
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["meetings"],
+    "properties": {
+      "meetings": {
+        "type": "array",
+        "description": "Matching meetings, newest first.",
+        "items": { "$ref": "../defs/common.json#/$defs/meeting_summary" }
+      }
+    },
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {},
+      {
+        "query": "オンボーディング",
+        "range": { "from": "2026-08-01T00:00:00Z", "to": "2026-09-01T00:00:00Z" },
+        "scope": ["cloudnative", "btcon"],
+        "limit": 20
+      },
+      {
+        "scope": "cloudnative",
+        "limit": 5
+      }
+    ],
+    "output": [
+      {
+        "meetings": [
+          {
+            "meeting_id": "20260827T030500Z-a1b2c3d4",
+            "meeting_name": "週次定例",
+            "engagement": "acme-onboarding",
+            "scope": "cloudnative",
+            "status": "ready",
+            "started_at": "2026-08-27T03:05:00Z",
+            "stopped_at": "2026-08-27T04:02:10Z",
+            "latest_minutes_version": 2
+          },
+          {
+            "meeting_id": "20260826T010000Z-0badf00d",
+            "meeting_name": "会議 2026-08-26 10:00",
+            "engagement": null,
+            "scope": null,
+            "status": "recording",
+            "started_at": "2026-08-26T01:00:00Z",
+            "stopped_at": null,
+            "latest_minutes_version": null
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,111 @@
+{
+  "name": "get_server_info",
+  "title": "Get server info",
+  "description": "Return the narumi server identity, version and capabilities. `capabilities` reports whether recording can be attempted on this machine (narumi-recorder binary present and no permission known to be denied; `permissions` gives the per-permission state from `narumi-recorder check`), the active transports, and the registry names of the installed transcription engines, diarization engines, LLM providers and export destinations. Call this first to learn which names are valid for set_meeting_config / export_minutes and to detect a contract_version mismatch with your client. Read-only, takes no arguments. On failure returns an error_envelope (isError=true) with code: internal.",
+  "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "description": "No arguments.",
+    "properties": {},
+    "required": [],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["name", "server_version", "contract_version", "capabilities"],
+    "properties": {
+      "name": {
+        "type": "string",
+        "const": "narumi",
+        "description": "Always \"narumi\"."
+      },
+      "server_version": {
+        "type": "string",
+        "description": "Version of the narumi_server package."
+      },
+      "contract_version": {
+        "type": "string",
+        "description": "Semantic version of the tool contracts this server implements (contracts/manifest.json).",
+        "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$"
+      },
+      "capabilities": {
+        "type": "object",
+        "required": [
+          "recording",
+          "transports",
+          "transcription_engines",
+          "diarization_engines",
+          "llm_providers",
+          "export_destinations"
+        ],
+        "properties": {
+          "recording": {
+            "type": "boolean",
+            "description": "True when start_recording can be attempted: narumi-recorder found, its permission check succeeded and microphone access is not denied. Screen recording is not part of this flag because macOS reports it as denied until it was granted once (the first start_recording triggers the prompt); see permissions for the raw state."
+          },
+          "permissions": {
+            "type": "object",
+            "description": "Permission state reported by `narumi-recorder check`. Present when the recorder binary is found and the check succeeded. `unknown` = not asked yet.",
+            "required": ["screen_recording", "microphone"],
+            "properties": {
+              "screen_recording": { "type": "string", "enum": ["granted", "denied", "unknown"] },
+              "microphone": { "type": "string", "enum": ["granted", "denied", "unknown"] }
+            },
+            "additionalProperties": false
+          },
+          "transports": {
+            "type": "array",
+            "description": "Active MCP transports, e.g. [\"stdio\"] or [\"streamable-http\"].",
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "transcription_engines": {
+            "type": "array",
+            "description": "Registry names usable as transcription_engine (e.g. auto, fake, mlx-whisper, faster-whisper).",
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "diarization_engines": {
+            "type": "array",
+            "description": "Registry names usable as diarization_engine (e.g. none, fake, pyannote).",
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "llm_providers": {
+            "type": "array",
+            "description": "Registry names usable as llm_provider (e.g. none, fake, claude-agent-sdk, anthropic-api, ollama).",
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "export_destinations": {
+            "type": "array",
+            "description": "Registry names accepted by export_minutes.destination (e.g. markdown, html).",
+            "items": { "$ref": "../defs/common.json#/$defs/export_destination" }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [{}, {}],
+    "output": [
+      {
+        "name": "narumi",
+        "server_version": "0.1.0",
+        "contract_version": "1.0.0",
+        "capabilities": {
+          "recording": true,
+          "permissions": { "screen_recording": "granted", "microphone": "unknown" },
+          "transports": ["streamable-http"],
+          "transcription_engines": ["auto", "fake", "mlx-whisper", "faster-whisper"],
+          "diarization_engines": ["none", "fake"],
+          "llm_providers": ["none", "fake", "claude-agent-sdk"],
+          "export_destinations": ["markdown", "html"]
+        }
+      }
+    ]
+  }
+}

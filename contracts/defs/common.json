@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "narumi:defs/common.json",
+  "title": "narumi common contract definitions",
+  "$defs": {
+    "meeting_id": {
+      "type": "string",
+      "description": "Meeting identifier: UTC recording start + 8 hex chars, e.g. 20260827T030500Z-a1b2c3d4",
+      "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$"
+    },
+    "request_id": {
+      "type": "string",
+      "description": "Client-generated idempotency key for write operations (UUID recommended). Repeating a call with the same request_id returns the original result.",
+      "minLength": 8,
+      "maxLength": 128
+    },
+    "job_id": {
+      "type": "string",
+      "description": "Server-issued job identifier for long-running operations.",
+      "pattern": "^job-[0-9a-f]{12,32}$"
+    },
+    "context_id": {
+      "type": "string",
+      "description": "Identifier of an externally registered context source.",
+      "pattern": "^ctx-[0-9a-f]{8,32}$"
+    },
+    "scope_name": {
+      "type": "string",
+      "description": "Affiliation (所属元) name that acts as a confidentiality boundary, e.g. cloudnative.",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "scope": {
+      "description": "Scope selector. Omitted = only unscoped meetings (default deny). A single name = that scope plus unscoped meetings. An array with 2+ names = explicit cross-scope query (those scopes plus unscoped), which is audit-logged.",
+      "oneOf": [
+        { "$ref": "#/$defs/scope_name" },
+        { "type": "array", "items": { "$ref": "#/$defs/scope_name" }, "minItems": 1, "uniqueItems": true }
+      ]
+    },
+    "timestamp": {
+      "type": "string",
+      "description": "ISO 8601 timestamp in UTC (e.g. 2026-08-27T03:05:00Z).",
+      "format": "date-time"
+    },
+    "external_send_policy": {
+      "type": "string",
+      "description": "What may leave the machine. local_only: nothing. subscription_ok: subscription providers (Claude Agent SDK / Codex) allowed. api_ok: metered APIs allowed too.",
+      "enum": ["local_only", "subscription_ok", "api_ok"]
+    },
+    "job_status": {
+      "type": "string",
+      "enum": ["queued", "running", "succeeded", "failed", "cancelled"]
+    },
+    "job_kind": {
+      "type": "string",
+      "enum": ["process", "regenerate", "export"]
+    },
+    "job": {
+      "type": "object",
+      "required": ["job_id", "kind", "status", "created_at", "updated_at"],
+      "properties": {
+        "job_id": { "$ref": "#/$defs/job_id" },
+        "meeting_id": { "$ref": "#/$defs/meeting_id" },
+        "kind": { "$ref": "#/$defs/job_kind" },
+        "status": { "$ref": "#/$defs/job_status" },
+        "progress": {
+          "type": "object",
+          "description": "Free-form progress info (stage name, fraction).",
+          "properties": {
+            "stage": { "type": "string" },
+            "fraction": { "type": "number", "minimum": 0, "maximum": 1 }
+          },
+          "additionalProperties": true
+        },
+        "result": { "type": "object", "additionalProperties": true },
+        "error": { "$ref": "#/$defs/error" },
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "updated_at": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "error_code": {
+      "type": "string",
+      "enum": [
+        "not_found",
+        "scope_denied",
+        "contract_mismatch",
+        "busy",
+        "invalid_argument",
+        "policy_violation",
+        "recorder_unavailable",
+        "engine_unavailable",
+        "internal"
+      ]
+    },
+    "error": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "$ref": "#/$defs/error_code" },
+        "message": { "type": "string" },
+        "details": { "type": "object", "additionalProperties": true }
+      },
+      "additionalProperties": false
+    },
+    "error_envelope": {
+      "type": "object",
+      "description": "Structured content returned with isError=true.",
+      "required": ["error"],
+      "properties": { "error": { "$ref": "#/$defs/error" } },
+      "additionalProperties": false
+    },
+    "meeting_config": {
+      "type": "object",
+      "properties": {
+        "transcription_engine": { "type": "string", "description": "Registry name: auto | fake | mlx-whisper | faster-whisper" },
+        "diarization_engine": { "type": "string", "description": "Registry name: none | fake | pyannote" },
+        "llm_provider": { "type": "string", "description": "Registry name: none | fake | claude-agent-sdk | anthropic-api | ollama" },
+        "external_send_policy": { "$ref": "#/$defs/external_send_policy" },
+        "language": { "type": "string", "description": "BCP-47-ish language code for transcription, e.g. ja" },
+        "self_name": { "type": ["string", "null"], "description": "Display name for the microphone track speaker (me)." },
+        "vocab_hints": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "track_status": {
+      "type": "object",
+      "required": ["path", "discarded"],
+      "properties": {
+        "path": { "type": "string" },
+        "sha256": { "type": ["string", "null"] },
+        "bytes": { "type": ["integer", "null"] },
+        "duration_sec": { "type": ["number", "null"] },
+        "discarded": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "meeting_summary": {
+      "type": "object",
+      "required": ["meeting_id", "meeting_name", "status", "started_at"],
+      "properties": {
+        "meeting_id": { "$ref": "#/$defs/meeting_id" },
+        "meeting_name": { "type": "string" },
+        "engagement": { "type": ["string", "null"] },
+        "scope": { "type": ["string", "null"] },
+        "status": { "type": "string", "enum": ["recording", "recorded", "processing", "ready", "failed"] },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "stopped_at": { "oneOf": [ { "$ref": "#/$defs/timestamp" }, { "type": "null" } ] },
+        "latest_minutes_version": { "type": ["integer", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "segment": {
+      "type": "object",
+      "required": ["id", "start", "end", "text"],
+      "properties": {
+        "id": { "type": "string" },
+        "start": { "type": "number", "minimum": 0 },
+        "end": { "type": "number", "minimum": 0 },
+        "text": { "type": "string" },
+        "speaker": { "type": ["string", "null"], "description": "Speaker label (me / other / SPEAKER_00 …) or resolved name." },
+        "speaker_name": { "type": ["string", "null"] },
+        "confidence": { "type": ["number", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "context_source_type": {
+      "type": "string",
+      "enum": ["notion_ai_minutes", "zoom_transcript", "meet_transcript", "teams_transcript", "chat_log", "document", "text", "url", "file"]
+    },
+    "export_destination": {
+      "type": "string",
+      "description": "Exporter registry name, e.g. markdown | html | notion | gaia-library",
+      "minLength": 1
+    }
+  }
+}
