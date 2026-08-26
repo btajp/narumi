@@ -1,0 +1,255 @@
+import Foundation
+
+enum MCPClientError: Error, CustomStringConvertible {
+    case transport(String)
+    case httpStatus(Int, String)
+    case protocolError(String)
+    case rpc(code: Int, message: String)
+    /// `isError: true` from `tools/call`; `payload` is the structured `{"error": ...}` when present.
+    case tool(message: String, payload: JSONNode?)
+
+    var description: String {
+        switch self {
+        case .transport(let message): return "接続できません: \(message)"
+        case .httpStatus(let status, let body): return "HTTP \(status): \(body)"
+        case .protocolError(let message): return "プロトコルエラー: \(message)"
+        case .rpc(let code, let message): return "JSON-RPC エラー \(code): \(message)"
+        case .tool(let message, _): return message
+        }
+    }
+}
+
+struct ToolCallResult: Sendable {
+    let structuredContent: JSONNode?
+    let text: String
+    let isError: Bool
+}
+
+/// Minimal MCP Streamable HTTP client (JSON-RPC 2.0 over POST) for the narumi server.
+///
+/// Handles `initialize` → `notifications/initialized` once, keeps `Mcp-Session-Id`, and accepts
+/// both `application/json` and `text/event-stream` responses.
+actor MCPClient {
+    static let protocolVersion = "2025-06-18"
+    static let clientName = "narumi-menubar"
+
+    let serverURL: URL
+    private let clientVersion: String
+    private let session: URLSession
+    private var sessionID: String?
+    private var initialized = false
+    private var nextID = 1
+
+    init(serverURL: URL, clientVersion: String) {
+        self.serverURL = serverURL
+        self.clientVersion = clientVersion
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 120
+        session = URLSession(configuration: configuration)
+    }
+
+    static func serverURLFromEnvironment() -> URL {
+        let fallback = URL(string: "http://127.0.0.1:8765/mcp")!
+        guard let raw = ProcessInfo.processInfo.environment["NARUMI_SERVER_URL"], !raw.isEmpty else {
+            return fallback
+        }
+        return URL(string: raw) ?? fallback
+    }
+
+    // MARK: Public API
+
+    /// `tools/call`. Throws `MCPClientError.tool` when the server reports `isError`.
+    func callTool(_ name: String, arguments: [String: JSONNode]) async throws -> ToolCallResult {
+        try await ensureInitialized()
+        let params: JSONNode = .object(["name": .string(name), "arguments": .object(arguments)])
+        let result: JSONNode
+        do {
+            result = try await request(method: "tools/call", params: params)
+        } catch MCPClientError.httpStatus(404, let body) {
+            // Session expired on the server side: re-initialize once and retry.
+            sessionID = nil
+            initialized = false
+            try await ensureInitialized()
+            do {
+                result = try await request(method: "tools/call", params: params)
+            } catch {
+                throw MCPClientError.httpStatus(404, body)
+            }
+        }
+        let structured = result["structuredContent"]
+        let isError = result["isError"]?.boolValue ?? false
+        var texts: [String] = []
+        if case .array(let contents)? = result["content"] {
+            for content in contents {
+                if content["type"]?.stringValue == "text", let text = content["text"]?.stringValue {
+                    texts.append(text)
+                }
+            }
+        }
+        let text = texts.joined(separator: "\n")
+        let callResult = ToolCallResult(structuredContent: structured, text: text, isError: isError)
+        if isError {
+            throw MCPClientError.tool(message: MCPClient.errorMessage(from: callResult), payload: structured)
+        }
+        return callResult
+    }
+
+    /// Drop the session so the next call re-initializes (used after connection failures).
+    func reset() {
+        sessionID = nil
+        initialized = false
+    }
+
+    static func errorMessage(from result: ToolCallResult) -> String {
+        if let error = result.structuredContent?["error"] {
+            let code = error["code"]?.stringValue ?? "error"
+            let message = error["message"]?.stringValue ?? ""
+            return "\(code): \(message)"
+        }
+        return result.text.isEmpty ? "ツールがエラーを返しました" : result.text
+    }
+
+    // MARK: Session
+
+    private func ensureInitialized() async throws {
+        if initialized {
+            return
+        }
+        let params: JSONNode = .object([
+            "protocolVersion": .string(MCPClient.protocolVersion),
+            "capabilities": .object([:]),
+            "clientInfo": .object([
+                "name": .string(MCPClient.clientName),
+                "version": .string(clientVersion),
+            ]),
+        ])
+        _ = try await request(method: "initialize", params: params)
+        try await notify(method: "notifications/initialized")
+        initialized = true
+    }
+
+    // MARK: Transport
+
+    private func request(method: String, params: JSONNode) async throws -> JSONNode {
+        let id = nextID
+        nextID += 1
+        let body: JSONNode = .object([
+            "jsonrpc": .string("2.0"),
+            "id": .number(Double(id)),
+            "method": .string(method),
+            "params": params,
+        ])
+        let (data, response) = try await post(body)
+        let message = try MCPClient.extractResponse(data: data, response: response, expectedID: id)
+        if let error = message["error"] {
+            let code = Int(error["code"].flatMap { node -> Double? in
+                if case .number(let value) = node { return value }
+                return nil
+            } ?? -1)
+            throw MCPClientError.rpc(code: code, message: error["message"]?.stringValue ?? "unknown error")
+        }
+        guard let result = message["result"] else {
+            throw MCPClientError.protocolError("response without result for \(method)")
+        }
+        return result
+    }
+
+    private func notify(method: String) async throws {
+        let body: JSONNode = .object([
+            "jsonrpc": .string("2.0"),
+            "method": .string(method),
+        ])
+        _ = try await post(body)
+    }
+
+    private func post(_ body: JSONNode) async throws -> (Data, HTTPURLResponse) {
+        var request = URLRequest(url: serverURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
+        request.setValue(MCPClient.protocolVersion, forHTTPHeaderField: "MCP-Protocol-Version")
+        if let sessionID {
+            request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+        }
+        request.httpBody = try body.serialized()
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw MCPClientError.transport(error.localizedDescription)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw MCPClientError.protocolError("non-HTTP response")
+        }
+        if let newSessionID = http.value(forHTTPHeaderField: "Mcp-Session-Id"), !newSessionID.isEmpty {
+            sessionID = newSessionID
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let text = String(data: data, encoding: .utf8) ?? ""
+            throw MCPClientError.httpStatus(http.statusCode, text)
+        }
+        return (data, http)
+    }
+
+    /// Pick the JSON-RPC response with `expectedID` from a JSON body or an SSE stream.
+    static func extractResponse(data: Data, response: HTTPURLResponse, expectedID: Int) throws -> JSONNode {
+        let contentType = response.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
+        let candidates: [JSONNode]
+        if contentType.contains("text/event-stream") {
+            candidates = try parseSSE(data).map(JSONNode.parse)
+        } else {
+            let node = try JSONNode.parse(data)
+            if case .array(let batch) = node {
+                candidates = batch
+            } else {
+                candidates = [node]
+            }
+        }
+        for candidate in candidates {
+            if case .number(let id)? = candidate["id"], Int(id) == expectedID {
+                return candidate
+            }
+        }
+        throw MCPClientError.protocolError("no response with id \(expectedID)")
+    }
+
+    /// `data:` payloads of every SSE event in the body (multi-line data joined with `\n`).
+    static func parseSSE(_ data: Data) throws -> [Data] {
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw MCPClientError.protocolError("SSE body is not UTF-8")
+        }
+        var events: [Data] = []
+        var current: [String] = []
+        func flush() {
+            if !current.isEmpty {
+                let joined = current.joined(separator: "\n")
+                if !joined.trimmingCharacters(in: .whitespaces).isEmpty {
+                    events.append(Data(joined.utf8))
+                }
+                current.removeAll()
+            }
+        }
+        for rawLine in text.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" || $0 == "\r\n" }) {
+            let line = String(rawLine)
+            if line.isEmpty {
+                flush()
+                continue
+            }
+            if line.hasPrefix(":") {
+                continue
+            }
+            if line.hasPrefix("data:") {
+                var value = String(line.dropFirst("data:".count))
+                if value.hasPrefix(" ") {
+                    value.removeFirst()
+                }
+                current.append(value)
+            }
+        }
+        flush()
+        return events
+    }
+}
