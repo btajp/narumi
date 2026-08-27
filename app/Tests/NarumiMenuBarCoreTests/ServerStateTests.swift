@@ -33,11 +33,23 @@ final class ServerStateTests: XCTestCase {
         XCTAssertTrue(ServerState.stopped(exitCode: 0).canRestart)
         XCTAssertTrue(ServerState.failed("x").canRestart)
         XCTAssertTrue(ServerState.starting(since: Date()).canRestart)
+        XCTAssertTrue(ServerState.preparing(step: "Python 取得").canRestart)
 
         XCTAssertTrue(ServerState.running(pid: 1).pollsServerInfo)
         XCTAssertTrue(ServerState.external(url).pollsServerInfo)
         XCTAssertFalse(ServerState.starting(since: Date()).pollsServerInfo)
         XCTAssertFalse(ServerState.failed("x").pollsServerInfo)
+        XCTAssertFalse(ServerState.preparing(step: "Python 取得").pollsServerInfo)
+    }
+
+    func testPreparingTitleShowsTheStep() {
+        XCTAssertEqual(
+            ServerStatusText.title(for: .preparing(step: "依存インストール"), info: nil, reachable: false),
+            "サーバー: 環境を準備中…（依存インストール）")
+        // Only a starting server can time out; preparing is untouched.
+        XCTAssertEqual(
+            ServerState.preparing(step: "venv 作成").afterStartupTimeout(processAlive: true, exitCode: 0),
+            .preparing(step: "venv 作成"))
     }
 
     func testTitles() {

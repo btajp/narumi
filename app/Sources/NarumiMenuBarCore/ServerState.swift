@@ -7,6 +7,9 @@ public enum ServerState: Equatable, Sendable {
     /// A server already answered at the URL before we launched one (e.g. `scripts/dev.sh`);
     /// it is not ours to stop.
     case external(URL)
+    /// Bundled runtime: the venv is being (re)built before launch (`RuntimeSyncPlan`);
+    /// `step` names the current stage (Python 取得 / 依存インストール …).
+    case preparing(step: String)
     /// Our process was spawned; waiting for `get_server_info` to answer.
     case starting(since: Date)
     /// Our process answers `get_server_info`.
@@ -23,7 +26,7 @@ public enum ServerState: Equatable, Sendable {
     public var canRestart: Bool {
         switch self {
         case .external, .notConfigured: return false
-        case .starting, .running, .stopped, .failed: return true
+        case .preparing, .starting, .running, .stopped, .failed: return true
         }
     }
 
@@ -31,7 +34,7 @@ public enum ServerState: Equatable, Sendable {
     public var pollsServerInfo: Bool {
         switch self {
         case .running, .external: return true
-        case .notConfigured, .starting, .stopped, .failed: return false
+        case .notConfigured, .preparing, .starting, .stopped, .failed: return false
         }
     }
 
@@ -70,6 +73,8 @@ public enum ServerState: Equatable, Sendable {
             return "環境変数 NARUMI_REPO か「リポジトリを選択…」で narumi リポジトリを指定してください"
         case .external(let url):
             return "\(url.absoluteString)（このアプリは起動・停止しません）"
+        case .preparing:
+            return "初回は Python と依存のダウンロードが発生します（ログ: runtime.log）"
         case .starting(let since):
             return "開始 \(ISO8601DateFormatter().string(from: since))"
         case .running(let pid):
@@ -105,6 +110,8 @@ public enum ServerStatusText {
             body = "未設定（リポジトリを選択してください）"
         case .external:
             body = reachable ? join("外部サーバーに接続", info) : "外部サーバーに接続できません"
+        case .preparing(let step):
+            body = "環境を準備中…（\(step)）"
         case .starting:
             body = "起動中…"
         case .running(let pid):

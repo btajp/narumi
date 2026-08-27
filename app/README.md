@@ -6,7 +6,7 @@
 |---|---|---|
 | `NarumiRecorderKit` | ライブラリ | ScreenCaptureKit キャプチャ → AVAssetWriter で **別ファイル** 書き出し。イベント型・引数解析・ディスプレイ選択などの純粋ロジックはこの中の SCK 非依存な型に置き、`swift test` で検証する |
 | `narumi-recorder` | CLI | server がサブプロセスとして起動する録画ヘルパー。stdout に JSON Lines でイベントを出す |
-| `NarumiMenuBarCore` | ライブラリ（Foundation のみ） | メニューバーアプリの純粋ロジック。サーバー設定の解決（`ServerConfig`）、起動コマンドの組み立て（`ServerCommand`）、サーバー状態と表示文言（`ServerState` / `ServerStatusText`）。AppKit に依存せず `swift test` で検証する |
+| `NarumiMenuBarCore` | ライブラリ（Foundation のみ） | メニューバーアプリの純粋ロジック。サーバー設定の解決（`ServerConfig`。ランタイムモード判定を含む）、起動コマンドの組み立て（`ServerCommand`）、サーバー状態と表示文言（`ServerState` / `ServerStatusText`）、同梱ランタイムの manifest と同期手順（`RuntimeManifest` / `RuntimeSyncPlan`）。AppKit にも Sparkle にも依存せず `swift test` で検証する |
 | `NarumiMenuBar` | メニューバーアプリ `narumi.app` | MCP クライアント。server の公開ツール（`start_recording` / `stop_recording` / `get_server_info`）を呼ぶだけで、ファイルや recorder には触れない（AGENTS.md 絶対原則 3）。加えて `narumi-server` の**プロセス**を起動・停止する（`ServerLauncher`。後述「起動フロー」） |
 
 ## ビルドとテスト
@@ -19,7 +19,7 @@ swift test                  # XCTest（下記の注意を参照）
 scripts/build-app.sh        # リポジトリ直下から。dist/narumi.app を組み立てて ad-hoc 署名
 ```
 
-- 要件: macOS 15 以降、Swift 6.0 以降のツールチェーン。外部パッケージ依存なし（引数解析は自前）。
+- 要件: macOS 15 以降、Swift 6.0 以降のツールチェーン。外部パッケージ依存は Sparkle（`NarumiMenuBar` のみが依存。初回ビルド時に GitHub から取得）だけで、引数解析は自前。
 - **`swift test` には Xcode が必要**。`xcode-select -p` が `/Library/Developer/CommandLineTools` を指している環境では XCTest が無く `no such module 'XCTest'` になる。切り替えずに実行するには `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test`。ビルド（`swift build`）は Command Line Tools だけで通る。
 - テストは ScreenCaptureKit・TCC・ネットワークに依存しない（イベント JSON の厳密一致、引数解析、ディスプレイ選択、ファイル名、`recorder.json` の書き出し。`NarumiMenuBarCore` はリポジトリ解決の優先順位、起動コマンドの argv / 環境変数、ポートからの URL 導出、ログパス、状態遷移と表示文言）。
 
@@ -88,7 +88,7 @@ server の `RecordingController` は次の順で実行ファイルを探す。
 `narumi.app` を開くと、メニューバー UI 自身が `narumi-server` の**プロセス**を起動し、終了時に停止する。Terminal は不要（録画ボタンを押すだけ）。データ操作はこれまで通りすべて MCP ツール呼び出しで、アプリはバンドル・カタログ・録画ファイルに触れない（AGENTS.md 絶対原則 3）。新しい責務は「サーバープロセスの起動と停止」だけで、`ServerLauncher`（AppKit 側）と `NarumiMenuBarCore` の純粋ロジックに分かれている。
 
 1. **外部サーバーの検出**: 起動時にまず接続先 URL へ `get_server_info` を投げる。応答があれば状態は「外部サーバーに接続」になり、アプリは何も起動せず、終了時にも触れない。**アプリによるサーバー起動を無効にしたいときは、先に自分のサーバー（`scripts/dev.sh` など）を起動しておく。**
-2. **リポジトリの解決**（優先順）: 環境変数 `NARUMI_REPO` → `UserDefaults` の `narumi.repoPath`（「リポジトリを選択…」で保存）→ バンドル位置のヒューリスティック（`.app` が `<repo>/dist/narumi.app` にあり、`<repo>/pyproject.toml` と `<repo>/server/pyproject.toml` が**両方**ある）→ 未設定。未設定なら「未設定（リポジトリを選択してください）」と表示して起動しない。指定先に 2 つのファイルが無い場合は「起動失敗（ログ参照）」。
+2. **リポジトリの解決**（repo モード時。優先順）: 環境変数 `NARUMI_REPO` → `UserDefaults` の `narumi.repoPath`（「リポジトリを選択…」で保存）→ バンドル位置のヒューリスティック（`.app` が `<repo>/dist/narumi.app` にあり、`<repo>/pyproject.toml` と `<repo>/server/pyproject.toml` が**両方**ある）→ 未設定。未設定なら「未設定（リポジトリを選択してください）」と表示して起動しない。指定先に 2 つのファイルが無い場合は「起動失敗（ログ参照）」。リポジトリが解決できないが `.app` がランタイムを同梱している場合は bundled モードになる（後述「ランタイムモード」）。
 3. **起動コマンド**: `/bin/zsh -lc 'exec uv run --project "$1" narumi-server --http --host 127.0.0.1 --port "$2" --recorder "$3"' narumi-server <repo> <port> <recorder>`。リポジトリ・ポート・recorder はシェル文字列に埋め込まず**位置パラメータ**（argv）で渡す（空白や日本語を含むパスでも壊れない）。環境変数で渡さないのは、ログインシェルの `~/.zshenv` / `~/.zprofile` がアプリの渡した環境の**後**に評価されるため: プロファイルに `export NARUMI_REPO=…` 等があると黙って上書きされ、別チェックアウトの server が起動したり、アプリがポーリングしないポートで bind されたりする。位置パラメータはプロファイルから書き換えられない。ログインシェル（`-l`）なので `~/.local/bin` / `/opt/homebrew/bin` / nix プロファイルなど利用者の PATH にある `uv` が使える（GUI アプリは launchd の最小限の PATH しか継承しない）。`--recorder` は同梱の `Contents/MacOS/narumi-recorder` があるときだけ付け、無ければ server 側の探索（`NARUMI_RECORDER` → `app/.build/{release,debug}/narumi-recorder`）に任せる。`NARUMI_HOME` が設定されていればそのまま引き継ぐ。カレントディレクトリはリポジトリ。stdin は `/dev/null`。
 4. **ポートと URL**: ポートは `NARUMI_SERVER_PORT`（既定 8765）。接続先 URL は `NARUMI_SERVER_URL` があればそれ、無ければ `http://127.0.0.1:<port>/mcp`。`NARUMI_SERVER_URL` だけが設定されている場合はその URL のポートで起動する。
 5. **起動待ち**: 1 秒ごとに `get_server_info` を最大 30 秒試し、応答したら「稼働中 v… 契約 …」。30 秒で応答が無ければ「起動失敗（ログ参照）」— プロセスが生きていればそのまま残す（終了か再起動で止まる）。プロセスが起動直後に終了した場合（`uv` が見つからない、ポート使用中、リポジトリが `uv sync` 未了など）も「起動失敗（ログ参照）」。稼働後にプロセスが終了すると「停止 (exit N)」。
@@ -106,3 +106,20 @@ server の `RecordingController` は次の順で実行ファイルを探す。
 1. このクライアントが開始した録画が進行中なら「録画中です。停止してから終了しますか？」→「停止して終了」で `stop_recording` を呼ぶ。`auto_process` は、アプリが起動したサーバーを直後に停止する場合は **false**（停止するサーバーに process ジョブを積んでも完走できず、SIGKILL で切られるだけ）、外部サーバーの場合は true（サーバーは生き続けてジョブを実行できる）。「キャンセル」で終了を取りやめる。
 2. アプリが起動したサーバーがあれば SIGTERM を送り、最大 60 秒待つ。server は `--http` の SIGTERM を uvicorn の graceful shutdown（開いたままの MCP GET ストリームは 10 秒で打ち切り）の後に `ctx.close()` へ繋ぎ（`transports.graceful_sigterm`）、進行中の録画があれば確定する（recorder の停止タイムアウト 30 秒 + 終了猶予 10 秒 + トラックのハッシュ計算ぶん掛かりうる）。60 秒で終わらなければプロセスグループ（zsh→uv→python→recorder）ごと SIGKILL。
 3. 外部サーバーには触れない。
+
+## ランタイムモード（repo / bundled）
+
+`narumi-server` の起動方法は 2 モード（設計: `docs/superpowers/specs/2026-08-27-narumi-app-distribution-design.md` §1）。
+
+- **判定**（`ServerConfig.RuntimeMode`）: 環境変数 `NARUMI_RUNTIME_MODE=repo|bundled` があればそれ（他の値は無視して自動判定）→ リポジトリが解決できれば **repo**（上記「起動フロー」の `uv run`。開発用）→ `.app` に `Contents/Resources/runtime/` があれば **bundled** → どちらも無ければ未設定。
+- **bundled モード**: `.app` はブートストラップ最小限（`uv` バイナリ・`wheels/`・ハッシュ付き `requirements.txt`・`contracts/`・`manifest.json`）だけを同梱し、起動時に `<NARUMI_HOME>/runtime/`（`NARUMI_HOME` 未設定時は `~/Library/Application Support/narumi`）へ venv を作る。手順は `RuntimeSyncPlan` が組み立てる固定列: ① `uv python install <ver>`（`UV_PYTHON_INSTALL_DIR=<home>/runtime/python`）② `uv venv <home>/runtime/venv.new --clear --relocatable --python <ver>` ③ `uv pip install --python <venv.new> --require-hashes -r requirements.txt` ④ `uv pip install --python <venv.new> --no-deps wheels/*.whl` ⑤ `venv.new` → `venv` へ差し替え ⑥ `manifest.json` を `installed.json` にコピー。すべて `venv.new` に入れてから最後に差し替えるので、途中で失敗しても旧 venv は壊れない。`--relocatable` は必須: エントリポイントのシェバンを自己相対にする（無いと `venv/bin/narumi-server` が rename 前の `venv.new/bin/python3` を指したまま exit 126 で死ぬ）。
+- **再同期**: 起動のたびに `Resources/runtime/manifest.json` と `installed.json` を比較し、不一致（または `installed.json` 無し・読めない）なら同期し直す。アプリ更新後の初回起動はここで新しい依存が入る。
+- **進捗・失敗**: 同期中はメニューに「サーバー: 環境を準備中…（<ステップ名>）」、uv の出力は `~/Library/Logs/narumi/runtime.log`。失敗（ネットワーク無しなど）は「起動失敗（ログ参照）」で止まり、「サーバーを再起動」で再試行する。黙って repo モードには落ちない。初回同期はネットワーク必須（Python 取得と PyPI から数百 MB）。
+- **サーバー起動（bundled）**: `<venv>/bin/narumi-server --http --host 127.0.0.1 --port <port> --recorder <.app>/Contents/MacOS/narumi-recorder`、環境変数 `NARUMI_CONTRACTS_DIR=<.app>/Contents/Resources/runtime/contracts`。`NARUMI_HOME` は設定されていればそのまま引き継ぐ（repo モードと同じ）。シェルは使わない（venv も uv も絶対パスで PATH 不要）。停止・SIGKILL の扱いは repo モードと同一。
+
+## 自動更新（Sparkle）
+
+- `NarumiMenuBar` のみが SwiftPM の [Sparkle](https://github.com/sparkle-project/Sparkle)（2.9.6 以上、binaryTarget）に依存する。`AppDelegate` が `SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)` を保持し、メニュー「アップデートを確認…」が `checkForUpdates:` を呼ぶ。定期チェックは Sparkle のスケジューラ任せ（`Info.plist` の `SUEnableAutomaticChecks` / `SUScheduledCheckInterval`。`scripts/build-app.sh` が書く）。
+- フィード: 通常は `Info.plist` の `SUFeedURL`。環境変数 `NARUMI_SPARKLE_FEED_URL` があれば delegate の `feedURLString(for:)` がそれを返す（ローカル更新 E2E 用。本番では設定しない）。
+- 更新適用時は Sparkle がアプリを終了させるため、通常の終了経路（録画の確認 → 管理中 server の停止）がそのまま走る。新バージョンの初回起動では manifest 差分により venv が再同期される。
+- 鍵: 更新の署名検証は `Info.plist` の `SUPublicEDKey`（`app/sparkle-public-key.txt` から `build-app.sh` が埋め込む）。**Keychain の Sparkle 秘密鍵は `generate_keys -x <file>` でバックアップしておくこと** — 紛失すると既存ユーザーに更新を届ける手段を永久に失う。秘密鍵や Apple 資格情報はリポジトリ・ログに置かない。

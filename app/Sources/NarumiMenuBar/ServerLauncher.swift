@@ -137,28 +137,55 @@ final class ServerLauncher {
         if Task.isCancelled {
             return
         }
-        guard let repository = config.repository else {
+        guard let mode = config.runtimeMode else {
             state = .notConfigured
             return
         }
-        guard ServerConfig.isRepository(repository) else {
-            state = .failed("narumi リポジトリではありません: \(repository.path)")
-            return
-        }
-        guard let command = ServerCommand(config: config) else {
-            state = .notConfigured
-            return
+        let command: ServerCommand
+        switch mode {
+        case .repo:
+            guard let repository = config.repository else {
+                state = .notConfigured
+                return
+            }
+            guard ServerConfig.isRepository(repository) else {
+                state = .failed("narumi リポジトリではありません: \(repository.path)")
+                return
+            }
+            guard let repoCommand = ServerCommand(config: config) else {
+                state = .notConfigured
+                return
+            }
+            command = repoCommand
+        case .bundled:
+            // Never falls back to repo mode: a broken or unsyncable bundled runtime is a
+            // visible failure (spec 2026-08-27 app-distribution §1), retried via 「サーバーを再起動」.
+            guard let runtime = config.bundledRuntime, let bundledCommand = ServerCommand.bundled(config: config)
+            else {
+                state = .failed("同梱ランタイムがありません（Resources/runtime）")
+                return
+            }
+            do {
+                try await syncBundledRuntimeIfNeeded(runtime)
+            } catch is CancellationError {
+                return  // stop() takes over; it decides the final state
+            } catch {
+                state = .failed(error.localizedDescription)
+                return
+            }
+            command = bundledCommand
         }
         let log: FileHandle
         do {
-            log = try openLog()
+            log = try openLog(at: config.logFile)
         } catch {
             state = .failed("ログファイルを開けません: \(error.localizedDescription)")
             return
         }
         logHandle = log
         note(
-            "starting narumi-server: repo=\(repository.path) port=\(config.port) url=\(config.serverURL.absoluteString)"
+            "starting narumi-server (\(mode.rawValue)): \(command.executable.path) port=\(config.port)"
+                + " url=\(config.serverURL.absoluteString)"
                 + " recorder=\(config.recorder?.path ?? "(server default)") data_root=\(config.dataRoot ?? "(server default)")")
 
         let process = Process()
@@ -227,6 +254,125 @@ final class ServerLauncher {
         }
     }
 
+    // MARK: Bundled runtime sync
+
+    private struct RuntimeSyncFailure: LocalizedError {
+        let step: String
+        let reason: String
+        var errorDescription: String? { "環境の準備に失敗（\(step)）: \(reason)" }
+    }
+
+    private struct SyncCommandFailure: LocalizedError {
+        let command: String
+        let status: Int32
+        let signaled: Bool
+        var errorDescription: String? {
+            "\(command) が \(signaled ? "シグナル" : "exit") \(status) で終了（runtime.log 参照）"
+        }
+    }
+
+    /// Compare the bundle's `runtime/manifest.json` with `<data root>/runtime/installed.json`
+    /// and, when they differ (or installed.json is missing / unreadable), run the
+    /// `RuntimeSyncPlan`: uv output goes to runtime.log, the menu shows each step as
+    /// 「環境を準備中…（<step>）」. Throws `CancellationError` when `stop()` cancels the start,
+    /// `RuntimeSyncFailure` otherwise — the caller surfaces it as `.failed` (retry via
+    /// 「サーバーを再起動」), never by falling back to repo mode.
+    private func syncBundledRuntimeIfNeeded(_ runtime: BundledRuntime) async throws {
+        let manifest: RuntimeManifest
+        do {
+            manifest = try RuntimeManifest.load(from: runtime.manifest)
+        } catch {
+            throw RuntimeSyncFailure(step: "manifest 読み込み", reason: error.localizedDescription)
+        }
+        let paths = config.runtimePaths
+        // installed.json is the marker, but a venv deleted from under it must also re-sync —
+        // otherwise every launch would fail with no path back to a working state.
+        let venvIntact = FileManager.default.isExecutableFile(atPath: paths.serverExecutable.path)
+        guard manifest.needsSync(installed: RuntimeManifest.loadInstalled(from: paths.installedManifest))
+            || !venvIntact
+        else {
+            return
+        }
+        let log: FileHandle
+        do {
+            log = try openLog(at: config.runtimeLogFile)
+        } catch {
+            throw RuntimeSyncFailure(step: "runtime.log を開く", reason: error.localizedDescription)
+        }
+        defer { try? log.close() }
+        logLine(
+            log,
+            "runtime sync: app_version=\(manifest.appVersion) python=\(manifest.python)"
+                + " uv=\(manifest.uvVersion) → \(paths.root.path)")
+        let plan = RuntimeSyncPlan(bundle: runtime, paths: paths, manifest: manifest)
+        for step in plan.steps {
+            try Task.checkCancellation()
+            state = .preparing(step: step.name)
+            logLine(log, "step: \(step.name)")
+            do {
+                switch step {
+                case .run(_, let command):
+                    try await runSyncCommand(command, log: log)
+                case .replaceDirectory(_, let from, let to):
+                    let fm = FileManager.default
+                    if fm.fileExists(atPath: to.path) {
+                        try fm.removeItem(at: to)
+                    }
+                    try fm.moveItem(at: from, to: to)
+                case .copyFile(_, let from, let to):
+                    let fm = FileManager.default
+                    try fm.createDirectory(
+                        at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try Data(contentsOf: from).write(to: to, options: .atomic)
+                }
+            } catch is CancellationError {
+                logLine(log, "cancelled during: \(step.name)")
+                throw CancellationError()
+            } catch {
+                logLine(log, "failed: \(step.name): \(error.localizedDescription)")
+                throw RuntimeSyncFailure(step: step.name, reason: error.localizedDescription)
+            }
+        }
+        logLine(log, "runtime sync: done")
+    }
+
+    /// Run one sync subprocess (uv) with stdout/stderr appended to runtime.log. No hard
+    /// timeout: the first sync downloads Python + several hundred MB of wheels. Cancellation
+    /// (quit / stop) sends SIGTERM and waits for the exit.
+    private func runSyncCommand(_ command: RuntimeSyncPlan.Command, log: FileHandle) async throws {
+        let process = Process()
+        process.executableURL = command.executable
+        process.arguments = command.arguments
+        var environment = ProcessInfo.processInfo.environment
+        for (key, value) in command.environment {
+            environment[key] = value
+        }
+        process.environment = environment
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = log
+        process.standardError = log
+        try process.run()
+        var terminated = false
+        while process.isRunning {
+            if Task.isCancelled, !terminated {
+                process.terminate()
+                terminated = true
+            }
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        process.waitUntilExit()  // already gone: reaps immediately
+        if Task.isCancelled {
+            throw CancellationError()
+        }
+        let signaled = process.terminationReason == .uncaughtSignal
+        if signaled || process.terminationStatus != 0 {
+            throw SyncCommandFailure(
+                command: ([command.executable.lastPathComponent] + command.arguments.prefix(2))
+                    .joined(separator: " "),
+                status: process.terminationStatus, signaled: signaled)
+        }
+    }
+
     // MARK: Exit
 
     private func processDidExit(generation: Int, code: Int32, signaled: Bool) {
@@ -270,8 +416,7 @@ final class ServerLauncher {
 
     // MARK: Log
 
-    private func openLog() throws -> FileHandle {
-        let url = config.logFile
+    private func openLog(at url: URL) throws -> FileHandle {
         try Self.prepareLogFile(at: url)
         let handle = try FileHandle(forWritingTo: url)
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
@@ -299,6 +444,14 @@ final class ServerLauncher {
         }
         _ = try? logHandle.seekToEnd()
         try? logHandle.write(contentsOf: Data(line.utf8))
+    }
+
+    /// Same format into an explicit handle (the runtime.log during a sync).
+    private func logLine(_ handle: FileHandle, _ message: String) {
+        let line = "\(ISO8601DateFormatter().string(from: Date())) narumi.app: \(message)\n"
+        Self.stderr(line)
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: Data(line.utf8))
     }
 
     nonisolated static func stderr(_ line: String) {

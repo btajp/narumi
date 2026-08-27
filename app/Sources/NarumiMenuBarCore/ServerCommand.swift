@@ -25,7 +25,14 @@ public struct ServerCommand: Equatable, Sendable {
     public let currentDirectory: URL
     public let environment: [String: String]
 
-    /// `nil` when the config has no repository (nothing to launch).
+    init(executable: URL, arguments: [String], currentDirectory: URL, environment: [String: String]) {
+        self.executable = executable
+        self.arguments = arguments
+        self.currentDirectory = currentDirectory
+        self.environment = environment
+    }
+
+    /// Repo mode. `nil` when the config has no repository (nothing to launch).
     public init?(config: ServerConfig, inheriting base: [String: String] = ProcessInfo.processInfo.environment) {
         guard let repository = config.repository else {
             return nil
@@ -48,6 +55,39 @@ public struct ServerCommand: Equatable, Sendable {
         self.environment = environment
     }
 
-    /// The shell text (`arguments[1]`).
-    public var shellScript: String { arguments[1] }
+    /// Bundled mode (spec `2026-08-27-narumi-app-distribution-design.md` §1): run the synced
+    /// venv's `narumi-server` directly — no login shell and no PATH lookup, since uv and the
+    /// venv live at absolute paths. `NARUMI_CONTRACTS_DIR` points the server at the contracts
+    /// copied into the .app; `NARUMI_HOME` passes through exactly like repo mode. `nil` when
+    /// the .app carries no `Resources/runtime`.
+    public static func bundled(
+        config: ServerConfig, inheriting base: [String: String] = ProcessInfo.processInfo.environment
+    ) -> ServerCommand? {
+        guard let runtime = config.bundledRuntime else {
+            return nil
+        }
+        var environment = base
+        environment[ServerConfig.Env.contractsDir] = runtime.contractsDir.path
+        if let dataRoot = config.dataRoot {
+            environment[ServerConfig.Env.home] = dataRoot
+        }
+        var arguments = [
+            "--http", "--host", ServerConfig.defaultHost, "--port", String(config.port),
+        ]
+        if let recorder = config.recorder {
+            arguments += ["--recorder", recorder.path]
+        }
+        return ServerCommand(
+            executable: config.runtimePaths.serverExecutable,
+            arguments: arguments,
+            // Exists whenever the launch is reached: the venv (inside it) was just synced.
+            currentDirectory: config.runtimePaths.root,
+            environment: environment)
+    }
+
+    /// The shell text (`arguments[1]`) of a repo-mode command; `nil` for the bundled command,
+    /// which runs the venv binary directly without a shell.
+    public var shellScript: String? {
+        executable == Self.shell ? arguments[1] : nil
+    }
 }

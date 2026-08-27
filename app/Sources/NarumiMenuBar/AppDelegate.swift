@@ -1,9 +1,11 @@
 import AppKit
 import Foundation
 import NarumiMenuBarCore
+import Sparkle
 
 /// Menu bar UI. An MCP client for every data operation; the only thing it does besides calling
-/// tools is starting / stopping the server *process* through `ServerLauncher`.
+/// tools is starting / stopping the server *process* through `ServerLauncher` and checking for
+/// app updates through Sparkle.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static let appVersion = "0.1.0"
@@ -30,9 +32,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var serverReachable = false
     private var client: MCPClient!
     private var launcher: ServerLauncher!
+    private var updaterController: SPUStandardUpdaterController!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        // Scheduled checks are Sparkle's business (SUEnableAutomaticChecks /
+        // SUScheduledCheckInterval in Info.plist); Sparkle quits the app before applying an
+        // update, so the normal applicationShouldTerminate path stops the managed server.
+        updaterController = SPUStandardUpdaterController(
+            startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
         let config = ServerConfig.resolve(
             storedRepoPath: UserDefaults.standard.string(forKey: ServerConfig.repoPathDefaultsKey))
         let client = MCPClient(serverURL: config.serverURL, clientVersion: AppDelegate.appVersion)
@@ -84,7 +92,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if recording && !confirmStopRecordingBeforeQuit() {
             return .terminateCancel
         }
-        let stopServer = launcher.managesProcess
+        // isBusy covers a start in flight — notably a bundled-runtime sync, whose uv
+        // subprocess would otherwise be orphaned; stop() cancels it and waits for the exit.
+        let stopServer = launcher.managesProcess || launcher.isBusy
         ServerLauncher.stderr("narumi.app: quitting (recording=\(recording), managed server=\(stopServer))\n")
         guard recording || stopServer else {
             return .terminateNow
@@ -157,6 +167,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         openLogItem = NSMenuItem(title: "ログを開く", action: #selector(openLog), keyEquivalent: "")
         openLogItem.target = self
         menu.addItem(openLogItem)
+
+        menu.addItem(.separator())
+        let updateItem = NSMenuItem(
+            title: "アップデートを確認…",
+            action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), keyEquivalent: "")
+        updateItem.target = updaterController
+        menu.addItem(updateItem)
 
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "終了", action: #selector(quit), keyEquivalent: "q")
@@ -414,6 +431,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             presentMessage(title: title, text: error.localizedDescription)
         }
+    }
+}
+
+extension AppDelegate: SPUUpdaterDelegate {
+    /// `NARUMI_SPARKLE_FEED_URL` overrides the appcast for the local updater E2E (never set
+    /// in production); `nil` falls back to Info.plist `SUFeedURL`.
+    nonisolated func feedURLString(for updater: SPUUpdater) -> String? {
+        guard let raw = ProcessInfo.processInfo.environment[ServerConfig.Env.sparkleFeedURL],
+            !raw.isEmpty
+        else {
+            return nil
+        }
+        return raw
     }
 }
 

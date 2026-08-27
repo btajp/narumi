@@ -134,4 +134,79 @@ final class ServerConfigTests: XCTestCase {
         XCTAssertNil(resolve(env: ["NARUMI_HOME": ""]).dataRoot)
         XCTAssertNil(resolve().dataRoot)
     }
+
+    // MARK: Runtime mode (repo / bundled)
+
+    var runtimeResources: String { bundleURL.appendingPathComponent("Contents/Resources/runtime").path }
+
+    func testRepoModeWhenRepositoryResolves() {
+        // Even with bundled runtime resources present: a resolvable repo wins (development).
+        let config = resolve(
+            env: ["NARUMI_REPO": "/env/repo"], bundle: bundleURL,
+            files: markers(in: bundleRepo) + [runtimeResources])
+        XCTAssertEqual(config.runtimeMode, .repo)
+        XCTAssertEqual(config.bundledRuntime?.root.path, runtimeResources)
+
+        // The dist/ heuristic counts as "repo resolvable" too.
+        let dist = resolve(bundle: bundleURL, files: markers(in: bundleRepo) + [runtimeResources])
+        XCTAssertEqual(dist.runtimeMode, .repo)
+    }
+
+    func testBundledModeWhenOnlyRuntimeResourcesExist() {
+        let config = resolve(bundle: bundleURL, files: [runtimeResources])
+        XCTAssertEqual(config.runtimeMode, .bundled)
+        XCTAssertNil(config.repository)
+        XCTAssertEqual(config.bundledRuntime?.root.path, runtimeResources)
+    }
+
+    func testNeitherMeansNoMode() {
+        let config = resolve(bundle: bundleURL, files: [])
+        XCTAssertNil(config.runtimeMode)
+        XCTAssertNil(config.bundledRuntime)
+        XCTAssertNil(resolve().runtimeMode)
+    }
+
+    func testRuntimeModeOverride() {
+        // Forced bundled beats a resolvable repo.
+        let bundled = resolve(
+            env: ["NARUMI_RUNTIME_MODE": "bundled", "NARUMI_REPO": "/env/repo"], bundle: bundleURL,
+            files: [runtimeResources])
+        XCTAssertEqual(bundled.runtimeMode, .bundled)
+        XCTAssertEqual(bundled.repository?.path, "/env/repo")
+
+        // Forced repo beats bundled resources — and wins even when no repository resolves
+        // (the launcher then reports 未設定 instead of silently switching).
+        let repo = resolve(env: ["NARUMI_RUNTIME_MODE": "repo"], bundle: bundleURL, files: [runtimeResources])
+        XCTAssertEqual(repo.runtimeMode, .repo)
+        XCTAssertNil(repo.repository)
+
+        // Forced bundled without runtime resources: the mode still sticks; the launcher fails
+        // visibly because bundledRuntime is nil.
+        let missing = resolve(env: ["NARUMI_RUNTIME_MODE": "bundled"], bundle: bundleURL, files: [])
+        XCTAssertEqual(missing.runtimeMode, .bundled)
+        XCTAssertNil(missing.bundledRuntime)
+
+        // Unknown / empty values fall back to automatic detection.
+        XCTAssertEqual(
+            resolve(env: ["NARUMI_RUNTIME_MODE": "banana"], bundle: bundleURL, files: [runtimeResources]).runtimeMode,
+            .bundled)
+        XCTAssertNil(resolve(env: ["NARUMI_RUNTIME_MODE": ""]).runtimeMode)
+    }
+
+    func testRuntimePathsFollowTheDataRoot() {
+        // Default data root: ~/Library/Application Support/narumi (narumi.config.data_root).
+        let config = resolve()
+        XCTAssertEqual(
+            config.runtimePaths.venv.path,
+            "/Users/tester/Library/Application Support/narumi/runtime/venv")
+        XCTAssertEqual(
+            config.runtimePaths.installedManifest.path,
+            "/Users/tester/Library/Application Support/narumi/runtime/installed.json")
+        XCTAssertEqual(config.runtimeLogFile.path, "/Users/tester/Library/Logs/narumi/runtime.log")
+
+        // NARUMI_HOME moves the runtime with the data (tilde expanded like the repo path).
+        let custom = resolve(env: ["NARUMI_HOME": "/Volumes/データ/narumi home"])
+        XCTAssertEqual(custom.runtimePaths.root.path, "/Volumes/データ/narumi home/runtime")
+        XCTAssertEqual(custom.runtimePaths.pythonDir.path, "/Volumes/データ/narumi home/runtime/python")
+    }
 }
