@@ -101,7 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // process job it can never finish (ctx.close would wait on it until our
                     // SIGKILL cuts it mid-transcription). An external server stays alive and
                     // runs the job as usual.
-                    _ = try await client.callTool("stop_recording", arguments: [
+                    _ = try await client.callTool(ToolCatalog.stopRecording, arguments: [
                         "request_id": .string(UUID().uuidString),
                         "auto_process": .bool(!stopServer),
                     ])
@@ -225,7 +225,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 applyState()
             }
             do {
-                let result = try await client.callTool("start_recording", arguments: [
+                let result = try await client.callTool(ToolCatalog.startRecording, arguments: [
                     "meeting_name": .string(meetingName),
                     "request_id": .string(UUID().uuidString),
                 ])
@@ -251,7 +251,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // stop_recording's contract takes only request_id (+ auto_process / discard_video);
             // the server tracks the single running recording itself.
             do {
-                _ = try await client.callTool("stop_recording", arguments: [
+                _ = try await client.callTool(ToolCatalog.stopRecording, arguments: [
                     "request_id": .string(UUID().uuidString),
                 ])
                 recording = false
@@ -346,7 +346,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         do {
-            let result = try await client.callTool("get_server_info", arguments: [:])
+            let result = try await client.callTool(ToolCatalog.getServerInfo, arguments: [:])
             lastInfo = ServerInfoSummary(node: result.structuredContent)
             serverReachable = true
         } catch {

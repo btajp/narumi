@@ -17,11 +17,11 @@ narumi は、macOS 上でローカルに会議を録画し、終了後に議事�
 ```sh
 git clone <this repo> narumi && cd narumi
 uv sync                      # Python 依存（pipeline + server。dev グループに軽量 extras 込み）
-uv run narumi doctor         # ffmpeg / recorder / エンジンの状態を確認
+uv run narumi-dev doctor     # ffmpeg / recorder / エンジンの状態を確認
 cd app && swift build -c release && cd ..   # 録画ヘルパー narumi-recorder（app/ が揃ってから）
 ```
 
-`uv run narumi doctor` は ffmpeg / ffprobe が見つからないと終了コード 1 で失敗します。録画ヘルパーは `NARUMI_RECORDER` 環境変数、無ければ `app/.build/{release,debug}/narumi-recorder` の順で探します。
+`uv run narumi-dev doctor` は ffmpeg / ffprobe が見つからないと終了コード 1 で失敗します。録画ヘルパーは `NARUMI_RECORDER` 環境変数、無ければ `app/.build/{release,debug}/narumi-recorder` の順で探します。
 
 ## デスクトップアプリの使い方
 
@@ -57,7 +57,9 @@ open dist/narumi.app     # メニューバーに 🕵️ が出る。「録画�
 | 項目 | 状態 |
 |---|---|
 | セッションバンドル / manifest / 冪等ステージ実行 | 実装済み |
-| 契約（`contracts/`）と MCP サーバー（v1 の 12 ツール、stdio / Streamable HTTP） | 実装済み |
+| 契約（`contracts/`）と MCP サーバー（v1 の 24 ツール、stdio / Streamable HTTP） | 実装済み |
+| 操作面パリティ拡張（録画状態・議事録取得・全文検索・既存録画の取り込み・プロファイル＋自動エクスポート・トラック破棄・会議削除・ジョブ取消・カタログ再構築） | 実装済み（MCP ツール＋CLI。アプリ本体ウィンドウは未実装） |
+| 製品 CLI `narumi`（契約から自動生成の 1:1 写像。サーバー自動検出、無ければ in-process） | 実装済み |
 | 録画アプリ / `narumi-recorder` | 実装済み（ScreenCaptureKit の実キャプチャ経路は実機での手動確認が未了） |
 | `narumi.app` によるサーバーの起動・停止（Terminal 不要） | 実装済み（uv とリポジトリのチェックアウトが必要。自己完結配布は未対応） |
 | ffmpeg 分離 → Whisper → プレーン議事録（`narumi.pipeline`） | 実装済み（`fake` エンジンで E2E テスト済み。実エンジンは `-m real` の opt-in smoke） |
@@ -73,7 +75,8 @@ open dist/narumi.app     # メニューバーに 🕵️ が出る。「録画�
 uv sync                                                  # 初回セットアップ
 uv run pytest                                            # Python 全テスト（pipeline + server）
 uv run ruff check . && uv run ruff format --check .      # Lint / フォーマット
-uv run narumi --help                                     # dev CLI
+uv run narumi --help                                     # 製品 CLI（契約から自動生成。サーバー自動検出）
+uv run narumi-dev --help                                 # dev CLI（ライブラリ直叩き。デバッグ用）
 uv run narumi-server --stdio                             # MCP サーバー（stdio dev モード）
 uv run narumi-server --http --port 8765                  # MCP サーバー（Streamable HTTP 常駐）
 scripts/dev.sh                                           # HTTP サーバー起動（GAIA_LIBRARY_CMD があれば gaia-library も）
@@ -82,24 +85,39 @@ scripts/gen-types.sh                                     # 契約 → pydantic �
 cd app && swift build && swift test                      # 録画アプリ / recorder CLI
 ```
 
-### dev CLI `narumi`
+### 製品 CLI `narumi`
 
-`narumi` はライブラリを直接呼ぶ **開発者向け** ツールです。UI = API パリティの原則（AGENTS.md 絶対原則 3）が適用されるのはアプリで、アプリは必ず MCP サーバー経由で操作します。
+`narumi` は MCP ツールの **1:1 写像** です（`docs/superpowers/specs/2026-08-27-narumi-surface-parity-design.md`）。サブコマンドは `contracts/` から自動生成され（ツール名の `_` を `-` に置換）、オプションは `inputSchema` から型付きで生成されます（string / integer / number / boolean はそのまま、array / object は JSON 文字列、`scope` セレクタは名前 1 つか JSON 配列）。`request_id` は省略すると UUID4 を自動発番します。
 
 ```sh
-uv run narumi import-recording --name "定例" --mic mic.m4a --system system.m4a [--screen screen.mp4] \
-    [--scope cloudnative] [--engagement acme] [--started-at 2026-08-27T12:00:00+09:00] [--copy|--link]
-uv run narumi show <meeting_id>                          # manifest の要約を JSON で表示
-uv run narumi config <meeting_id> --transcription-engine fake --external-send-policy local_only
-uv run narumi process <meeting_id> [--force]             # 全工程を実行（stages / skipped / minutes_version を JSON 出力）
-uv run narumi regenerate <meeting_id> [--force] [--reason TEXT]
-uv run narumi export <meeting_id> --to markdown [--path out.md] [--version N]
-uv run narumi list [--scope NAME ...] [--query TEXT] [--limit N]
-uv run narumi catalog rebuild                            # narumi.db をバンドルから全再構築
-uv run narumi doctor                                     # 環境診断
+uv run narumi list-meetings --scope cloudnative --limit 10
+uv run narumi search-transcripts --query "オンボーディング"
+uv run narumi get-minutes --meeting-id <meeting_id> [--version N]
+uv run narumi import-recording --meeting-name "定例" --mic-path /abs/mic.m4a --system-path /abs/system.m4a
+uv run narumi delete-meeting --meeting-id <meeting_id> --confirm
+uv run narumi tool <tool_name> --json '{"...": "..."}'   # 汎用エスケープハッチ（任意のツールを生 JSON で）
 ```
 
-`--data-root PATH`（または `NARUMI_HOME`）でデータルートを切り替えられます。`narumi.errors.NarumiError` は `{"error": {"code", "message", "details"}}` の JSON を stderr に出し、終了コード 2 で終わります。
+接続先は `--server-url`（既定 `NARUMI_SERVER_URL` → `http://127.0.0.1:8765/mcp`）です。サーバーが応答すればそこへ MCP（Streamable HTTP）で送り、応答が無ければ同じディスパッチ経路を in-process で実行します（`--require-server` / `--in-process` で強制。録画系ツールは in-process では拒否）。出力は結果 JSON（`--pretty` 既定、`--raw` で 1 行）で、エラーは契約の `error_envelope` を stderr に出し終了コード 2 で終わります。`--data-root PATH`（または `NARUMI_HOME`）は in-process 実行のデータルートを切り替えます。
+
+### dev CLI `narumi-dev`
+
+`narumi-dev` はライブラリを直接呼ぶ **開発者向け** デバッグツールで、製品の操作面には数えません。UI = API パリティの原則（AGENTS.md 絶対原則 3）が適用されるのはアプリと製品 CLI で、どちらも MCP のツール面だけを使います。
+
+```sh
+uv run narumi-dev import-recording --name "定例" --mic mic.m4a --system system.m4a [--screen screen.mp4] \
+    [--scope cloudnative] [--engagement acme] [--started-at 2026-08-27T12:00:00+09:00] [--copy|--link]
+uv run narumi-dev show <meeting_id>                      # manifest の要約を JSON で表示
+uv run narumi-dev config <meeting_id> --transcription-engine fake --external-send-policy local_only
+uv run narumi-dev process <meeting_id> [--force]         # 全工程を実行（stages / skipped / minutes_version を JSON 出力）
+uv run narumi-dev regenerate <meeting_id> [--force] [--reason TEXT]
+uv run narumi-dev export <meeting_id> --to markdown [--path out.md] [--version N]
+uv run narumi-dev list [--scope NAME ...] [--query TEXT] [--limit N]
+uv run narumi-dev catalog rebuild                        # narumi.db をバンドルから全再構築
+uv run narumi-dev doctor                                 # 環境診断
+```
+
+`--data-root PATH`（または `NARUMI_HOME`）でデータルートを切り替えられます。どちらの CLI も `narumi.errors.NarumiError` は `{"error": {"code", "message", "details"}}` の JSON を stderr に出し、終了コード 2 で終わります。
 
 ## データの置き場所
 
@@ -107,7 +125,7 @@ uv run narumi doctor                                     # 環境診断
 
 ```
 $NARUMI_HOME/
-├── narumi.db                 # 再構築可能なカタログ＋検索索引（`narumi catalog rebuild`）
+├── narumi.db                 # 再構築可能なカタログ＋検索索引（`narumi-dev catalog rebuild`）
 └── meetings/<meeting_id>/    # セッションバンドル（ファイルが正本）
     ├── manifest.json
     ├── tracks/               # 原録音・録画（破棄可）

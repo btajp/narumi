@@ -32,7 +32,7 @@ Python 本体と ML 依存（mlx / torch 等）を `.app` に埋め込むと数�
 
 モード選択: `NARUMI_RUNTIME_MODE=repo|bundled` があればそれ。無ければ「リポ内 `dist/` で起動 or `NARUMI_REPO` あり → repo モード（`uv run` で起動、開発用）」「`Resources/runtime` あり → bundled モード」「どちらも無し → 未設定」。準備中はメニューに「サーバー: 環境を準備中…（Python 取得 / 依存インストール）」と進捗を出し、ログは `~/Library/Logs/narumi/runtime.log`。ネットワークが無くて失敗した場合は状態 `failed` と再試行メニューを出す（黙って repo モードに落ちない）。
 
-初回のダウンロード量は数百 MB（mlx-whisper・mlx・numpy 等。torch / pyannote は含めない。pyannote は `narumi doctor` 相当の案内で別途 opt-in）。
+初回のダウンロード量は数百 MB（mlx-whisper・mlx・numpy 等。torch / pyannote は含めない。pyannote は `narumi-dev doctor` 相当の案内で別途 opt-in）。
 
 ## 2. 更新機構: Sparkle 2
 

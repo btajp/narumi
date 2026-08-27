@@ -29,7 +29,7 @@ narumi/
 │   │   ├── generate/         # 第 2 段（区間統合）＋議事録生成（plain / LLM）
 │   │   ├── export/           # プラグイン型エクスポーター（markdown / html）
 │   │   ├── pipeline.py       # 工程オーケストレーター（process / regenerate / export）
-│   │   └── cli.py            # dev CLI `narumi`
+│   │   └── cli.py            # dev CLI `narumi-dev`
 │   └── tests/
 ├── server/                   # Python パッケージ narumi_server（MCP サーバー）
 │   ├── pyproject.toml

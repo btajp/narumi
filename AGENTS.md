@@ -42,7 +42,8 @@ Codex App Server / Claude Agent SDK / ローカル LLM / API 課金の 4 系統�
 uv sync                                                  # 初回セットアップ（.venv はリポ直下。dev グループに軽量 extras 込み）
 uv run pytest                                            # Python 全テスト（pipeline + server）
 uv run ruff check . && uv run ruff format --check .      # Lint / フォーマット
-uv run narumi --help                                     # dev CLI（バンドル処理・カタログ再構築）
+uv run narumi --help                                     # 製品 CLI（契約から自動生成。サーバー自動検出、無ければ in-process）
+uv run narumi-dev --help                                 # dev CLI（ライブラリ直叩き。バンドル処理・doctor・カタログ再構築）
 uv run narumi-server --stdio                             # MCP サーバー（stdio dev モード）
 uv run narumi-server --http --port 8765                  # MCP サーバー（Streamable HTTP 常駐）
 scripts/gen-types.sh                                     # 契約 → pydantic 型生成

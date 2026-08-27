@@ -23,6 +23,10 @@ scripts/build-app.sh        # リポジトリ直下から。dist/narumi.app を�
 - **`swift test` には Xcode が必要**。`xcode-select -p` が `/Library/Developer/CommandLineTools` を指している環境では XCTest が無く `no such module 'XCTest'` になる。切り替えずに実行するには `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test`。ビルド（`swift build`）は Command Line Tools だけで通る。
 - テストは ScreenCaptureKit・TCC・ネットワークに依存しない（イベント JSON の厳密一致、引数解析、ディスプレイ選択、ファイル名、`recorder.json` の書き出し。`NarumiMenuBarCore` はリポジトリ解決の優先順位、起動コマンドの argv / 環境変数、ポートからの URL 導出、ログパス、状態遷移と表示文言）。
 
+## パリティ検査（アプリ ⊆ 契約）
+
+アプリが呼ぶ MCP ツール名は `NarumiMenuBarCore` の `ToolCatalog` に集約する（`ToolCatalog.startRecording` / `.stopRecording` / `.getServerInfo`、一覧は `ToolCatalog.allUsed`）。`NarumiMenuBar` はツール呼び出しに文字列リテラルではなくこの定数を使う。`ToolCatalogTests` が `#filePath` からリポジトリルート（`contracts/manifest.json` を含むディレクトリ）を探して manifest を読み、`allUsed` の全ツールが契約に存在すること・一覧が空でなく重複もないことを `swift test` で検査する（ネットワーク不要）。アプリに新しいツール呼び出しを足すときは、必ず `ToolCatalog` に定数を追加して `allUsed` に載せる（AGENTS.md 絶対原則 3、`docs/superpowers/specs/2026-08-27-narumi-surface-parity-design.md`）。
+
 ## `narumi-recorder` CLI
 
 ```

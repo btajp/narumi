@@ -219,7 +219,7 @@ final class ServerLauncher {
 
     private func serverAnswers() async -> Bool {
         do {
-            _ = try await client.callTool("get_server_info", arguments: [:])
+            _ = try await client.callTool(ToolCatalog.getServerInfo, arguments: [:])
             return true
         } catch {
             await client.reset()
