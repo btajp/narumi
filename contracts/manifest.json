@@ -28,6 +28,9 @@
     "get_profile",
     "set_profile",
     "delete_profile",
-    "rebuild_catalog"
+    "rebuild_catalog",
+    "get_gaia_connection",
+    "set_gaia_connection",
+    "test_gaia_connection"
   ]
 }

@@ -87,6 +87,11 @@ class ToolContract:
         return bool(self.annotations.get("readOnlyHint", False))
 
     @property
+    def has_write_only_input(self) -> bool:
+        """Whether input validation must avoid exposing any instance values."""
+        return _contains_write_only(self.input_schema)
+
+    @property
     def input_examples(self) -> list[JsonDict]:
         return list(self.examples.get("input", []))
 
@@ -181,7 +186,11 @@ class ContractSet:
                     "errors": [{"path": "$", "message": f"unknown tool: {tool}", "validator": ""}],
                 },
             )
-        summary, errors = _collect_errors(validator, {} if args is None else args)
+        summary, errors = _collect_errors(
+            validator,
+            {} if args is None else args,
+            redact=self.tools[tool].has_write_only_input,
+        )
         if errors:
             raise InvalidArgumentError(
                 f"invalid arguments for {tool}: {summary}",
@@ -195,7 +204,9 @@ class ContractSet:
         validator = self._output_validators.get(tool)
         if validator is None:
             return
-        summary, errors = _collect_errors(validator, result)
+        summary, errors = _collect_errors(
+            validator, result, redact=self.tools[tool].has_write_only_input
+        )
         if errors:
             raise ContractMismatchError(
                 f"output of {tool} violates contract: {summary}",
@@ -538,16 +549,44 @@ def _require_str_list(document: Mapping[str, Any], key: str, *, where: str) -> l
     return list(value)
 
 
-def _collect_errors(validator: Draft202012Validator, instance: Any) -> tuple[str, list[JsonDict]]:
+def _contains_write_only(node: Any) -> bool:
+    if isinstance(node, dict):
+        return node.get("writeOnly") is True or any(
+            _contains_write_only(value) for key, value in node.items() if key not in _DATA_KEYS
+        )
+    if isinstance(node, list):
+        return any(_contains_write_only(value) for value in node)
+    return False
+
+
+def _collect_errors(
+    validator: Draft202012Validator, instance: Any, *, redact: bool = False
+) -> tuple[str, list[JsonDict]]:
     """Return ``(summary, errors)``; ``errors`` is sorted by instance path for stable output."""
     found: list[ValidationError] = list(validator.iter_errors(instance))
     if not found:
         return "", []
     top = best_match(found)
+    if redact:
+        # A malformed write-only value may be an object or may have appeared under an
+        # unknown key. Never interpolate jsonschema's message, instance, or untrusted path.
+        properties = validator.schema.get("properties", {})
+        items = sorted(
+            (_redacted_error_item(error, properties) for error in found),
+            key=lambda item: (item["path"], item["message"]),
+        )
+        return _redacted_error_item(top, properties)["message"], items
     items = sorted(
         (_error_item(error) for error in found), key=lambda item: (item["path"], item["message"])
     )
     return top.message, items
+
+
+def _redacted_error_item(error: ValidationError, properties: Mapping[str, Any]) -> JsonDict:
+    first = next(iter(error.absolute_path), None)
+    path = f"$.{first}" if isinstance(first, str) and first in properties else "$"
+    validator = str(error.validator) if error.validator is not None else ""
+    return {"path": path, "message": f"validation failed: {validator}", "validator": validator}
 
 
 def _error_item(error: ValidationError) -> JsonDict:

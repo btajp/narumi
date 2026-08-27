@@ -2,10 +2,11 @@ import NarumiMenuBarCore
 import SwiftUI
 
 /// The main window: 会議一覧 sidebar + meeting detail tabs, recording banner, toolbar with
-/// 取り込み / プロファイル / 診断 sheets and the jobs indicator. Pure MCP client — every data
-/// operation goes through `MainWindowModel` → `NarumiClient`.
+/// 取り込み / プロファイル / Gaia 接続 / 診断 sheets and the jobs indicator. Pure MCP client —
+/// every data operation goes through `NarumiClient`.
 struct MainWindowView: View {
     @ObservedObject var model: MainWindowModel
+    @State private var showGaiaConnectionSheet = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -40,6 +41,13 @@ struct MainWindowView: View {
                 }
                 .help("既定プロファイルの管理")
                 Button {
+                    showGaiaConnectionSheet = true
+                } label: {
+                    Label("Gaia 接続", systemImage: "link")
+                }
+                .labelStyle(.titleAndIcon)
+                .help("Gaia の接続 URL・API キー設定・接続テスト")
+                Button {
                     model.showDiagnosticsSheet = true
                 } label: {
                     Label("診断", systemImage: "stethoscope")
@@ -52,6 +60,9 @@ struct MainWindowView: View {
         }
         .sheet(isPresented: $model.showProfilesSheet) {
             ProfilesSheetView(model: model)
+        }
+        .sheet(isPresented: $showGaiaConnectionSheet) {
+            GaiaConnectionSheetView(client: model.client)
         }
         .sheet(isPresented: $model.showDiagnosticsSheet) {
             DiagnosticsSheetView(model: model)

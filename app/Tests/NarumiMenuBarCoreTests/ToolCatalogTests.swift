@@ -70,10 +70,19 @@ final class ToolCatalogTests: XCTestCase {
         }
     }
 
+    func testEveryContractToolHasAnAppSurface() throws {
+        let manifest = try loadManifest()
+        XCTAssertEqual(ToolCatalog.allUsed.count, 27)
+        XCTAssertEqual(Set(ToolCatalog.allUsed), Set(manifest.tools))
+    }
+
     func testNamedConstantsAreListedInAllUsed() {
         // Constants exist so call sites never use bare literals; each one must also be
         // registered in `allUsed`, or the parity check silently skips it.
-        for name in [ToolCatalog.startRecording, ToolCatalog.stopRecording, ToolCatalog.getServerInfo] {
+        for name in [
+            ToolCatalog.startRecording, ToolCatalog.stopRecording, ToolCatalog.getServerInfo,
+            ToolCatalog.getGaiaConnection, ToolCatalog.setGaiaConnection, ToolCatalog.testGaiaConnection,
+        ] {
             XCTAssertTrue(ToolCatalog.allUsed.contains(name), "\(name) missing from ToolCatalog.allUsed")
         }
     }

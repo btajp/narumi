@@ -1,347 +1,340 @@
-"""Minimal MCP Streamable HTTP client for gaia-library (stdlib ``urllib`` only, no new deps).
+"""Optional Gaia contract-v1 client over authenticated local MCP Streamable HTTP.
 
-Protocol: JSON-RPC 2.0 over POST — ``initialize`` → ``notifications/initialized`` once per
-session, then ``tools/call``. The ``Mcp-Session-Id`` response header is kept and echoed on every
-subsequent request; a 404 (session expired on the server) re-initializes once and retries.
-Response bodies may be ``application/json`` (single message or batch) or ``text/event-stream``
-(SSE, the ``data:`` payloads carry the JSON-RPC messages). This is a Python port of the parsing
-approach in ``app/Sources/NarumiMenuBar/MCPClient.swift``.
+Typed methods return the real Gaia response dictionaries, including entities/facts/refs,
+vocabulary_hints, speaker resolution statuses, and proposal IDs. Every typed operation
+checks ``get_server_info`` for contract-major compatibility and advertised capabilities.
+The check is repeated after the single supported 404/session-expiry retry.
 
-gaia-library is optional (AGENTS.md): :meth:`GaiaClient.from_env` returns ``None`` when
-``NARUMI_GAIA_URL`` is unset, and callers must treat ``None`` as "work from local data only".
-A configured-but-unreachable server raises :class:`EngineUnavailableError` — never a silent
-fallback.
-
-The typed helpers (``search_context`` / ``get_glossary`` / ``resolve_speakers`` /
-``propose_update``) follow the gaia-library contract sketch from the Notion design docs; the
-gaia-library contract is still a draft, so they read the result tolerantly (missing keys become
-empty results) and an unknown-tool error from the server is surfaced as
-:class:`EngineUnavailableError` with the server's message.
+``get_server_info(refresh=True)`` and ``require_capabilities(*tool_names)`` are public
+read-only connection checks for the app/server integration. Neither mutates data.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import urllib.error
-import urllib.request
+import copy
+import re
 from typing import Any
 
-from narumi.errors import EngineUnavailableError, ErrorCode, InvalidArgumentError, NarumiError
+from narumi.errors import (
+    ContractMismatchError,
+    EngineUnavailableError,
+    InvalidArgumentError,
+    NarumiError,
+)
+from narumi.gaia._models import validate_response
+from narumi.gaia._protocol import (
+    PROTOCOL_VERSION,
+    HttpStatusError,
+    RpcError,
+    Transport,
+    rpc_error,
+    unwrap_tool_result,
+)
 
 ENV_GAIA_URL = "NARUMI_GAIA_URL"
-PROTOCOL_VERSION = "2025-06-18"
+ENV_GAIA_API_KEY = "NARUMI_GAIA_API_KEY"
 CLIENT_NAME = "narumi-pipeline"
 CLIENT_VERSION = "1"
-RPC_METHOD_NOT_FOUND = -32601
-_ERROR_BODY_TAIL = 500
-_UNKNOWN_TOOL_MARKERS = ("unknown tool", "not found", "unsupported")
-
-
-class _HttpStatusError(Exception):
-    """Internal: non-2xx HTTP response (converted to a NarumiError at the API boundary)."""
-
-    def __init__(self, status: int, body: str) -> None:
-        super().__init__(f"HTTP {status}")
-        self.status = status
-        self.body = body
-
-
-class _RpcError(Exception):
-    """Internal: JSON-RPC ``error`` response (converted at the API boundary)."""
-
-    def __init__(self, code: int, message: str) -> None:
-        super().__init__(message)
-        self.code = code
-        self.message = message
+SUPPORTED_CONTRACT_MAJOR = 1
+Scope = str | list[str]
+_SEARCH_TYPES = {"person", "organization", "engagement", "entity", "interaction", "glossary"}
+_PROPOSAL_TYPES = _SEARCH_TYPES | {"fact", "ref"}
+_SEMVER = re.compile(
+    r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    r"(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?"
+)
 
 
 class GaiaClient:
-    """One MCP session against a gaia-library Streamable HTTP endpoint."""
+    """One authenticated MCP session; no configured endpoint means no Gaia dependency."""
 
-    def __init__(self, url: str, *, timeout: float = 30.0) -> None:
-        if not isinstance(url, str) or not url.strip():
-            raise InvalidArgumentError("gaia-library URL must be a non-empty string")
-        self.url = url.strip()
+    def __init__(self, url: str, *, api_key: str | None = None, timeout: float = 30.0) -> None:
+        self._transport = Transport(url, api_key=api_key, timeout=timeout)
+        self.url = self._transport.url
         self.timeout = timeout
-        self._session_id: str | None = None
         self._initialized = False
-        self._next_id = 1
+        self._server_info: dict[str, Any] | None = None
 
     @classmethod
     def from_env(cls) -> GaiaClient | None:
-        """Client from ``$NARUMI_GAIA_URL``, or ``None`` when unset (gaia-library is optional)."""
-        url = os.environ.get(ENV_GAIA_URL, "").strip()
-        return cls(url) if url else None
+        """Use saved app settings, then NARUMI_GAIA_URL/API_KEY; None means no endpoint.
+
+        The historical name remains compatible with pipeline callers. Settings construct
+        GaiaClient directly, so this lazy import does not create an import cycle.
+        """
+        from narumi.gaia.settings import get_default_gaia_client
+
+        return get_default_gaia_client()
 
     def reset(self) -> None:
-        """Drop the session so the next call re-initializes."""
-        self._session_id = None
+        """Drop both the session and its metadata; the next operation checks them anew."""
+        self._transport.session_id = None
         self._initialized = False
+        self._server_info = None
 
-    # ------------------------------------------------------------------ tool calls
     def call(self, tool: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
-        """``tools/call`` returning the structured result payload as a dict.
+        """Low-level MCP call; product code should prefer the validated typed helpers.
 
-        Prefers ``structuredContent``; falls back to parsing the joined text content as JSON,
-        else returns ``{"text": ...}``. Raises :class:`EngineUnavailableError` when the server
-        is unreachable or does not know the tool, and a :class:`NarumiError` carrying the
-        server's structured error code when the tool itself reports an error.
+        Structured Gaia RPC/tool errors retain their original code in details.gaia_code.
+        Gaia-only unauthorized/conflict codes map to scope_denied/invalid_argument;
+        unknown tools and not_implemented map to engine_unavailable.
         """
-        params = {"name": tool, "arguments": dict(args or {})}
-        try:
-            result = self._call_once(params)
-        except _HttpStatusError as err:
-            if err.status != 404:
-                raise self._http_error(err) from None
-            # Session expired on the server side: re-initialize once and retry (MCPClient.swift).
-            self.reset()
-            try:
-                result = self._call_once(params)
-            except _HttpStatusError as retry_err:
-                raise self._http_error(retry_err) from None
-            except _RpcError as retry_err:
-                raise _rpc_error(tool, retry_err) from None
-        except _RpcError as err:
-            raise _rpc_error(tool, err) from None
-        return _unwrap_tool_result(tool, result)
+        return self._perform(tool, args, typed=False)
 
-    # Typed helpers (gaia-library contract sketch; results are read tolerantly).
+    def get_server_info(self, *, refresh: bool = False) -> dict[str, Any]:
+        """Return validated, compatible metadata (cached per session unless refreshed)."""
+        if refresh:
+            self._server_info = None
+        if self._server_info is None:
+            self._accept_server_info(self._perform("get_server_info", {}, typed=False))
+        return self._transport.redact_api_key(copy.deepcopy(self._server_info))
+
+    def require_capabilities(self, *tool_names: str) -> dict[str, Any]:
+        """Validate compatibility and required tool availability without invoking those tools."""
+        info = self.get_server_info()
+        if any(not isinstance(name, str) or not name.strip() for name in tool_names):
+            raise InvalidArgumentError("required Gaia tool names must be non-empty strings")
+        try:
+            self._check_capabilities(self._server_info, tool_names)
+        except NarumiError as err:
+            raise self._transport.scrub_error(err) from None
+        return info
+
     def search_context(
         self,
         query: str,
         *,
-        engagement: str | None = None,
-        scope: str | None = None,
+        scope: Scope | None = None,
         limit: int | None = None,
-    ) -> list[dict[str, Any]]:
-        """References relevant to ``query`` (each with ``system`` / ``uri`` / ``summary`` …)."""
-        args: dict[str, Any] = {"query": query}
-        if engagement is not None:
-            args["engagement"] = engagement
-        if scope is not None:
-            args["scope"] = scope
+        types: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Return query/scopes/entities/glossary/interactions/hints from Gaia's search."""
+        if not isinstance(query, str):
+            raise InvalidArgumentError("query must be a string")
+        args = _scope_args(scope)
+        args["query"] = query
         if limit is not None:
-            args["limit"] = int(limit)
-        result = self.call("search_context", args)
-        refs = result.get("references", result.get("results"))
-        return [ref for ref in refs if isinstance(ref, dict)] if isinstance(refs, list) else []
+            if type(limit) is not int or not 1 <= limit <= 50:
+                raise InvalidArgumentError("limit must be an integer between 1 and 50")
+            args["limit"] = limit
+        if types is not None:
+            if not isinstance(types, list) or any(
+                not isinstance(value, str) or value not in _SEARCH_TYPES for value in types
+            ):
+                raise InvalidArgumentError("types must contain supported Gaia search types")
+            args["types"] = list(types)
+        return self._perform("search_context", args, typed=True)
 
-    def get_glossary(self, engagement: str | None = None) -> list[dict[str, Any]]:
-        """Glossary entries (``term`` / ``aliases`` / ``note`` / optional ``kind``)."""
-        args: dict[str, Any] = {}
-        if engagement is not None:
-            args["engagement"] = engagement
-        result = self.call("get_glossary", args)
-        terms = result.get("terms", result.get("glossary"))
-        return [term for term in terms if isinstance(term, dict)] if isinstance(terms, list) else []
+    def get_engagement(self, name: str, *, scope: Scope | None = None) -> dict[str, Any]:
+        """Resolve an engagement NAME within the explicit scope; never coerce it to an ID."""
+        if not isinstance(name, str) or not name.strip():
+            raise InvalidArgumentError("engagement name must be a non-empty string")
+        return self._perform("get_engagement", {**_scope_args(scope), "name": name}, typed=True)
+
+    def get_glossary(
+        self,
+        engagement: str | None = None,
+        *,
+        scope: Scope | None = None,
+        engagement_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return terms and vocabulary_hints, optionally resolving a scoped engagement name."""
+        args = self._engagement_args(engagement, engagement_id, scope)
+        return self._perform("get_glossary", args, typed=True)
 
     def resolve_speakers(
-        self, names: list[str], *, engagement: str | None = None
+        self,
+        names: list[str],
+        *,
+        engagement: str | None = None,
+        scope: Scope | None = None,
+        engagement_id: int | None = None,
     ) -> dict[str, Any]:
-        """Map name hints to known identities: ``{hint: {name, aliases, note?}}``."""
-        args: dict[str, Any] = {"names": list(names)}
-        if engagement is not None:
-            args["engagement"] = engagement
-        result = self.call("resolve_speakers", args)
-        speakers = result.get("speakers")
-        return speakers if isinstance(speakers, dict) else {}
+        """Return results with matched/ambiguous/unmatched status and explicit candidates."""
+        if not isinstance(names, list) or not names or any(not isinstance(n, str) for n in names):
+            raise InvalidArgumentError("display names must be a non-empty list of strings")
+        args = self._engagement_args(engagement, engagement_id, scope)
+        result = self._perform(
+            "resolve_speakers", {**args, "display_names": list(names)}, typed=True
+        )
+        if [item["input"] for item in result["results"]] != names:
+            raise ContractMismatchError(
+                "gaia-library speaker results do not correspond to the requested display names",
+                details={"tool": "resolve_speakers"},
+            )
+        return result
 
     def propose_update(
         self,
         *,
-        entity_type: str,
+        target_type: str,
+        action: str,
         patch: dict[str, Any],
+        kind: str,
+        request_id: str,
         scope: str | None = None,
-        provenance: str | None = None,
-        request_id: str | None = None,
+        provenance: dict[str, Any] | None = None,
+        target_id: int | None = None,
     ) -> dict[str, Any]:
-        """Queue an update proposal (the only write path into gaia-library, 絶対原則 5)."""
-        args: dict[str, Any] = {"entity_type": entity_type, "patch": dict(patch)}
-        if scope is not None:
-            args["scope"] = scope
+        """Queue an idempotent proposal; approval is exclusively a human-side action."""
+        if not isinstance(target_type, str) or target_type not in _PROPOSAL_TYPES:
+            raise InvalidArgumentError("unsupported Gaia proposal target_type")
+        if action not in ("insert", "update", "supersede") or kind not in ("fact", "inference"):
+            raise InvalidArgumentError("unsupported Gaia proposal action or kind")
+        if not isinstance(patch, dict):
+            raise InvalidArgumentError("proposal patch must be an object")
+        if not isinstance(request_id, str) or len(request_id) < 8:
+            raise InvalidArgumentError("request_id must contain at least 8 characters")
+        try:
+            if len(request_id.encode("utf-8")) > 256:
+                raise InvalidArgumentError("request_id must be at most 256 UTF-8 bytes")
+        except UnicodeError:
+            raise InvalidArgumentError("request_id must be valid UTF-8") from None
+        if (action == "insert" and target_id is not None) or (
+            action != "insert" and type(target_id) is not int
+        ):
+            raise InvalidArgumentError("target_id is required only for update or supersede")
+        if action == "supersede" and target_type != "fact":
+            raise InvalidArgumentError("supersede is only supported for facts")
+        if scope is not None and not isinstance(scope, str):
+            raise InvalidArgumentError("proposal scope must be a single string")
+        args = {
+            **_scope_args(scope),
+            "target_type": target_type,
+            "action": action,
+            "patch": dict(patch),
+            "kind": kind,
+            "request_id": request_id,
+        }
+        if target_id is not None:
+            args["target_id"] = target_id
         if provenance is not None:
-            args["provenance"] = provenance
-        if request_id is not None:
-            args["request_id"] = request_id
-        return self.call("propose_update", args)
+            _validate_provenance(provenance)
+            args["provenance"] = dict(provenance)
+        return self._perform("propose_update", args, typed=True)
 
-    # ------------------------------------------------------------------ session / transport
-    def _call_once(self, params: dict[str, Any]) -> dict[str, Any]:
-        self._ensure_initialized()
-        return self._request("tools/call", params)
+    def _engagement_args(
+        self, name: str | None, engagement_id: int | None, scope: Scope | None
+    ) -> dict[str, Any]:
+        args = _scope_args(scope)
+        if name is not None:
+            if engagement_id is not None:
+                raise InvalidArgumentError("specify engagement name or engagement_id, not both")
+            engagement_id = self.get_engagement(name, scope=scope)["engagement"]["id"]
+        if engagement_id is not None:
+            if type(engagement_id) is not int:
+                raise InvalidArgumentError("engagement_id must be an integer")
+            args["engagement_id"] = engagement_id
+        return args
+
+    def _perform(self, tool: str, args: dict[str, Any] | None, *, typed: bool) -> dict[str, Any]:
+        if not isinstance(tool, str) or not tool.strip():
+            raise InvalidArgumentError("Gaia tool name must be a non-empty string")
+        if args is not None and not isinstance(args, dict):
+            raise InvalidArgumentError("Gaia arguments must be an object")
+        for attempt in range(2):
+            try:
+                self._ensure_initialized()
+                if typed:
+                    if self._server_info is None:
+                        self._accept_server_info(self._raw_tool("get_server_info", {}))
+                    self._check_capabilities(self._server_info, (tool,))
+                result = self._raw_tool(tool, dict(args or {}))
+                return validate_response(tool, result) if typed else result
+            except HttpStatusError as err:
+                if err.status == 404 and attempt == 0:
+                    self.reset()
+                    continue
+                raise self._transport.scrub_error(self._transport.http_error(err)) from None
+            except NarumiError as err:
+                raise self._transport.scrub_error(err) from None
+        raise AssertionError("unreachable retry state")
+
+    def _raw_tool(self, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            result = self._transport.request("tools/call", {"name": tool, "arguments": args})
+        except RpcError as err:
+            raise rpc_error(tool, err) from None
+        payload = unwrap_tool_result(tool, result)
+        # All public/typed calls and implicit metadata reads pass this boundary. Do not
+        # turn reflected credentials into glossary terms, facts, saved snapshots or prompts.
+        # Generic Bearer masking belongs to error display, not vocabulary/identity checks.
+        if tool == "get_server_info":
+            return self._transport.redact_api_key(payload)
+        if self._transport.contains_api_key(payload):
+            raise ContractMismatchError(
+                "gaia-library returned credential material in a tool response"
+            )
+        return payload
 
     def _ensure_initialized(self) -> None:
         if self._initialized:
             return
-        self._request(
-            "initialize",
-            {
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {"name": CLIENT_NAME, "version": CLIENT_VERSION},
-            },
-        )
-        self._notify("notifications/initialized")
-        self._initialized = True
-
-    def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        rpc_id = self._next_id
-        self._next_id += 1
-        body = {"jsonrpc": "2.0", "id": rpc_id, "method": method, "params": params}
-        data, content_type = self._post(body)
-        message = _extract_response(data, content_type, rpc_id)
-        error = message.get("error")
-        if isinstance(error, dict):
-            code = error.get("code")
-            raise _RpcError(
-                int(code) if isinstance(code, int | float) else -1,
-                str(error.get("message") or "unknown error"),
-            )
-        result = message.get("result")
-        if not isinstance(result, dict):
-            raise NarumiError(f"gaia-library returned no result for {method}")
-        return result
-
-    def _notify(self, method: str) -> None:
-        self._post({"jsonrpc": "2.0", "method": method})
-
-    def _post(self, body: dict[str, Any]) -> tuple[bytes, str]:
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-            "MCP-Protocol-Version": PROTOCOL_VERSION,
-        }
-        if self._session_id:
-            headers["Mcp-Session-Id"] = self._session_id
-        request = urllib.request.Request(
-            self.url,
-            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:  # noqa: S310
-                session_id = response.headers.get("Mcp-Session-Id")
-                if session_id:
-                    self._session_id = session_id
-                content_type = (response.headers.get("Content-Type") or "").lower()
-                return response.read(), content_type
-        except urllib.error.HTTPError as err:
-            tail = err.read().decode("utf-8", errors="replace")[-_ERROR_BODY_TAIL:]
-            raise _HttpStatusError(err.code, tail) from None
-        except (urllib.error.URLError, OSError) as err:
-            reason = getattr(err, "reason", None) or err
-            raise EngineUnavailableError(
-                f"gaia-library unreachable at {self.url}: {reason}",
-                details={"url": self.url},
-            ) from None
-
-    def _http_error(self, err: _HttpStatusError) -> NarumiError:
-        message = f"gaia-library HTTP {err.status} at {self.url}: {err.body}"
-        details = {"url": self.url, "status": err.status}
-        if err.status >= 500 or err.status == 404:
-            return EngineUnavailableError(message, details=details)
-        return NarumiError(message, details=details)
-
-
-# ---------------------------------------------------------------------------- response parsing
-def _rpc_error(tool: str, err: _RpcError) -> NarumiError:
-    """Unknown-tool errors → ``engine_unavailable`` with the server's message; else internal."""
-    lowered = err.message.lower()
-    details = {"tool": tool, "rpc_code": err.code}
-    if err.code == RPC_METHOD_NOT_FOUND or any(m in lowered for m in _UNKNOWN_TOOL_MARKERS):
-        return EngineUnavailableError(err.message, details=details)
-    return NarumiError(f"gaia-library RPC error {err.code}: {err.message}", details=details)
-
-
-def _unwrap_tool_result(tool: str, result: dict[str, Any]) -> dict[str, Any]:
-    structured = result.get("structuredContent")
-    payload = structured if isinstance(structured, dict) else None
-    if result.get("isError"):
-        error = payload.get("error") if payload else None
-        if isinstance(error, dict):
-            code_value = str(error.get("code") or "")
-            try:
-                code = ErrorCode(code_value)
-            except ValueError:
-                code = ErrorCode.INTERNAL
-            raise NarumiError(
-                str(error.get("message") or f"gaia-library tool {tool} failed"),
-                code=code,
-                details={
-                    "tool": tool,
-                    **({"gaia": error["details"]} if error.get("details") else {}),
+            result = self._transport.request(
+                "initialize",
+                {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": CLIENT_NAME, "version": CLIENT_VERSION},
                 },
             )
-        text = _joined_text(result)
-        raise NarumiError(text or f"gaia-library tool {tool} failed", details={"tool": tool})
-    if payload is not None:
-        return payload
-    text = _joined_text(result)
-    if text:
-        try:
-            parsed = json.loads(text)
-        except ValueError:
-            parsed = None
-        if isinstance(parsed, dict):
-            return parsed
-    return {"text": text}
+        except RpcError as err:
+            raise rpc_error("initialize", err) from None
+        if result.get("protocolVersion") != PROTOCOL_VERSION:
+            raise ContractMismatchError("gaia-library negotiated an unsupported MCP protocol")
+        self._transport.post({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        self._initialized = True
+
+    def _accept_server_info(self, result: dict[str, Any]) -> None:
+        validate_response("get_server_info", result)
+        version = result["contract_version"]
+        match = _SEMVER.fullmatch(version)
+        if (
+            result["name"] != "gaia_library"
+            or match is None
+            or int(match[1]) != SUPPORTED_CONTRACT_MAJOR
+        ):
+            raise ContractMismatchError(
+                "gaia-library contract is incompatible; "
+                "narumi requires gaia_library contract major 1",
+                details={"tool": "get_server_info", "supported_contract_major": 1},
+            )
+        self._server_info = copy.deepcopy(result)
+
+    @staticmethod
+    def _check_capabilities(info: dict[str, Any], tools: tuple[str, ...]) -> None:
+        missing = sorted(set(tools) - set(info["capabilities"]["tools"]))
+        if missing:
+            raise EngineUnavailableError(
+                "gaia-library does not advertise required tools: " + ", ".join(missing),
+                details={"missing_tools": missing},
+            )
 
 
-def _joined_text(result: dict[str, Any]) -> str:
-    texts: list[str] = []
-    content = result.get("content")
-    if isinstance(content, list):
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                texts.append(str(item.get("text") or ""))
-    return "\n".join(texts)
+def _scope_args(scope: Scope | None) -> dict[str, Any]:
+    if scope is None:
+        return {}
+    values = scope if isinstance(scope, list) else [scope]
+    if not values or any(not isinstance(item, str) or not item.strip() for item in values):
+        raise InvalidArgumentError(
+            "scope must be a non-empty string or a non-empty list of strings"
+        )
+    return {"scope": list(scope) if isinstance(scope, list) else scope}
 
 
-def _extract_response(data: bytes, content_type: str, expected_id: int) -> dict[str, Any]:
-    """Pick the JSON-RPC response with ``expected_id`` from a JSON body or an SSE stream."""
-    if "text/event-stream" in content_type:
-        try:
-            candidates: list[Any] = [json.loads(payload) for payload in _sse_events(data)]
-        except ValueError as err:
-            raise NarumiError(f"gaia-library sent an invalid SSE payload: {err}") from None
-    else:
-        try:
-            node = json.loads(data)
-        except ValueError as err:
-            raise NarumiError(f"gaia-library returned invalid JSON: {err}") from None
-        candidates = node if isinstance(node, list) else [node]
-    for candidate in candidates:
-        if isinstance(candidate, dict) and candidate.get("id") == expected_id:
-            return candidate
-    raise NarumiError(f"gaia-library response is missing id {expected_id}")
-
-
-def _sse_events(data: bytes) -> list[str]:
-    """``data:`` payloads of every SSE event in the body (multi-line data joined with newlines)."""
-    text = data.decode("utf-8", errors="replace")
-    events: list[str] = []
-    current: list[str] = []
-
-    def flush() -> None:
-        if current:
-            joined = "\n".join(current)
-            if joined.strip():
-                events.append(joined)
-            current.clear()
-
-    for raw_line in text.split("\n"):
-        line = raw_line[:-1] if raw_line.endswith("\r") else raw_line
-        if not line:
-            flush()
-            continue
-        if line.startswith(":"):
-            continue
-        if line.startswith("data:"):
-            value = line[len("data:") :]
-            if value.startswith(" "):
-                value = value[1:]
-            current.append(value)
-    flush()
-    return events
+def _validate_provenance(value: dict[str, Any]) -> None:
+    allowed = {"ref_id", "system", "uri", "title", "note", "snapshot"}
+    if not isinstance(value, dict) or set(value) - allowed:
+        raise InvalidArgumentError("provenance must be a Gaia provenance object")
+    if "ref_id" in value:
+        if type(value["ref_id"]) is not int or len(value) != 1:
+            raise InvalidArgumentError("provenance.ref_id must be an integer without inline fields")
+        return
+    if any(
+        not isinstance(value.get(key), str) or not value[key].strip()
+        for key in ("system", "uri", "note")
+    ):
+        raise InvalidArgumentError("inline provenance requires system, uri and note")
+    if any(not isinstance(item, str) for item in value.values()):
+        raise InvalidArgumentError("inline provenance values must be strings")

@@ -2,7 +2,7 @@
 
 narumi は、macOS 上でローカルに会議を録画し、終了後に議事録を自動生成するシステムです。メニューバーのワンボタンで画面・マイク・システム音声を **別トラック** で録画し、ffmpeg による分離 → 文字起こし → 話者分離 → 突合 → 生成 → エクスポートの工程を、会議ごとの「セッションバンドル」（ファイルが正本）に積み上げます。決定的な処理はスクリプトで固定手順として実行し、LLM は読解・統合・生成にだけ使います。既定はローカル完結（Whisper 系）で、音声やテキストを外部へ送るエンジン / LLM は会議ごとの `external_send_policy` で明示的にオプトインしない限り使えません。
 
-相棒の **gaia-library**（記憶の索引 MCP）とは任意連携です。gaia-library が無くても narumi 単体で完結し、あれば語彙・参加者・前回要点などのコンテキスト注入で精度が上がります（コンテキスト注入と gaia-library エクスポートは Step 3 以降で **未実装** です）。設計の正本は Notion「議事録生成システム」ページで、リポジトリ内の要約と開発ルールは [AGENTS.md](AGENTS.md)、基盤の具体設計は [docs/superpowers/specs/](docs/superpowers/specs/) にあります。
+相棒の **gaia-library**（記憶の索引 MCP）とは任意連携です。gaia-library が無くても narumi 単体で完結し、接続すると語彙・参加者・前回要点などを会議ブリーフに取り込みます。議事録の書き戻しは提案キューへの登録だけで、人間の承認は gaia-library 側で行います。設計の正本は Notion「議事録生成システム」ページで、リポジトリ内の要約と開発ルールは [AGENTS.md](AGENTS.md)、基盤の具体設計は [docs/superpowers/specs/](docs/superpowers/specs/) にあります。
 
 ## 動作要件
 
@@ -45,7 +45,7 @@ open dist/narumi.app     # メニューバーに 🕵️ が出る。「録画�
 ```
 録画（screen.mp4 / mic.m4a / system.m4a を別トラック）
   → preprocess   ffmpeg で 16kHz mono wav に分離（決定的）
-  → brief        会議ブリーフ context/brief.json（NARUMI_GAIA_URL 設定時のみ gaia-library に照会。語彙は transcribe / integrate、本文は minutes プロンプトへ）
+  → brief        会議ブリーフ context/brief.json（Gaia 接続設定がある場合だけ照会。語彙は transcribe / integrate、本文は minutes プロンプトへ）
   → transcribe   文字起こし（エンジン抽象化。既定はローカル Whisper: mlx-whisper → faster-whisper）
   → diarize      話者分離 第 1 層 = トラック（me / other）、第 2 層 pyannote（既定 none）、第 4 層 = 外部トランスクリプトの話者名
   → slides       キースライド抽出（画面トラックがあるときだけ。フレーム抽出 → pHash 重複除去 → preprocess/slides.json）
@@ -63,8 +63,8 @@ open dist/narumi.app     # メニューバーに 🕵️ が出る。「録画�
 | 項目 | 状態 |
 |---|---|
 | セッションバンドル / manifest / 冪等ステージ実行 | 実装済み |
-| 契約（`contracts/`）と MCP サーバー（v1 の 24 ツール、stdio / Streamable HTTP） | 実装済み |
-| 操作面パリティ拡張（録画状態・議事録取得・全文検索・既存録画の取り込み・プロファイル＋自動エクスポート・トラック破棄・会議削除・ジョブ取消・カタログ再構築） | 実装済み（MCP ツール＋CLI。アプリ本体ウィンドウは未実装） |
+| 契約（`contracts/`）と MCP サーバー（v1 の 27 ツール、stdio / Streamable HTTP） | 実装済み |
+| 操作面パリティ拡張（録画状態・議事録取得・全文検索・既存録画の取り込み・プロファイル＋自動エクスポート・トラック破棄・会議削除・ジョブ取消・カタログ再構築） | 実装済み（MCP ツール＋CLI＋アプリ本体ウィンドウ） |
 | 製品 CLI `narumi`（契約から自動生成の 1:1 写像。サーバー自動検出、無ければ in-process） | 実装済み |
 | 録画アプリ / `narumi-recorder` | 実装済み（ScreenCaptureKit の実キャプチャ経路は実機での手動確認が未了） |
 | `narumi.app` によるサーバーの起動・停止（Terminal 不要） | 実装済み（repo モード＝uv とチェックアウトが必要 / bundled モード＝`--runtime` ビルドで自己完結） |
@@ -72,8 +72,9 @@ open dist/narumi.app     # メニューバーに 🕵️ が出る。「録画�
 | ffmpeg 分離 → Whisper → プレーン議事録（`narumi.pipeline`） | 実装済み（`fake` エンジンで E2E テスト済み。実エンジンは `-m real` の opt-in smoke） |
 | 外部トランスクリプト突合（Notion AI / Zoom / Meet / Teams） | 実装済み（WebVTT / SRT / Zoom txt / プレーンの決定的パーサ。`register_context` が即時パースして `transcripts/ext-*` として突合に参加、話者名は第 4 層で実名解決。URL は参照保存のみで取得は未実装） |
 | キースライド抽出（pHash）/ Vision 読解 / 第 3 層話者判定 | 実装済み（pHash は pillow の自前実装、議事録へ画像埋め込みまで。第 3 層は vision 対応プロバイダが送信ポリシーで許可されたときだけ実行。実 vision プロバイダでの実機確認は未了） |
-| gaia-library 照会によるコンテキスト注入（会議ブリーフ v1） | 実装済み（`context/brief.json` を常時生成。語彙は transcribe / integrate、本文は minutes プロンプトに予算内で注入。gaia-library サーバー本体は別リポジトリで未実装 — `NARUMI_GAIA_URL` 設定時のみ照会し、テストはフェイクサーバーで通す） |
-| Notion / gaia-library エクスポーター | 実装済み（Notion は REST でページ作成＋Markdown→ブロック変換。スライド画像のアップロードは未対応で、ローカル画像の場所を callout で案内。gaia-library は `propose_update` の提案キューのみ＝絶対原則 5。実サーバーでの検証は未了） |
+| gaia-library 照会によるコンテキスト注入（会議ブリーフ） | 実装済み（実契約の scope 付き照会と案件名から ID への解決。参照結果を `context/brief.json` に保存し、語彙・参加者・背景を注入。契約版とクライアントの識別情報も確認） |
+| Gaia 接続設定 | 実装済み（アプリの「Gaia 接続」から URL・API キーの保存、無効化、接続テスト。MCP と CLI にも同じ操作を公開） |
+| Notion / gaia-library エクスポーター | 実装済み（Notion は REST でページ作成＋Markdown→ブロック変換。スライド画像のアップロードと実環境検証は未対応。gaia-library は `propose_update` の提案キューのみ＝絶対原則 5。実プロセスで認証・scope・提案の重複防止・agent の承認拒否を検証） |
 | アップグレード再生成（影響区間だけ第 2 段を再実行） | 実装済み（`merged/integrate_cache.json` の区間フィンガープリントで、追加ソースが触れた区間だけ LLM を再実行） |
 
 ## コマンド
@@ -92,9 +93,25 @@ scripts/gen-types.sh                                     # 契約 → pydantic �
 cd app && swift build && swift test                      # 録画アプリ / recorder CLI
 ```
 
+### gaia-library との接続（任意）
+
+gaia-library の HTTP サーバーを起動し、narumi 用の agent クライアントと API キーを用意しておきます。narumi のメインウィンドウで「Gaia 接続」を開きます。
+
+1. **接続先 URL**: 同じ Mac 上の HTTP エンドポイントを入力します（例 `http://127.0.0.1:4111/mcp`）。外部への誤送信を防ぐため loopback 以外、URL 内の認証情報、クエリ、リダイレクトは拒否します。
+2. **API キー**: gaia-library が発行したキーを入力して保存します。キー欄は再表示しません。同じ URL では空欄で既存キーを維持し、URL を変えた場合は旧キーを引き継ぎません。削除・連携無効化は専用の操作を使います。
+3. **接続テスト**: 保存後に実行します。サーバーの契約版・クライアント名・既定 scope を確認するだけで、提案や承認は行いません。会議の scope / engagement は既存のプロファイル・会議設定で指定します。
+
+保存先は `<NARUMI_HOME>/gaia.json`（所有者だけが読み書きできる `0600`）です。キーは暗号化せず保存するため、同じ OS アカウントからは読めます。プロファイル、会議バンドル、ツール応答にはキーを保存しません。保存済み設定を優先し、未保存の場合だけ `NARUMI_GAIA_URL` / `NARUMI_GAIA_API_KEY` を参照します。アプリで無効化した後は環境変数から再有効化されません。
+
+未設定なら従来どおり単体で動作します。設定済みの接続が失敗した場合はエラーを表示し、別サーバーや未認証接続へ黙って切り替えません。既存ブリーフを再利用する場合も接続先の識別情報を確認するため、設定した gaia-library サーバーが必要です。
+
+実 gaia-library との結合テストは `NARUMI_GAIA_BIN=/path/to/gaia uv run pytest pipeline/tests/test_gaia_live.py` で任意実行できます。一時設定・DB・キーを作成して検証し、ユーザーの既存データは使いません。環境変数を指定しなければスキップされます。
+
 ### 製品 CLI `narumi`
 
 `narumi` は MCP ツールの **1:1 写像** です（`docs/superpowers/specs/2026-08-27-narumi-surface-parity-design.md`）。サブコマンドは `contracts/` から自動生成され（ツール名の `_` を `-` に置換）、オプションは `inputSchema` から型付きで生成されます（string / integer / number / boolean はそのまま、array / object は JSON 文字列、`scope` セレクタは名前 1 つか JSON 配列）。`request_id` は省略すると UUID4 を自動発番します。
+
+nullable な項目は `--clear-<項目>` で JSON `null` を明示できます。例えば `narumi set-gaia-connection --clear-url` は連携を無効化し、`--clear-api-key` はキーだけを削除します。省略は既存値を保持し、文字列 `null` を値として渡しても削除にはなりません。値と clear の同時指定は拒否します。既存オプション名と衝突する場合は clear 側に接尾辞を付けるため、正確な名前は `--help` で確認してください。
 
 ```sh
 uv run narumi list-meetings --scope cloudnative --limit 10
@@ -106,6 +123,8 @@ uv run narumi tool <tool_name> --json '{"...": "..."}'   # 汎用エスケープ
 ```
 
 接続先は `--server-url`（既定 `NARUMI_SERVER_URL` → `http://127.0.0.1:8765/mcp`）です。サーバーが応答すればそこへ MCP（Streamable HTTP）で送り、応答が無ければ同じディスパッチ経路を in-process で実行します（`--require-server` / `--in-process` で強制。録画系ツールは in-process では拒否）。出力は結果 JSON（`--pretty` 既定、`--raw` で 1 行）で、エラーは契約の `error_envelope` を stderr に出し終了コード 2 で終わります。`--data-root PATH`（または `NARUMI_HOME`）は in-process 実行のデータルートを切り替えます。
+
+Gaia のキー保存など、契約に `writeOnly` 入力を持つツールの HTTP 通信は同じ Mac 上の loopback HTTP に限定します。`localhost` は数値アドレスへ固定し、接続確認・初期化から終了まで環境プロキシとリダイレクトを使いません。それ以外のツールの接続方法は変わりません。
 
 ### dev CLI `narumi-dev`
 
@@ -133,6 +152,7 @@ uv run narumi-dev doctor                                 # 環境診断
 ```
 $NARUMI_HOME/
 ├── narumi.db                 # 再構築可能なカタログ＋検索索引（`narumi-dev catalog rebuild`）
+├── gaia.json                 # 任意の Gaia 接続設定・API キー（0600。会議データとは別）
 └── meetings/<meeting_id>/    # セッションバンドル（ファイルが正本）
     ├── manifest.json
     ├── tracks/               # 原録音・録画（破棄可）

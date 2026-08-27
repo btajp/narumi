@@ -173,7 +173,9 @@ def enqueue_process(ctx: ServerContext, meeting_id: str, *, force: bool = False)
         return run_pipeline_job(
             ctx,
             meeting_id,
-            lambda bundle: narumi_pipeline.process_meeting(bundle, force=force, progress=progress),
+            lambda bundle: narumi_pipeline.process_meeting(
+                bundle, force=force, progress=progress, gaia_client_factory=ctx.gaia.client
+            ),
         )
 
     return ctx.jobs.submit("process", meeting_id, run)
@@ -192,7 +194,12 @@ def enqueue_regenerate(ctx: ServerContext, meeting_id: str, *, force: bool, reas
             ctx,
             meeting_id,
             lambda bundle: narumi_pipeline.refresh_meeting(
-                bundle, force=force, progress=progress, reason=reason, job_id=progress.job_id
+                bundle,
+                force=force,
+                progress=progress,
+                reason=reason,
+                job_id=progress.job_id,
+                gaia_client_factory=ctx.gaia.client,
             ),
         )
 
@@ -215,6 +222,7 @@ def perform_export(
         options=dict(options),
         minutes_version=minutes_version,
         request_id=request_id,
+        gaia_client_factory=ctx.gaia.client,
     )
     payload = {
         "destination": str(result.destination),

@@ -128,7 +128,15 @@ async def test_cancel_job_tool_restores_manifest_status(
     entered = threading.Event()
     gate = threading.Event()
 
-    def blocking_refresh(bundle, *, force=False, progress=None, reason="regenerate", job_id=None):
+    def blocking_refresh(
+        bundle,
+        *,
+        force=False,
+        progress=None,
+        reason="regenerate",
+        job_id=None,
+        gaia_client_factory=None,
+    ):
         progress("align", 0.1)
         entered.set()
         assert gate.wait(10)
@@ -179,7 +187,15 @@ async def test_cancel_job_tool_errors(
     write_fake_minutes(bundle)
     ctx.catalog.upsert_meeting(bundle)
 
-    def instant(bundle, *, force=False, progress=None, reason="regenerate", job_id=None):
+    def instant(
+        bundle,
+        *,
+        force=False,
+        progress=None,
+        reason="regenerate",
+        job_id=None,
+        gaia_client_factory=None,
+    ):
         return ProcessResult(meeting_id=bundle.meeting_id, minutes_version=1)
 
     monkeypatch.setattr("narumi.pipeline.refresh_meeting", instant)

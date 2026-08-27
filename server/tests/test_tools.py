@@ -58,7 +58,7 @@ async def test_single_session_flow(server, ctx: ServerContext):
     """One persistent in-process session: list_tools, then several calls."""
     async with Client(server) as session:
         listed = await session.list_tools()
-        assert len(listed.tools) == 24
+        assert len(listed.tools) == len(ctx.contracts.tool_names())
         info = await session.call_tool("get_server_info", {})
         assert not info.is_error and info.structured_content["name"] == "narumi"
         started = await session.call_tool("start_recording", {"request_id": rid()})
@@ -77,7 +77,7 @@ async def test_list_tools_matches_contracts(client: PerCallClient, ctx: ServerCo
     listed = await client.list_tools()
     by_name = {tool.name: tool for tool in listed.tools}
     assert list(by_name) == ctx.contracts.tool_names()
-    assert len(by_name) == 24
+    assert len(by_name) == len(ctx.contracts.tool_names())
     for contract in ctx.contracts:
         tool = by_name[contract.name]
         assert tool.title == contract.title
@@ -297,7 +297,9 @@ async def test_auto_process_job_success(
 async def test_process_job_failure_is_recorded(
     client: PerCallClient, ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
 ):
-    def failing(bundle: Bundle, *, force: bool = False, progress=None) -> ProcessResult:
+    def failing(
+        bundle: Bundle, *, force: bool = False, progress=None, gaia_client_factory=None
+    ) -> ProcessResult:
         raise EngineUnavailableError("mlx-whisper is not installed", details={"engine": "mlx"})
 
     monkeypatch.setattr("narumi.pipeline.process_meeting", failing)
@@ -534,7 +536,15 @@ async def test_register_context_auto_regenerate(
     make_recorded_bundle(ctx, meeting_id=MEETING_A)
     seen: dict[str, Any] = {}
 
-    def fake_regenerate(bundle, *, force=False, progress=None, reason="regenerate", job_id=None):
+    def fake_regenerate(
+        bundle,
+        *,
+        force=False,
+        progress=None,
+        reason="regenerate",
+        job_id=None,
+        gaia_client_factory=None,
+    ):
         seen.update(
             force=force, reason=reason, job_id=job_id, contexts=len(bundle.manifest.contexts)
         )
@@ -709,7 +719,13 @@ async def test_regenerate_busy_and_success(
     gate = threading.Event()
 
     def blocking_regenerate(
-        bundle, *, force=False, progress=None, reason="regenerate", job_id=None
+        bundle,
+        *,
+        force=False,
+        progress=None,
+        reason="regenerate",
+        job_id=None,
+        gaia_client_factory=None,
     ):
         progress("align", 0.1)
         assert gate.wait(10)
@@ -761,7 +777,15 @@ async def test_export_minutes(
     ctx.catalog.upsert_meeting(bundle)
     calls: list[dict[str, Any]] = []
 
-    def fake_export(bundle, destination, *, options=None, minutes_version=None, request_id=None):
+    def fake_export(
+        bundle,
+        destination,
+        *,
+        options=None,
+        minutes_version=None,
+        request_id=None,
+        gaia_client_factory=None,
+    ):
         calls.append(
             {
                 "destination": destination,
@@ -961,7 +985,15 @@ async def test_manifest_writes_are_rejected_while_a_job_runs(
     entered = threading.Event()
     gate = threading.Event()
 
-    def blocking_refresh(bundle, *, force=False, progress=None, reason="regenerate", job_id=None):
+    def blocking_refresh(
+        bundle,
+        *,
+        force=False,
+        progress=None,
+        reason="regenerate",
+        job_id=None,
+        gaia_client_factory=None,
+    ):
         entered.set()
         assert gate.wait(10)
         version = write_fake_minutes(bundle)  # the job's in-memory bundle is saved here

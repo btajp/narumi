@@ -1,0 +1,34 @@
+{
+  "name": "test_gaia_connection",
+  "title": "Test Gaia connection",
+  "description": "Connect to the configured local Gaia server, authenticate, and check its contract version and capabilities for Narumi. This only reads get_server_info and never proposes or approves content. Return server and client identity metadata, never the credential. On failure returns an error_envelope (isError=true) with code: engine_unavailable (unconfigured, unreachable or authentication failure), contract_mismatch, invalid_argument, internal.",
+  "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+  "inputSchema": {
+    "type": "object", "required": [],
+    "properties": { "timeout_seconds": { "type": "number", "minimum": 1, "maximum": 30, "default": 5 } },
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object", "required": ["connected", "name", "version", "contract_version", "client"],
+    "properties": {
+      "connected": { "const": true },
+      "name": { "type": "string" },
+      "version": { "type": "string" },
+      "contract_version": { "type": "string" },
+      "client": {
+        "type": "object", "required": ["name", "role", "default_scope"],
+        "properties": {
+          "name": { "type": "string" },
+          "role": { "type": "string", "enum": ["agent", "human"] },
+          "default_scope": { "type": ["string", "null"] }
+        },
+        "additionalProperties": false
+      }
+    },
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [{}, { "timeout_seconds": 3 }],
+    "output": [{ "connected": true, "name": "gaia_library", "version": "0.1.0", "contract_version": "1.0.0", "client": { "name": "narumi", "role": "agent", "default_scope": "cloudnative" } }]
+  }
+}

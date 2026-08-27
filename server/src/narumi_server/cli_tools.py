@@ -24,8 +24,8 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-import uuid
-from dataclasses import dataclass
+from collections.abc import Iterator
+from dataclasses import dataclass, replace
 from email.message import Message
 from pathlib import Path
 from typing import Any
@@ -37,6 +37,13 @@ from narumi.errors import ErrorCode, InvalidArgumentError, NarumiError
 
 from narumi_server import __version__
 from narumi_server.app import dispatch
+from narumi_server.cli_input import (
+    build_tool_input,
+    collect_args,
+    parse_json_option,
+    with_request_id,
+)
+from narumi_server.cli_transport import ConfidentialHttpTransport
 from narumi_server.context import build_context
 
 ENV_SERVER_URL = "NARUMI_SERVER_URL"
@@ -58,169 +65,118 @@ PROBE_CALL_TIMEOUT = 2.0
 CALL_TIMEOUT = 600.0
 """Bound for the real tool call. Generous: tools enqueue jobs instead of awaiting them."""
 
-HELP_TEXT_LIMIT = 80
-
-KIND_STRING = "string"
-KIND_INTEGER = "integer"
-KIND_NUMBER = "number"
-KIND_BOOLEAN = "boolean"
-KIND_JSON = "json"  # array / object: the option value must be a JSON document
-KIND_FLEXIBLE = "flexible"  # oneOf string | array/object: JSON if it parses, else the raw string
-
 GENERIC_COMMAND = "tool"
 
-_LOCAL_DEF_PREFIX = "#/$defs/"
 _JSON_CONTENT_TYPE = "application/json"
 _SSE_CONTENT_TYPE = "text/event-stream"
+_SECRET_TOOL_META = "narumi_secret_tool"
 
 
 @dataclass(frozen=True)
 class CliState:
-    """Global options resolved by the group callback, shared by every subcommand."""
+    """Global options plus the per-call transport policy derived from the contract."""
 
     server_url: str
     mode: str
     data_root: Path | None
     pretty: bool
+    confidential: bool = False
 
 
-# ---------------------------------------------------------------------------- schema → options
-def _resolve_schema(schema: dict[str, Any], defs: dict[str, Any]) -> dict[str, Any]:
-    """Follow local ``$ref``s (the loader inlined everything into ``$defs``).
-
-    Keys written next to the ``$ref`` (typically ``description``) win over the target's.
-    """
-    seen: set[str] = set()
-    current = schema
-    while isinstance(current, dict) and isinstance(current.get("$ref"), str):
-        ref = current["$ref"]
-        name = ref.removeprefix(_LOCAL_DEF_PREFIX)
-        if not ref.startswith(_LOCAL_DEF_PREFIX) or name in seen:
-            break
-        seen.add(name)
-        target = defs.get(name)
-        if not isinstance(target, dict):
-            break
-        current = {**target, **{k: v for k, v in current.items() if k != "$ref"}}
-    return current
-
-
-def _schema_types(schema: dict[str, Any]) -> set[str]:
-    declared = schema.get("type")
-    if isinstance(declared, str):
-        return {declared}
-    if isinstance(declared, list):
-        return {item for item in declared if isinstance(item, str)}
-    return set()
-
-
-def option_kind(schema: dict[str, Any], defs: dict[str, Any]) -> str:
-    """Map one ``inputSchema`` property to a CLI option kind.
-
-    string / integer / number / boolean stay typed; array / object take a JSON string;
-    a ``oneOf`` / ``anyOf`` that also admits a plain string (e.g. the ``scope`` selector)
-    accepts either the raw string or a JSON document.
-    """
-    resolved = _resolve_schema(schema, defs)
-    types = _schema_types(resolved) - {"null"}
-    if len(types) == 1:
-        single = next(iter(types))
-        if single in (KIND_STRING, KIND_INTEGER, KIND_NUMBER, KIND_BOOLEAN):
-            return single
-        return KIND_JSON
-    if types:  # e.g. ["string", "integer"] — no such contract today; JSON keeps it explicit
-        return KIND_FLEXIBLE if KIND_STRING in types else KIND_JSON
-    variant_types: set[str] = set()
-    for variant in resolved.get("oneOf") or resolved.get("anyOf") or []:
-        if isinstance(variant, dict):
-            variant_types |= _schema_types(_resolve_schema(variant, defs))
-    variant_types -= {"null"}
-    if variant_types == {KIND_STRING}:
-        return KIND_STRING
-    if KIND_STRING in variant_types:
-        return KIND_FLEXIBLE
-    return KIND_JSON
-
-
-def _help_text(schema: dict[str, Any], defs: dict[str, Any], prop: str, kind: str) -> str:
-    resolved = _resolve_schema(schema, defs)
-    description = resolved.get("description")
-    text = " ".join(str(description).split()) if isinstance(description, str) else prop
-    if len(text) > HELP_TEXT_LIMIT:
-        text = text[: HELP_TEXT_LIMIT - 1].rstrip() + "…"
-    if prop == "request_id":
-        return f"{text} [default: generated UUID4]"
-    suffix = {KIND_JSON: " [JSON]", KIND_FLEXIBLE: " [value or JSON]"}.get(kind, "")
-    return text + suffix
-
-
-def _tool_options(contract: ToolContract) -> tuple[list[click.Option], dict[str, str]]:
-    """Click options for every ``inputSchema`` property, plus each property's kind."""
-    schema = contract.input_schema
-    properties: dict[str, Any] = schema.get("properties", {})
-    required = set(schema.get("required", []))
-    defs: dict[str, Any] = schema.get("$defs", {})
-    options: list[click.Option] = []
-    kinds: dict[str, str] = {}
-    for prop, prop_schema in properties.items():
-        kind = option_kind(prop_schema, defs)
-        kinds[prop] = kind
-        flag = "--" + prop.replace("_", "-")
-        settings: dict[str, Any] = {
-            "default": None,
-            "required": prop in required and prop != "request_id",
-            "help": _help_text(prop_schema, defs, prop, kind),
-        }
-        if kind == KIND_BOOLEAN:
-            options.append(click.Option([f"{flag}/--no-{prop.replace('_', '-')}"], **settings))
-        elif kind == KIND_INTEGER:
-            options.append(click.Option([flag], type=click.INT, **settings))
-        elif kind == KIND_NUMBER:
-            options.append(click.Option([flag], type=click.FLOAT, **settings))
-        else:
-            options.append(click.Option([flag], type=click.STRING, **settings))
-    return options, kinds
-
-
-def _parse_json_option(prop: str, value: str) -> Any:
-    try:
-        return json.loads(value)
-    except ValueError as exc:
-        raise InvalidArgumentError(
-            f"--{prop.replace('_', '-')} must be a JSON document: {exc}",
-            details={"option": prop, "value": value},
-        ) from exc
-
-
-def _parse_flexible_option(value: str) -> Any:
-    try:
-        return json.loads(value)
-    except ValueError:
-        return value  # a plain string (e.g. `--scope cloudnative`)
-
-
-def _collect_args(
-    contract: ToolContract, kinds: dict[str, str], kwargs: dict[str, Any]
+def _redacted_error_payload(
+    tool: str, code: ErrorCode = ErrorCode.INVALID_ARGUMENT
 ) -> dict[str, Any]:
-    """Turn click's parsed options into tool arguments; omitted options stay omitted."""
-    args: dict[str, Any] = {}
-    for prop, value in kwargs.items():
-        if value is None:
-            continue
-        kind = kinds.get(prop, KIND_STRING)
-        if kind == KIND_JSON:
-            args[prop] = _parse_json_option(prop, value)
-        elif kind == KIND_FLEXIBLE:
-            args[prop] = _parse_flexible_option(value)
+    try:
+        code = ErrorCode(code)
+    except (TypeError, ValueError):
+        code = ErrorCode.INTERNAL
+    message = "Invalid command input" if code == ErrorCode.INVALID_ARGUMENT else "Tool call failed"
+    return {"error": {"code": str(code), "message": message, "details": {"tool": tool}}}
+
+
+class _RedactedUsageError(click.ClickException):
+    """A Click parser failure with no raw option names, values or exception text."""
+
+    exit_code = ERROR_EXIT_CODE
+
+    def __init__(self, tool: str, *, pretty: bool) -> None:
+        super().__init__("Invalid command input")
+        self.payload = _redacted_error_payload(tool)
+        self.pretty = pretty
+
+    def show(self, file: Any = None) -> None:
+        click.echo(_render(self.payload, pretty=self.pretty), file=file, err=file is None)
+
+
+def _positional_tokens(args: list[str], params: list[click.Parameter]) -> Iterator[tuple[int, str]]:
+    """Find positional tokens without decoding or retaining any option values."""
+    options = {
+        flag: param
+        for param in params
+        if isinstance(param, click.Option)
+        for flag in (*param.opts, *param.secondary_opts)
+    }
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            yield from enumerate(args[index + 1 :], start=index + 1)
+            return
+        if token.startswith("-"):
+            option = options.get(token.partition("=")[0])
+            if option is not None and not option.is_flag and "=" not in token:
+                index += option.nargs
         else:
-            args[prop] = value
-    return _with_request_id(contract, args)
+            yield index, token
+        index += 1
 
 
-def _with_request_id(contract: ToolContract, args: dict[str, Any]) -> dict[str, Any]:
-    if "request_id" in contract.input_schema.get("properties", {}) and "request_id" not in args:
-        args["request_id"] = str(uuid.uuid4())
-    return args
+class _ContractGroup(click.Group):
+    """Guard Click's pre-callback diagnostics for commands with write-only input."""
+
+    def __init__(self, *args: Any, contracts: ContractSet, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.contracts = contracts
+
+    def _selected_contract(self, args: list[str]) -> ToolContract | None:
+        first = next(_positional_tokens(args, self.params), None)
+        if first is None:
+            return None
+        index, command = first
+        if command == GENERIC_COMMAND:
+            generic = self.commands[GENERIC_COMMAND]
+            first = next(_positional_tokens(args[index + 1 :], generic.params), None)
+            if first is None:
+                return None
+            _, command = first
+        return self.contracts.get(command.replace("-", "_"))
+
+    @staticmethod
+    def _redact_usage(ctx: click.Context) -> None:
+        tool = ctx.meta.get(_SECRET_TOOL_META)
+        if tool is not None:
+            state = ctx.obj
+            raise _RedactedUsageError(
+                tool, pretty=state.pretty if isinstance(state, CliState) else True
+            ) from None
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        contract = self._selected_contract(args)
+        ctx.meta[_SECRET_TOOL_META] = (
+            contract.name if contract is not None and contract.has_write_only_input else None
+        )
+        try:
+            return super().parse_args(ctx, args)
+        except click.ClickException:
+            self._redact_usage(ctx)
+            raise
+
+    def invoke(self, ctx: click.Context) -> Any:
+        try:
+            return super().invoke(ctx)
+        except click.ClickException:
+            self._redact_usage(ctx)
+            raise
 
 
 # ---------------------------------------------------------------------------- HTTP client
@@ -258,7 +214,10 @@ class McpHttpClient:
     ``Mcp-Session-Id`` the server assigns.
     """
 
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, *, confidential: bool = False) -> None:
+        self._transport = ConfidentialHttpTransport(url) if confidential else None
+        if self._transport is not None:
+            url = self._transport.url
         parsed = urllib.parse.urlsplit(url)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             raise InvalidArgumentError(
@@ -270,6 +229,11 @@ class McpHttpClient:
         self._next_id = 0
 
     # -------------------------------------------------------------- wire helpers
+    def _open(self, request: urllib.request.Request, timeout: float) -> Any:
+        if self._transport is not None:
+            return self._transport.open(request, timeout=timeout)
+        return urllib.request.urlopen(request, timeout=timeout)
+
     def _headers(self) -> dict[str, str]:
         headers = {
             "Content-Type": _JSON_CONTENT_TYPE,
@@ -287,7 +251,7 @@ class McpHttpClient:
             self.url, data=data, headers=self._headers(), method="POST"
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with self._open(request, timeout) as response:
                 return response.status, response.headers, response.read()
         except urllib.error.HTTPError as exc:
             snippet = _snippet(exc.read())
@@ -396,7 +360,7 @@ class McpHttpClient:
             return
         request = urllib.request.Request(self.url, headers=self._headers(), method="DELETE")
         with contextlib.suppress(Exception):
-            with urllib.request.urlopen(request, timeout=PROBE_TIMEOUT) as response:
+            with self._open(request, PROBE_TIMEOUT) as response:
                 response.read()
 
 
@@ -425,7 +389,7 @@ def _call_over_http(
     state: CliState, tool: str, args: dict[str, Any]
 ) -> tuple[dict[str, Any], bool] | None:
     """``None`` when no server answers the probe and falling back in-process is allowed."""
-    client = McpHttpClient(state.server_url)
+    client = McpHttpClient(state.server_url, confidential=state.confidential)
     try:
         try:
             client.probe()
@@ -476,13 +440,23 @@ def _render(payload: dict[str, Any], *, pretty: bool) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
-def _run(state: CliState, tool: str, args: dict[str, Any]) -> None:
+def _run(state: CliState, tool: str, args: dict[str, Any], *, redact: bool = False) -> None:
     """Execute and print: result JSON on stdout, error envelope on stderr with exit 2."""
     try:
-        payload, is_error = _call(state, tool, args)
+        # Use the same contract decision for input privacy and the entire HTTP session.
+        payload, is_error = _call(replace(state, confidential=redact), tool, args)
     except NarumiError as exc:
-        payload, is_error = exc.to_payload(), True
+        payload = _redacted_error_payload(tool, exc.code) if redact else exc.to_payload()
+        is_error = True
+    except Exception:
+        if not redact:
+            raise
+        payload, is_error = _redacted_error_payload(tool, ErrorCode.INTERNAL), True
     if is_error:
+        if redact:
+            error = payload.get("error")
+            code = error.get("code") if isinstance(error, dict) else ErrorCode.INTERNAL
+            payload = _redacted_error_payload(tool, code)
         click.echo(_render(payload, pretty=state.pretty), err=True)
         sys.exit(ERROR_EXIT_CODE)
     click.echo(_render(payload, pretty=state.pretty))
@@ -490,20 +464,25 @@ def _run(state: CliState, tool: str, args: dict[str, Any]) -> None:
 
 # ---------------------------------------------------------------------------- CLI assembly
 def _make_tool_command(contract: ToolContract) -> click.Command:
-    options, kinds = _tool_options(contract)
+    inputs = build_tool_input(contract)
 
     def callback(**kwargs: Any) -> None:
         state: CliState = click.get_current_context().obj
         try:
-            args = _collect_args(contract, kinds, kwargs)
+            args = collect_args(contract, inputs, kwargs)
         except NarumiError as exc:
-            click.echo(_render(exc.to_payload(), pretty=state.pretty), err=True)
+            payload = (
+                _redacted_error_payload(contract.name, exc.code)
+                if contract.has_write_only_input
+                else exc.to_payload()
+            )
+            click.echo(_render(payload, pretty=state.pretty), err=True)
             sys.exit(ERROR_EXIT_CODE)
-        _run(state, contract.name, args)
+        _run(state, contract.name, args, redact=contract.has_write_only_input)
 
     return click.Command(
         name=contract.name.replace("_", "-"),
-        params=list(options),
+        params=list(inputs.options),
         callback=callback,
         help=contract.description,
         short_help=contract.title,
@@ -514,23 +493,36 @@ def _make_generic_command(contracts: ContractSet) -> click.Command:
     def callback(name: str, args_json: str) -> None:
         state: CliState = click.get_current_context().obj
         tool = name.replace("-", "_")
+        contract = contracts.get(tool)
         try:
-            contract = contracts.get(tool)
             if contract is None:
                 raise InvalidArgumentError(
                     f"unknown tool: {name}",
                     details={"tool": name, "known_tools": contracts.tool_names()},
                 )
-            args = _parse_json_option("json", args_json)
+            args = parse_json_option("json", args_json, redact=contract.has_write_only_input)
             if not isinstance(args, dict):
                 raise InvalidArgumentError(
                     "--json must be a JSON object of tool arguments",
-                    details={"tool": tool, "value": args_json},
+                    details={
+                        "tool": tool,
+                        **({} if contract.has_write_only_input else {"value": args_json}),
+                    },
                 )
         except NarumiError as exc:
-            click.echo(_render(exc.to_payload(), pretty=state.pretty), err=True)
+            payload = (
+                _redacted_error_payload(tool, exc.code)
+                if contract is not None and contract.has_write_only_input
+                else exc.to_payload()
+            )
+            click.echo(_render(payload, pretty=state.pretty), err=True)
             sys.exit(ERROR_EXIT_CODE)
-        _run(state, tool, _with_request_id(contract, args))
+        _run(
+            state,
+            tool,
+            with_request_id(contract, args),
+            redact=contract.has_write_only_input,
+        )
 
     return click.Command(
         name=GENERIC_COMMAND,
@@ -556,7 +548,11 @@ def build_cli(contracts: ContractSet | None = None) -> click.Group:
     """Build the ``narumi`` group: one subcommand per contract tool plus ``tool``."""
     contract_set = contracts if contracts is not None else load_contracts()
 
-    @click.group(context_settings={"help_option_names": ["-h", "--help"]})
+    @click.group(
+        cls=_ContractGroup,
+        contracts=contract_set,
+        context_settings={"help_option_names": ["-h", "--help"]},
+    )
     @click.version_option(__version__, prog_name="narumi")
     @click.option(
         "--server-url",

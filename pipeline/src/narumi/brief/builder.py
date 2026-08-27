@@ -1,4 +1,4 @@
-"""Meeting brief v1: build ``context/brief.json`` and render it for prompt injection.
+"""Meeting brief: build ``context/brief.json`` and render it for prompt injection.
 
 コンテキスト注入 v1 (AGENTS.md): query gaia-library when available, merge with local bundle data
 (``manifest.config.vocab_hints`` / ``self_name``), persist the brief to ``context/brief.json``
@@ -11,57 +11,28 @@ is never an error. When a client *is* passed but the server is unreachable, the 
 the "same inputs → same version" promise.
 
 The brief is a ``run_stage`` artifact (key ``context/brief``), so it is idempotent over the
-manifest config subset and the registered context sources. gaia responses are *not* part of the
-inputs — re-querying gaia for fresh context is an explicit ``force=True`` regeneration.
+manifest config subset and the registered context sources. Gaia context responses are *not*
+part of the inputs — fresh context is an explicit ``force=True`` regeneration.
+Server identity is checked before cache reuse so a changed endpoint or default scope cannot
+reuse another client's brief. This check also surfaces configured-but-unreachable servers.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
-
+from narumi.brief.gaia_context import enrich_brief
+from narumi.brief.models import Brief, Participant
+from narumi.brief.models import BriefSource as BriefSource
 from narumi.bundle import Bundle, StageResult, sha256_file, sha256_params
+from narumi.errors import ScopeDeniedError
 from narumi.gaia import GaiaClient
 
 BRIEF_ARTIFACT_KEY = "context/brief"
 BRIEF_PATH = "context/brief.json"
-BRIEF_VERSION = 1
-PRODUCER = ("brief", "1")
-
-_PREVIOUS_KINDS = frozenset({"minutes", "previous_minutes", "meeting"})
-_PERSON_KIND = "person"
-
-
-class Participant(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    aliases: list[str] = Field(default_factory=list)
-    note: str | None = None
-
-
-class BriefSource(BaseModel):
-    """A reference the agent (or a human) can walk for more context. Not injected into prompts."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    system: str
-    uri: str
-    note: str | None = None
-
-
-class Brief(BaseModel):
-    """会議ブリーフ: what the LLM stages get to know about the meeting before reading it."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    vocab_hints: list[str] = Field(default_factory=list)
-    """Config hints first, then gaia glossary terms; deduplicated, order-preserving."""
-    participants: list[Participant] = Field(default_factory=list)
-    previous_points: list[str] = Field(default_factory=list)
-    background: list[str] = Field(default_factory=list)
-    sources: list[BriefSource] = Field(default_factory=list)
+BRIEF_VERSION = 3
+PRODUCER = ("brief", "3")
 
 
 def run_brief(
@@ -73,10 +44,24 @@ def run_brief(
     so the merged ``vocab_hints`` reach the transcription engine.
     """
     inputs = _brief_inputs(bundle)
-    params = {"gaia": gaia is not None, "version": BRIEF_VERSION}
+    params: dict[str, Any] = {"gaia": gaia is not None, "version": BRIEF_VERSION}
+    scope = None
+    identity = None
+    if gaia is not None:
+        # Refresh even when this client has metadata cached: availability and its current
+        # default scope must be checked before reusing previously persisted context.
+        client_info = gaia.get_server_info(refresh=True)["client"]
+        scope = _effective_scope(bundle, client_info)
+        identity = {
+            "endpoint": gaia.url,
+            "name": client_info["name"],
+            "default_scope": client_info.get("default_scope"),
+        }
+        params["gaia_client"] = identity
+        params["gaia_scope"] = scope
 
     def write(out_path: Path) -> None:
-        bundle.write_json(BRIEF_PATH, _compose(bundle, gaia))
+        bundle.write_json(BRIEF_PATH, _compose(bundle, gaia, scope=scope, identity=identity))
 
     return bundle.run_stage(
         BRIEF_ARTIFACT_KEY,
@@ -155,6 +140,7 @@ def _brief_inputs(bundle: Bundle) -> dict[str, str]:
     subset = {
         "meeting_name": bundle.manifest.meeting_name,
         "engagement": bundle.manifest.engagement,
+        "scope": bundle.manifest.scope,
         "language": config.language,
         "self_name": config.self_name,
         "vocab_hints": list(config.vocab_hints),
@@ -167,65 +153,43 @@ def _brief_inputs(bundle: Bundle) -> dict[str, str]:
     return inputs
 
 
-def _compose(bundle: Bundle, gaia: GaiaClient | None) -> Brief:
+def _effective_scope(bundle: Bundle, client_info: dict[str, Any]) -> str:
+    scope = bundle.manifest.scope
+    if scope is None:
+        scope = client_info.get("default_scope")
+    if not isinstance(scope, str) or not scope.strip():
+        raise ScopeDeniedError(
+            "gaia-library brief requires a meeting scope or a client default scope"
+        )
+    return scope
+
+
+def _compose(
+    bundle: Bundle,
+    gaia: GaiaClient | None,
+    *,
+    scope: str | None,
+    identity: dict[str, Any] | None,
+) -> Brief:
     manifest = bundle.manifest
     config = manifest.config
-    vocab: list[str] = list(dict.fromkeys(hint for hint in config.vocab_hints if hint.strip()))
-    participants: list[Participant] = []
-    previous: list[str] = []
-    background: list[str] = []
-    sources: list[BriefSource] = []
-
-    if config.self_name:
-        _add_participant(participants, config.self_name, [], "記録者（本人）")
-
-    if gaia is not None:
-        for term in gaia.get_glossary(manifest.engagement):
-            name = str(term.get("term") or term.get("name") or "").strip()
-            if not name:
-                continue
-            aliases = [str(a).strip() for a in term.get("aliases") or [] if str(a).strip()]
-            note = str(term.get("note") or "").strip() or None
-            if str(term.get("kind") or "").lower() == _PERSON_KIND:
-                _add_participant(participants, name, aliases, note)
-            else:
-                for candidate in (name, *aliases):
-                    if candidate not in vocab:
-                        vocab.append(candidate)
-        for ref in gaia.search_context(manifest.meeting_name, engagement=manifest.engagement):
-            summary = str(ref.get("summary") or ref.get("note") or ref.get("title") or "").strip()
-            if summary:
-                kind = str(ref.get("kind") or "").lower()
-                (previous if kind in _PREVIOUS_KINDS else background).append(summary)
-            uri = str(ref.get("uri") or ref.get("url") or "").strip()
-            if uri:
-                sources.append(
-                    BriefSource(
-                        system=str(ref.get("system") or "gaia-library"),
-                        uri=uri,
-                        note=str(ref.get("title") or "").strip() or None,
-                    )
-                )
-
-    return Brief(
-        vocab_hints=vocab,
-        participants=participants,
-        previous_points=previous,
-        background=background,
-        sources=sources,
+    brief = Brief(
+        vocab_hints=list(dict.fromkeys(hint.strip() for hint in config.vocab_hints if hint.strip()))
     )
-
-
-def _add_participant(
-    participants: list[Participant], name: str, aliases: list[str], note: str | None
-) -> None:
-    for existing in participants:
-        if existing.name == name:
-            existing.aliases.extend(a for a in aliases if a not in existing.aliases)
-            if note and not existing.note:
-                existing.note = note
-            return
-    participants.append(Participant(name=name, aliases=list(aliases), note=note))
+    if config.self_name:
+        brief.participants.append(Participant(name=config.self_name, note="記録者（本人）"))
+    if gaia is not None:
+        if scope is None or identity is None:
+            raise ScopeDeniedError("gaia-library brief requires a pinned connection and scope")
+        enrich_brief(
+            brief,
+            gaia,
+            meeting_name=manifest.meeting_name,
+            engagement=manifest.engagement,
+            scope=scope,
+            identity=identity,
+        )
+    return brief
 
 
 def _participant_line(participant: Participant) -> str:

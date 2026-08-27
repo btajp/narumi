@@ -16,6 +16,7 @@
 | コンテキスト登録（貼り付け・URL・ファイルドロップ）→ 必要なら再生成 | `register_context` / `regenerate` | 実装済み |
 | 会議設定（エンジン / LLM / 送信ポリシー / 自分の名前 / 語彙 / scope） | `set_meeting_config` | 実装済み |
 | 既定プロファイル（新規会議の既定設定・既定エクスポート先） | `list_profiles` / `get_profile` / `set_profile` / `delete_profile`（新規） | 実装済み |
+| Gaia 接続（URL・API キーの設定、無効化、接続テスト） | `get_gaia_connection` / `set_gaia_connection` / `test_gaia_connection` | 実装済み（専用シート。キーは write-only） |
 | エクスポート（md / html、保存先選択、後から再エクスポート） | `export_minutes` / `list_export_destinations` | 実装済み |
 | 既存録画ファイルの取り込み（Zoom ローカル録画等） | `import_recording`（新規） | 実装済み |
 | 録画トラック破棄（文字起こし後に動画・音声を消す）/ 会議削除 | `discard_tracks` / `delete_meeting`（新規） | 実装済み |
@@ -36,6 +37,7 @@
 - `cancel_job` {job_id, request_id} → `{job}`。queued は即 `cancelled`、running は協調キャンセル（JobManager のフラグを pipeline の progress フックで検査し、`cancelled` エラーで中断。manifest.status は `failed` ではなく直前の状態に戻す）。エラーコードに `cancelled` を追加
 - プロファイル: `list_profiles` {} → `{profiles: [profile], default: name}`、`get_profile` {name}、`set_profile` {name, config?: meeting_config, scope?, engagement?, export_destinations?: [str], make_default?, request_id} → `{profile}`、`delete_profile` {name, request_id}（default は削除不可）。正本は `<NARUMI_HOME>/profiles.json`。`start_recording` / `import_recording` の `profile` 省略時は default を適用し、明示引数が優先。process ジョブ成功時にプロファイルの `export_destinations` へ自動エクスポート（manifest.exports に記録）
 - `rebuild_catalog` {request_id} → `{meetings, segments, errors: [str]}`。idempotent
+- Gaia 接続: `get_gaia_connection` {} → `{connection: {url: str|null, has_api_key: bool, source: saved|environment|unconfigured}}`。`set_gaia_connection` {url?: str|null, api_key?: str|null, request_id} は同じ公開モデルを返す。キーは write-only で専用 `gaia.json`（0600）に保存し、URL 変更で旧キーを解除、url:null で連携を無効化する。`test_gaia_connection` {timeout_seconds?: 1..30} は接続・契約互換性とクライアント識別情報を確認するだけの readOnly ツール。
 - 変更: `meeting_summary` に `active_job?: {job_id, kind, status, progress?}`、`get_server_info` に `diagnostics: {ffmpeg: {path, version}|null, ffprobe: {...}|null, data_root, meetings_root, catalog_path, recorder_path|null, contracts_dir}`
 
 ## CLI（製品用 `narumi`）— 実装済み（2026-08-27）
@@ -52,7 +54,7 @@
 - アプリ ⊇ 契約: 上表を正とし、アプリ本体ウィンドウ実装時に「状態」列を埋める。全行が「実装済み」になるまでアプリは未完成と扱う
 
 ## 実装順
-1. 契約拡張（この文書のツール群）＋サーバー実装＋カタログ検索＋プロファイル＋キャンセル — 実装済み（2026-08-27。契約は 24 ツール、`server/tests/test_surface_tools.py` / `test_profiles_tools.py` / `test_cancel.py` / `test_e2e_server.py` で検証）
+1. 契約拡張（この文書のツール群）＋サーバー実装＋カタログ検索＋プロファイル＋キャンセル — 実装済み（Gaia 接続 3 ツールを含め契約は 27 ツール。`server/tests/test_surface_tools.py` / `test_profiles_tools.py` / `test_cancel.py` / `test_e2e_server.py` / `test_gaia_settings_tools.py` で検証）
 2. `narumi` CLI の契約駆動化と `narumi-dev` 分離、パリティテスト — 実装済み（`narumi_server.cli_tools` + `server/tests/test_cli_tools.py`。契約 ↔ CLI の構造一致をテストで検査。アプリ ⊆ 契約の Swift 側検査は 4. の範囲）
 3. 配布・自動更新（別文書）
 4. アプリ本体ウィンドウ（上表の全行）— 実装済み（2026-08-27。`app/Sources/NarumiMenuBar/Views/` + `MainWindowModel` / `NarumiClient`。純粋ロジックとツール名一覧は `NarumiMenuBarCore`（`ContractModels` / `Formatting` / `MarkdownBlocks` / `ToolCatalog`）で、`ContractModelsTests` が契約の examples.output をそのままデコードして検査、`ToolCatalogTests` がアプリ ⊆ 契約を検査）
