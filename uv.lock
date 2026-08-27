@@ -1977,6 +1977,9 @@ pyannote = [
     { name = "torch" },
     { name = "torchaudio" },
 ]
+slides = [
+    { name = "pillow" },
+]
 whisper-faster = [
     { name = "faster-whisper" },
 ]
@@ -1993,12 +1996,13 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.23" },
     { name = "markdown", marker = "extra == 'html'", specifier = ">=3.7" },
     { name = "mlx-whisper", marker = "extra == 'whisper-mlx'", specifier = ">=0.4" },
+    { name = "pillow", marker = "extra == 'slides'", specifier = ">=10" },
     { name = "pyannote-audio", marker = "extra == 'pyannote'", specifier = ">=3.3" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "torch", marker = "extra == 'pyannote'", specifier = ">=2.4" },
     { name = "torchaudio", marker = "extra == 'pyannote'", specifier = ">=2.4" },
 ]
-provides-extras = ["whisper-mlx", "whisper-faster", "pyannote", "claude", "anthropic", "html"]
+provides-extras = ["whisper-mlx", "whisper-faster", "pyannote", "claude", "anthropic", "html", "slides"]
 
 [[package]]
 name = "narumi-server"
@@ -2031,7 +2035,7 @@ source = { virtual = "." }
 [package.dev-dependencies]
 dev = [
     { name = "datamodel-code-generator" },
-    { name = "narumi", extra = ["anthropic", "claude", "html", "whisper-faster", "whisper-mlx"] },
+    { name = "narumi", extra = ["anthropic", "claude", "html", "slides", "whisper-faster", "whisper-mlx"] },
     { name = "narumi-server" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -2043,7 +2047,7 @@ dev = [
 [package.metadata.requires-dev]
 dev = [
     { name = "datamodel-code-generator", specifier = ">=0.28" },
-    { name = "narumi", extras = ["whisper-mlx", "whisper-faster", "claude", "anthropic", "html"], editable = "pipeline" },
+    { name = "narumi", extras = ["whisper-mlx", "whisper-faster", "claude", "anthropic", "html", "slides"], editable = "pipeline" },
     { name = "narumi-server", editable = "server" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },

@@ -1,0 +1,57 @@
+"""Key-slide extraction (deterministic pHash dedup) and minutes-embedding helpers."""
+
+from narumi.slides.detect import (
+    DEFAULT_DISTANCE_THRESHOLD,
+    DEFAULT_INTERVAL_SEC,
+    DEFAULT_SCENE_THRESHOLD,
+    FRAMES_DIR,
+    SCREEN_TRACK,
+    SLIDE_FRAME_WIDTH,
+    SLIDES_DIR,
+    SLIDES_KEY,
+    SLIDES_OUTPUT,
+    SLIDES_VERSION,
+    SlideEntry,
+    SlideIndex,
+    detect_keyslides,
+    frame_time_sec,
+    list_frames,
+    load_slides,
+    run_slides,
+    slide_id,
+)
+from narumi.slides.embed import (
+    MINUTES_SLIDES_DIRNAME,
+    copy_slides_to_minutes,
+    select_slides_for_minutes,
+)
+from narumi.slides.phash import HASH_BITS, HASH_HEX_LEN, hamming, phash, phash_image
+
+__all__ = [
+    "DEFAULT_DISTANCE_THRESHOLD",
+    "DEFAULT_INTERVAL_SEC",
+    "DEFAULT_SCENE_THRESHOLD",
+    "FRAMES_DIR",
+    "HASH_BITS",
+    "HASH_HEX_LEN",
+    "MINUTES_SLIDES_DIRNAME",
+    "SCREEN_TRACK",
+    "SLIDES_DIR",
+    "SLIDES_KEY",
+    "SLIDES_OUTPUT",
+    "SLIDES_VERSION",
+    "SLIDE_FRAME_WIDTH",
+    "SlideEntry",
+    "SlideIndex",
+    "copy_slides_to_minutes",
+    "detect_keyslides",
+    "frame_time_sec",
+    "hamming",
+    "list_frames",
+    "load_slides",
+    "phash",
+    "phash_image",
+    "run_slides",
+    "select_slides_for_minutes",
+    "slide_id",
+]

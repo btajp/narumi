@@ -16,6 +16,7 @@ pyannote = ["pyannote.audio>=3.3", "torch>=2.4", "torchaudio>=2.4"]
 claude = ["claude-agent-sdk>=0.1"]
 anthropic = ["anthropic>=0.40"]
 html = ["markdown>=3.7"]
+slides = ["pillow>=10"]
 
 [project.scripts]
 narumi-dev = "narumi.cli:main"

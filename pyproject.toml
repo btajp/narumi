@@ -21,7 +21,7 @@ dev = [
   "pytest-asyncio>=0.24",
   "ruff>=0.8",
   "datamodel-code-generator>=0.28",
-  "narumi[whisper-mlx,whisper-faster,claude,anthropic,html]",
+  "narumi[whisper-mlx,whisper-faster,claude,anthropic,html,slides]",
   "narumi-server",
 ]
 
