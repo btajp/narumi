@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import NarumiMenuBarCore
 import Sparkle
+import SwiftUI
 
 /// Menu bar UI. An MCP client for every data operation; the only thing it does besides calling
 /// tools is starting / stopping the server *process* through `ServerLauncher` and checking for
@@ -33,6 +34,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var client: MCPClient!
     private var launcher: ServerLauncher!
     private var updaterController: SPUStandardUpdaterController!
+    private var mainWindow: NSWindow?
+    private var mainWindowModel: MainWindowModel?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -101,6 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         terminating = true
         pollTimer?.invalidate()
+        mainWindowModel?.stopPolling()
         applyState()
         applyServerState()
         shutdownDone = false
@@ -143,6 +147,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildMenu() -> NSMenu {
         let menu = NSMenu()
+        let openItem = NSMenuItem(title: "narumi を開く", action: #selector(openMainWindow), keyEquivalent: "")
+        openItem.target = self
+        menu.addItem(openItem)
+        menu.addItem(.separator())
+
         startItem = NSMenuItem(title: "録画開始…", action: #selector(startRecording), keyEquivalent: "")
         startItem.target = self
         menu.addItem(startItem)
@@ -183,8 +192,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return menu
     }
 
+    // MARK: Main window
+
+    /// Open (or bring forward) the main window. The app normally lives as a menu bar
+    /// accessory; while the window is open it becomes a regular app so the window can be
+    /// focused, and `windowWillClose` returns it to `.accessory`.
+    @objc func openMainWindow() {
+        let model = ensureMainWindowModel()
+        if mainWindow == nil {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 1080, height: 680),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered, defer: false)
+            window.title = AppDelegate.displayName
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: MainWindowView(model: model))
+            window.center()
+            window.setFrameAutosaveName("NarumiMainWindow")
+            window.delegate = self
+            mainWindow = window
+        }
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        mainWindow?.makeKeyAndOrderFront(nil)
+        model.startPolling()
+    }
+
+    private func ensureMainWindowModel() -> MainWindowModel {
+        if let mainWindowModel {
+            return mainWindowModel
+        }
+        let model = MainWindowModel(client: NarumiClient(mcp: client))
+        model.hostActions = MainWindowModel.HostActions(
+            restartServer: { [weak self] in self?.restartServer() },
+            openServerLog: { [weak self] in self?.openLog() },
+            checkForUpdates: { [weak self] in
+                self?.updaterController.checkForUpdates(nil)
+            },
+            recordingStopped: { [weak self] in
+                guard let self else {
+                    return
+                }
+                self.recording = false
+                self.currentMeetingID = nil
+                self.applyState()
+            })
+        mainWindowModel = model
+        return model
+    }
+
+    /// Clicking the Dock icon while the window exists but is closed reopens it.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows {
+            openMainWindow()
+        }
+        return true
+    }
+
     private func applyState() {
         statusItem.button?.title = recording ? AppDelegate.recordingIcon : AppDelegate.idleIcon
+        if !recording {
+            stopItem.title = "録画停止"  // drop a stale elapsed-time suffix
+        }
         let serving = launcher?.state.pollsServerInfo ?? false
         startItem.isEnabled = !recording && !busy && !terminating && serving
         stopItem.isEnabled = recording && !busy && !terminating
@@ -231,7 +300,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !recording, !busy else {
             return
         }
-        guard let meetingName = promptForMeetingName() else {
+        guard let options = promptForRecordingOptions() else {
             return
         }
         busy = true
@@ -242,10 +311,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 applyState()
             }
             do {
-                let result = try await client.callTool(ToolCatalog.startRecording, arguments: [
-                    "meeting_name": .string(meetingName),
+                var arguments: [String: JSONNode] = [
+                    "meeting_name": .string(options.meetingName),
                     "request_id": .string(UUID().uuidString),
-                ])
+                ]
+                if let profile = options.profile {
+                    arguments["profile"] = .string(profile)
+                }
+                if let scope = options.scope {
+                    arguments["scope"] = .string(scope)
+                }
+                let result = try await client.callTool(ToolCatalog.startRecording, arguments: arguments)
                 currentMeetingID = result.structuredContent?["meeting_id"]?.stringValue
                 recording = true
             } catch {
@@ -370,27 +446,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             serverReachable = false
             await client.reset()
         }
+        if serverReachable {
+            await refreshRecordingStatus()
+        }
         applyServerState()
+    }
+
+    /// Follow the server's recording state on the 5 s tick: elapsed time on the stop item, and
+    /// the recording flag itself (a stop from the main window or another MCP client counts).
+    private func refreshRecordingStatus() async {
+        guard let result = try? await client.callTool(ToolCatalog.getRecordingStatus, arguments: [:]),
+            let active = result.structuredContent?["active"]?.boolValue
+        else {
+            return
+        }
+        recording = active
+        if !active {
+            currentMeetingID = nil
+        } else if currentMeetingID == nil {
+            currentMeetingID = result.structuredContent?["meeting_id"]?.stringValue
+        }
+        if active, case .number(let elapsed)? = result.structuredContent?["elapsed_sec"] {
+            stopItem.title = "録画停止（\(NarumiFormat.duration(elapsed))）"
+        } else {
+            stopItem.title = "録画停止"
+        }
     }
 
     // MARK: Dialogs
 
-    private func promptForMeetingName() -> String? {
+    private struct RecordingOptions {
+        var meetingName: String
+        var profile: String?
+        var scope: String?
+    }
+
+    /// Start dialog: 会議名 (required), プロファイル and scope (optional; empty = server-side
+    /// default profile / unscoped).
+    private func promptForRecordingOptions() -> RecordingOptions? {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "録画を開始します"
-        alert.informativeText = "会議名を入力してください。"
+        alert.informativeText = "会議名を入力してください。プロファイル・scope は空なら既定（既定プロファイル / scope なし）です。"
         alert.addButton(withTitle: "録画開始")
         alert.addButton(withTitle: "キャンセル")
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
-        field.placeholderString = "会議名"
-        alert.accessoryView = field
-        alert.window.initialFirstResponder = field
+
+        let nameField = NSTextField(frame: NSRect(x: 0, y: 56, width: 280, height: 24))
+        nameField.placeholderString = "会議名"
+        let profileField = NSTextField(frame: NSRect(x: 0, y: 28, width: 280, height: 24))
+        profileField.placeholderString = "プロファイル（空 = 既定）"
+        let scopeField = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        scopeField.placeholderString = "scope（空 = scope なし）"
+        nameField.nextKeyView = profileField
+        profileField.nextKeyView = scopeField
+        scopeField.nextKeyView = nameField
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 80))
+        accessory.addSubview(nameField)
+        accessory.addSubview(profileField)
+        accessory.addSubview(scopeField)
+        alert.accessoryView = accessory
+        alert.window.initialFirstResponder = nameField
+
         guard alert.runModal() == .alertFirstButtonReturn else {
             return nil
         }
-        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        return name.isEmpty ? nil : name
+        let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            return nil
+        }
+        let profile = profileField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let scope = scopeField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return RecordingOptions(
+            meetingName: name,
+            profile: profile.isEmpty ? nil : profile,
+            scope: scope.isEmpty ? nil : scope)
     }
 
     private func confirmStopRecordingBeforeQuit() -> Bool {
@@ -431,6 +560,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             presentMessage(title: title, text: error.localizedDescription)
         }
+    }
+}
+
+extension AppDelegate: NSWindowDelegate {
+    /// Closing the main window stops the 5 s refresh loop and returns the app to a pure
+    /// menu bar accessory (no Dock icon). The window itself is kept for the next open.
+    func windowWillClose(_ notification: Notification) {
+        guard let closing = notification.object as? NSWindow, closing === mainWindow else {
+            return
+        }
+        mainWindowModel?.stopPolling()
+        NSApp.setActivationPolicy(.accessory)
     }
 }
 

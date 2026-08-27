@@ -10,18 +10,18 @@
 
 | 画面 / 操作 | 使うツール | 状態 |
 |---|---|---|
-| メニューバー: 録画開始（会議名・プロファイル・scope）/ 停止 / 録画中の経過 | `start_recording` / `stop_recording` / `get_recording_status`（新規） | 一部実装（ツール・CLI 実装済み。メニューバーは開始 / 停止のみ） |
-| 会議一覧（状態・進行中ジョブ・検索） | `list_meetings`（`active_job` を追加）/ `search_transcripts`（新規）/ `get_job_status` | アプリ未（ツール・CLI 実装済み） |
-| 会議詳細: 議事録プレビュー（版切替）/ 文字起こし / コンテキスト / エクスポート履歴 / バンドルを Finder で開く | `get_meeting` / `get_minutes`（新規）/ `get_transcript` | アプリ未（ツール・CLI 実装済み） |
-| コンテキスト登録（貼り付け・URL・ファイルドロップ）→ 必要なら再生成 | `register_context` / `regenerate` | アプリ未（ツール・CLI 実装済み） |
-| 会議設定（エンジン / LLM / 送信ポリシー / 自分の名前 / 語彙 / scope） | `set_meeting_config` | アプリ未（ツール・CLI 実装済み） |
-| 既定プロファイル（新規会議の既定設定・既定エクスポート先） | `list_profiles` / `get_profile` / `set_profile` / `delete_profile`（新規） | アプリ未（ツール・CLI 実装済み） |
-| エクスポート（md / html、保存先選択、後から再エクスポート） | `export_minutes` / `list_export_destinations` | アプリ未（ツール・CLI 実装済み） |
-| 既存録画ファイルの取り込み（Zoom ローカル録画等） | `import_recording`（新規） | アプリ未（ツール・CLI 実装済み） |
-| 録画トラック破棄（文字起こし後に動画・音声を消す）/ 会議削除 | `discard_tracks` / `delete_meeting`（新規） | アプリ未（ツール・CLI 実装済み） |
-| ジョブ取消 | `cancel_job`（新規） | アプリ未（ツール・CLI 実装済み） |
-| 診断（ffmpeg / 権限 / エンジン / データルート）/ カタログ再構築 | `get_server_info`（`diagnostics` 追加）/ `rebuild_catalog`（新規） | 一部（ツール・CLI 実装済み。アプリの診断画面は未） |
-| サーバー起動・停止・再起動 / ログ / アップデート確認 | アプリ固有（プロセス管理・Sparkle。データ操作ではない） | 実装中 |
+| メニューバー: 録画開始（会議名・プロファイル・scope）/ 停止 / 録画中の経過 | `start_recording` / `stop_recording` / `get_recording_status`（新規） | 実装済み（メニューバー: 会議名・プロファイル・scope 入力と経過表示。ウィンドウ: 録画中バナー + 停止） |
+| 会議一覧（状態・進行中ジョブ・検索） | `list_meetings`（`active_job` を追加）/ `search_transcripts`（新規）/ `get_job_status` | 実装済み |
+| 会議詳細: 議事録プレビュー（版切替）/ 文字起こし / コンテキスト / エクスポート履歴 / バンドルを Finder で開く | `get_meeting` / `get_minutes`（新規）/ `get_transcript` | 実装済み |
+| コンテキスト登録（貼り付け・URL・ファイルドロップ）→ 必要なら再生成 | `register_context` / `regenerate` | 実装済み |
+| 会議設定（エンジン / LLM / 送信ポリシー / 自分の名前 / 語彙 / scope） | `set_meeting_config` | 実装済み |
+| 既定プロファイル（新規会議の既定設定・既定エクスポート先） | `list_profiles` / `get_profile` / `set_profile` / `delete_profile`（新規） | 実装済み |
+| エクスポート（md / html、保存先選択、後から再エクスポート） | `export_minutes` / `list_export_destinations` | 実装済み |
+| 既存録画ファイルの取り込み（Zoom ローカル録画等） | `import_recording`（新規） | 実装済み |
+| 録画トラック破棄（文字起こし後に動画・音声を消す）/ 会議削除 | `discard_tracks` / `delete_meeting`（新規） | 実装済み |
+| ジョブ取消 | `cancel_job`（新規） | 実装済み |
+| 診断（ffmpeg / 権限 / エンジン / データルート）/ カタログ再構築 | `get_server_info`（`diagnostics` 追加）/ `rebuild_catalog`（新規） | 実装済み（診断シート） |
+| サーバー起動・停止・再起動 / ログ / アップデート確認 | アプリ固有（プロセス管理・Sparkle。データ操作ではない） | 実装済み（メニューバー + 診断シート） |
 
 ## 契約 v1 への追加（初回リリース前なので contract_version は 1.0.0 のまま）
 
@@ -55,4 +55,4 @@
 1. 契約拡張（この文書のツール群）＋サーバー実装＋カタログ検索＋プロファイル＋キャンセル — 実装済み（2026-08-27。契約は 24 ツール、`server/tests/test_surface_tools.py` / `test_profiles_tools.py` / `test_cancel.py` / `test_e2e_server.py` で検証）
 2. `narumi` CLI の契約駆動化と `narumi-dev` 分離、パリティテスト — 実装済み（`narumi_server.cli_tools` + `server/tests/test_cli_tools.py`。契約 ↔ CLI の構造一致をテストで検査。アプリ ⊆ 契約の Swift 側検査は 4. の範囲）
 3. 配布・自動更新（別文書）
-4. アプリ本体ウィンドウ（上表の全行）
+4. アプリ本体ウィンドウ（上表の全行）— 実装済み（2026-08-27。`app/Sources/NarumiMenuBar/Views/` + `MainWindowModel` / `NarumiClient`。純粋ロジックとツール名一覧は `NarumiMenuBarCore`（`ContractModels` / `Formatting` / `MarkdownBlocks` / `ToolCatalog`）で、`ContractModelsTests` が契約の examples.output をそのままデコードして検査、`ToolCatalogTests` がアプリ ⊆ 契約を検査）

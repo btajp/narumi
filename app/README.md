@@ -6,8 +6,8 @@
 |---|---|---|
 | `NarumiRecorderKit` | ライブラリ | ScreenCaptureKit キャプチャ → AVAssetWriter で **別ファイル** 書き出し。イベント型・引数解析・ディスプレイ選択などの純粋ロジックはこの中の SCK 非依存な型に置き、`swift test` で検証する |
 | `narumi-recorder` | CLI | server がサブプロセスとして起動する録画ヘルパー。stdout に JSON Lines でイベントを出す |
-| `NarumiMenuBarCore` | ライブラリ（Foundation のみ） | メニューバーアプリの純粋ロジック。サーバー設定の解決（`ServerConfig`。ランタイムモード判定を含む）、起動コマンドの組み立て（`ServerCommand`）、サーバー状態と表示文言（`ServerState` / `ServerStatusText`）、同梱ランタイムの manifest と同期手順（`RuntimeManifest` / `RuntimeSyncPlan`）。AppKit にも Sparkle にも依存せず `swift test` で検証する |
-| `NarumiMenuBar` | メニューバーアプリ `narumi.app` | MCP クライアント。server の公開ツール（`start_recording` / `stop_recording` / `get_server_info`）を呼ぶだけで、ファイルや recorder には触れない（AGENTS.md 絶対原則 3）。加えて `narumi-server` の**プロセス**を起動・停止する（`ServerLauncher`。後述「起動フロー」） |
+| `NarumiMenuBarCore` | ライブラリ（Foundation のみ） | メニューバーアプリの純粋ロジック。サーバー設定の解決（`ServerConfig`。ランタイムモード判定を含む）、起動コマンドの組み立て（`ServerCommand`）、サーバー状態と表示文言（`ServerState` / `ServerStatusText`）、同梱ランタイムの manifest と同期手順（`RuntimeManifest` / `RuntimeSyncPlan`）、契約レスポンスのモデル（`ContractModels`）、表示整形（`Formatting`）、議事録 markdown のブロック分割（`MarkdownBlocks`）、ツール名の一覧（`ToolCatalog`）。AppKit にも Sparkle にも依存せず `swift test` で検証する |
+| `NarumiMenuBar` | メニューバーアプリ `narumi.app` | MCP クライアント。メニューバー（録画開始 / 停止）とメインウィンドウ（後述）から server の公開ツール（`ToolCatalog.allUsed` = 契約の全 24 ツール）を呼ぶだけで、ファイルや recorder には触れない（AGENTS.md 絶対原則 3）。加えて `narumi-server` の**プロセス**を起動・停止する（`ServerLauncher`。後述「起動フロー」） |
 
 ## ビルドとテスト
 
@@ -77,11 +77,31 @@ server の `RecordingController` は次の順で実行ファイルを探す。
 
 ## メニューバーアプリ（NarumiMenuBar）
 
-- `NSStatusItem`: 待機中 🕵️ / 録画中 ⏺。メニューは「録画開始…」「録画停止」/「サーバー: <状態>」/「サーバーを再起動」「リポジトリを選択…」「ログを開く」/「終了」。
-- 「録画開始…」は `NSAlert` で会議名を聞き、`start_recording {meeting_name, request_id}` を呼ぶ。「録画停止」は `stop_recording {request_id}`。`request_id` は UUID を毎回発番する。「録画開始…」はサーバーが稼働中（または外部サーバーに接続中）のときだけ有効。
+- `NSStatusItem`: 待機中 🕵️ / 録画中 ⏺。メニューは「narumi を開く」/「録画開始…」「録画停止」/「サーバー: <状態>」/「サーバーを再起動」「リポジトリを選択…」「ログを開く」/「アップデートを確認…」/「終了」。
+- 「録画開始…」は `NSAlert` で会議名（必須）・プロファイル・scope（どちらも空なら既定）を聞き、`start_recording {meeting_name, profile?, scope?, request_id}` を呼ぶ。「録画停止」は `stop_recording {request_id}`。`request_id` は UUID を毎回発番する。「録画開始…」はサーバーが稼働中（または外部サーバーに接続中）のときだけ有効。録画中は 5 秒ごとの `get_recording_status` で経過時間を「録画停止（h:mm:ss）」に表示し、他のクライアント（メインウィンドウ含む）が停止した場合も状態が追従する。
 - 「サーバー: …」はサーバーが稼働中 / 外部サーバーに接続中のとき 5 秒ごとに `get_server_info` を呼んで更新する（`server_version` / `contract_version` があれば表示。`capabilities.recording` が false なら「録画不可」）。それ以外の状態（起動中・停止・起動失敗・未設定）はランチャーの状態をそのまま表示する。
 - 接続先は `NARUMI_SERVER_URL` があればそれ、無ければ `http://127.0.0.1:<NARUMI_SERVER_PORT または 8765>/mcp`（起動するサーバーのポートと必ず一致する）。`MCPClient` は `initialize`（protocolVersion `2025-06-18`）→ `notifications/initialized` → `tools/call` を JSON-RPC 2.0 の POST で行い、`Mcp-Session-Id` を保持して送り返す。応答は `application/json` と `text/event-stream`（`data:` 行から同じ id の応答を取り出す）の両方を受け付ける。
 - ツールエラー（`isError` / 構造化 `{"error":{code,message}}`）は `NSAlert` で表示する。
+
+## メインウィンドウ（「narumi を開く」）
+
+メニューバーの「narumi を開く」で開く SwiftUI ウィンドウ。パリティ表（`docs/superpowers/specs/2026-08-27-narumi-surface-parity-design.md`「アプリの画面・操作一覧」）の全行を実装し、**データ操作はすべて MCP ツール**（`ToolCatalog` の定数のみ。AGENTS.md 絶対原則 3）。MCP 外の操作は、ツールが返したパスの Finder 表示と、サーバープロセス管理 / Sparkle（`MainWindowModel.HostActions` として AppDelegate が注入）だけ。
+
+- **構成**: `MainWindowView`（`NSWindow` + `NSHostingView`。AppDelegate が生成・保持）。上部に録画中バナー、左に会議一覧サイドバー、右に会議詳細のタブ（議事録 / 文字起こし / コンテキスト / 設定）。ツールバーに「ジョブ」「取り込み」「プロファイル」「診断」。
+- **アクティベーション**: 通常はメニューバー常駐（`.accessory`）。ウィンドウを開くと `.regular`（Dock に出る）になり、閉じると `.accessory` に戻る。ウィンドウ表示中だけ `MainWindowModel.startPolling()` の 5 秒ポーリング（`list_meetings` or `search_transcripts` + `get_recording_status` + 追跡中ジョブの `get_job_status`）が走り、閉じると止まる。
+- **会議一覧**: scope フィルタ（空白区切り。空 = scope なしのみ）と検索フィールド。チェックボックスで `list_meetings --query`（会議名・engagement）と `search_transcripts`（カタログ FTS の発話全文検索。ヒットを開くとその会議の文字起こしタブへ）を切り替える。行には状態と進行中ジョブ（`active_job`）のバッジ。
+- **録画中バナー**: `get_recording_status` が active のとき会議名・経過時間と「録画停止」（`stop_recording`）を表示。
+- **議事録タブ**: `get_minutes`（版ピッカーで `available_versions` を切替）。markdown は `MarkdownParser`（NarumiMenuBarCore）でブロック分割して描画。`unresolved_speakers` があれば実名未解決のコールアウト。「再生成」は force / reason 付きで `regenerate` → 返った job_id をジョブ一覧で追跡し、完了時に表示を再読込。「エクスポート」は `list_export_destinations` の宛先メニューで、markdown / html は `NSSavePanel` で保存先を選んで `export_minutes {options: {output_path, overwrite}}`。版の履歴とエクスポート履歴（`get_meeting`）も表示。
+- **文字起こしタブ**: `get_transcript`。ソースピッカー（merged / own-mic / own-system / ext-*）とセグメント表（タイムコード・話者名解決・全文選択可）。
+- **コンテキストタブ**: 登録済み一覧（`get_meeting.contexts`）と登録フォーム（`register_context`）。テキスト貼り付け / URL / ファイル（選択またはウィンドウへのドロップ）、source_type、ラベル、auto_regenerate。
+- **設定タブ**: `set_meeting_config` のフォーム。エンジン / LLM / 送信ポリシーの候補は `get_server_info.capabilities` から。危険な操作として `discard_tracks`（トラック選択 + 確認）と `delete_meeting`（確認。trash/ へ移動）。
+- **取り込みシート**: `import_recording`（mic / system / screen のパス、プロファイル、scope、copy / auto_process）。
+- **プロファイルシート**: `list_profiles` / `get_profile` / `set_profile`（make_default・自動エクスポート先を含む）/ `delete_profile`。
+- **診断シート**: `get_server_info` の capabilities / diagnostics（ffmpeg・権限・データルートなど）、`rebuild_catalog`、そして MCP 外のプロセス操作（サーバー再起動 / ログを開く / アップデート確認）。
+- **ジョブ**: ウィンドウが開始したジョブ + 一覧の `active_job` を追跡し、ツールバーにバッジ表示。ポップオーバーから `cancel_job`。
+- **エラー表示**: 契約の error_envelope を code + message のアラートで表示。`busy` だけは非モーダルなトーストにする。
+
+純粋ロジック（契約レスポンスのモデル `ContractModels`、表示整形 `NarumiFormat` / `MeetingRowPresentation`、markdown 分割 `MarkdownParser`）は `NarumiMenuBarCore` にあり、`ContractModelsTests`（`contracts/tools/*.json` の examples.output をそのままデコード）・`FormattingTests`・`MarkdownBlocksTests` で検証する。
 
 ## 起動フロー（narumi.app がサーバーを起動する）
 
