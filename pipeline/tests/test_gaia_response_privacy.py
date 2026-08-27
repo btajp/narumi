@@ -19,6 +19,7 @@ from .test_gaia_client import FakeGaiaServer, empty_search, engagement_result, t
 from .test_gaia_client import gaia_server as gaia_server
 
 KEY = "gaia_privacy_ab12+cd34/ef56="
+HEX_KEY = "4A7b93e2c5d8f0a1b6e4c2d9f3a5b7c0"
 FAILURE = "gaia-library returned credential material in a tool response"
 TOOLS = ["get_glossary", "search_context", "get_engagement", "resolve_speakers", "propose_update"]
 
@@ -31,6 +32,16 @@ def encoded_key(form: str) -> str:
     if form == "nested_percent":
         return quote(encoded_key("full_percent"), safe="")
     return KEY
+
+
+def percent_prefixed_hex_key(form: str) -> str:
+    raw = "%" + HEX_KEY
+    encoded = "".join(f"%{byte:02x}" for byte in raw.encode("ascii"))
+    if form == "encoded":
+        return encoded
+    if form == "mixed":
+        return " | ".join([raw, encoded, quote(encoded, safe="")])
+    return raw
 
 
 def valid_response(tool: str) -> dict[str, Any]:
@@ -138,6 +149,27 @@ def test_reflected_credentials_fail_closed_for_all_successful_tool_apis(
         assert secret not in public_error and secret not in trace and secret not in caplog.text
 
 
+@pytest.mark.parametrize("tool", [*TOOLS, "custom_read"])
+@pytest.mark.parametrize("form", ["raw", "encoded", "mixed"])
+@pytest.mark.parametrize("position", ["value", "key", "array"])
+def test_hex_key_is_detected_before_percent_decoding_can_consume_its_prefix(
+    gaia_server: FakeGaiaServer, tool: str, form: str, position: str
+):
+    secret = percent_prefixed_hex_key(form)
+    value = {
+        "value": f"https://example.test/{secret}",
+        "key": {secret: "safe"},
+        "array": ["safe", {"nested": [secret]}],
+    }[position]
+    payload = {**valid_response(tool), "unknown_field": value}
+    gaia_server.tools[tool] = lambda _: tool_ok(payload)
+    with pytest.raises(ContractMismatchError) as caught:
+        call_tool(GaiaClient(gaia_server.url, api_key=HEX_KEY), tool)
+    assert str(caught.value) == FAILURE
+    assert HEX_KEY not in json.dumps(caught.value.to_payload())
+    assert HEX_KEY not in "".join(traceback.format_exception(caught.value))
+
+
 @pytest.mark.parametrize("tool", TOOLS)
 def test_low_level_call_cannot_bypass_the_success_response_privacy_guard(
     gaia_server: FakeGaiaServer, tool: str
@@ -210,6 +242,41 @@ def test_mixed_raw_and_encoded_keys_are_all_redacted_before_metadata_is_cached(
     assert result["extra"] == {redacted: [{"url": f"https://example.test/{redacted}"}]}
     serialized = json.dumps({"returned": result, "cached": client._server_info})
     assert KEY not in unquote(unquote(serialized))
+
+
+@pytest.mark.parametrize("entry", ["metadata", "raw", "implicit"])
+@pytest.mark.parametrize("form", ["raw", "encoded", "mixed"])
+def test_hex_key_is_redacted_at_every_decode_stage_before_metadata_is_returned_or_cached(
+    gaia_server: FakeGaiaServer, entry: str, form: str
+):
+    secret = percent_prefixed_hex_key(form)
+    redacted = " | ".join(["%[REDACTED]"] * (3 if form == "mixed" else 1))
+    gaia_server.info["client"]["name"] = secret
+    gaia_server.info["extra"] = {secret: [{"url": f"https://example.test/{secret}"}]}
+    gaia_server.info["ordinary_text"] = {"Bearer token": ["Bearer authentication"]}
+    client = GaiaClient(gaia_server.url, api_key=HEX_KEY)
+    if entry == "implicit":
+        result = client.require_capabilities("get_glossary")
+    elif entry == "raw":
+        result = client.call("get_server_info")
+    else:
+        result = client.get_server_info()
+    assert result["client"]["name"] == redacted
+    assert result["extra"] == {redacted: [{"url": f"https://example.test/{redacted}"}]}
+    assert result["ordinary_text"] == gaia_server.info["ordinary_text"]
+    serialized = json.dumps({"returned": result, "cached": client._server_info})
+    for _ in range(4):
+        assert HEX_KEY not in serialized
+        serialized = unquote(serialized)
+
+
+@pytest.mark.parametrize("api_key", ["A", "REDACTED"])
+def test_redaction_marker_cannot_reintroduce_a_valid_short_api_key(gaia_server, api_key: str):
+    transport = GaiaClient(gaia_server.url, api_key=api_key)._transport
+    encoded = "".join(f"%{byte:02x}" for byte in api_key.encode("ascii"))
+    value = f"%{api_key} | {encoded}"
+    assert transport.contains_api_key(value)
+    assert transport.redact_api_key(value) == "%[***] | [***]"
 
 
 @pytest.mark.parametrize("tool", ["get_glossary", "get_engagement", "search_context"])
@@ -285,6 +352,37 @@ def test_error_scrubbing_redacts_mixed_encoded_keys_in_values_and_dictionary_key
     assert str(scrubbed) == "Bearer [REDACTED] " + redacted
     assert scrubbed.details == {redacted: [{"value": "Bearer [REDACTED] " + redacted}]}
     assert KEY not in unquote(unquote(json.dumps(scrubbed.to_payload())))
+
+
+@pytest.mark.parametrize("channel", ["http", "rpc", "tool"])
+@pytest.mark.parametrize("form", ["raw", "encoded", "mixed"])
+def test_hex_key_is_removed_from_errors_before_percent_decoding_consumes_its_prefix(
+    gaia_server: FakeGaiaServer, channel: str, form: str
+):
+    secret = percent_prefixed_hex_key(form)
+    message = "reflected " + secret
+    if channel == "http":
+        gaia_server.http_status = 401
+        gaia_server.http_body = message.encode("utf-8")
+    elif channel == "rpc":
+        gaia_server.rpc_errors["get_server_info"] = {
+            "code": -32001,
+            "message": message,
+            "data": {"code": "unauthorized", "message": message, "details": {secret: [secret]}},
+        }
+    else:
+        gaia_server.tools["get_server_info"] = lambda _: tool_error(
+            "unauthorized", message, {secret: [secret]}
+        )
+    with pytest.raises(NarumiError) as caught:
+        GaiaClient(gaia_server.url, api_key=HEX_KEY).get_server_info()
+    assert caught.value.code == "scope_denied"
+    assert "%[REDACTED]" in str(caught.value)
+    assert HEX_KEY not in "".join(traceback.format_exception(caught.value))
+    serialized = json.dumps(caught.value.to_payload())
+    for _ in range(4):
+        assert HEX_KEY not in serialized
+        serialized = unquote(serialized)
 
 
 @pytest.mark.parametrize("tool", ["custom_read", "get_server_info"])

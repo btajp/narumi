@@ -156,15 +156,22 @@ class Transport:
             code = ErrorCode.BUSY
         return NarumiError(message, code=code, details=details)
 
-    def _key_text(self, value: str) -> str | None:
-        """Find the actual key after RFC 3986 percent decoding, without rewriting safe text."""
+    def _redacted_key_text(self, value: str) -> str | None:
+        """Mask keys at every percent-decoding stage, or return None for safe text."""
         if self._api_key is None:
             return None
+        replacement = "[REDACTED]" if self._api_key not in "[REDACTED]" else "[***]"
+        matched = False
         normalized = value
         for _ in range(_MAX_PERCENT_DECODE_PASSES):
+            # A leading percent sign may consume the first two key characters on decode.
+            # Mask before decoding, but keep inspecting other encoded copies in the string.
+            if self._api_key in normalized:
+                normalized = normalized.replace(self._api_key, replacement)
+                matched = True
             decoded = urllib.parse.unquote(normalized)
             if decoded == normalized:
-                return normalized if self._api_key in normalized else None
+                return normalized if matched else None
             normalized = decoded
         # Repeated decoding has a work limit. Never return an unchecked, still-encoded
         # credential merely because the peer wrapped it in too many percent escapes.
@@ -175,7 +182,7 @@ class Transport:
     def contains_api_key(self, value: Any) -> bool:
         """Inspect every JSON string/key for this connection's key, not generic Bearer terms."""
         if isinstance(value, str):
-            return self._key_text(value) is not None
+            return self._redacted_key_text(value) is not None
         if isinstance(value, dict):
             return any(
                 self.contains_api_key(key) or self.contains_api_key(item)
@@ -188,10 +195,8 @@ class Transport:
     def redact_api_key(self, value: Any) -> Any:
         """Redact only actual-key-bearing strings; keep unrelated metadata/vocabulary intact."""
         if isinstance(value, str):
-            normalized = self._key_text(value)
-            if normalized is not None and self._api_key is not None:
-                return normalized.replace(self._api_key, "[REDACTED]")
-            return value
+            redacted = self._redacted_key_text(value)
+            return redacted if redacted is not None else value
         if isinstance(value, dict):
             return {
                 self.redact_api_key(key): self.redact_api_key(item) for key, item in value.items()
