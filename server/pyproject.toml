@@ -13,6 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
+narumi = "narumi_server.cli_tools:main"
 narumi-server = "narumi_server.cli:main"
 
 [build-system]

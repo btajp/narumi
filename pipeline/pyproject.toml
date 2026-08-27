@@ -18,7 +18,7 @@ anthropic = ["anthropic>=0.40"]
 html = ["markdown>=3.7"]
 
 [project.scripts]
-narumi = "narumi.cli:main"
+narumi-dev = "narumi.cli:main"
 
 [build-system]
 requires = ["hatchling"]
