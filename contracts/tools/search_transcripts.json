@@ -1,0 +1,122 @@
+{
+  "name": "search_transcripts",
+  "title": "Search transcripts",
+  "description": "Full-text search over the transcript segments of every meeting covered by the scope selector, using the catalog's trigram FTS index (partial Japanese matches work). Each hit carries the meeting, the transcript source it came from (`source_id`: merged | own-mic | own-system | ext-<context_id>), the segment id, its start / end in seconds from the recording start, the speaker (resolved name or label, null when unknown) and the segment text. Hits are ordered newest meeting first, best match first within a meeting. `scope` is the scope selector (default deny): omitted = only unscoped meetings; a single name = that scope + unscoped; an array of 2+ names = explicit cross-scope search (audit-logged). `limit` caps the number of hits (1..200, default 20). Read-only; use get_transcript to read a full transcript around a hit. On failure returns an error_envelope (isError=true) with code: scope_denied, invalid_argument (empty query, bad limit), internal.",
+  "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "Full-text query matched against segment text.",
+        "minLength": 1,
+        "maxLength": 500
+      },
+      "scope": {
+        "$ref": "../defs/common.json#/$defs/scope",
+        "description": "Omitted = unscoped meetings only. One name = that scope + unscoped. Array of 2+ names = cross-scope search (audit-logged)."
+      },
+      "limit": {
+        "type": "integer",
+        "description": "Maximum number of hits to return (1..200, default 20).",
+        "minimum": 1,
+        "maximum": 200,
+        "default": 20
+      }
+    },
+    "required": ["query"],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["hits"],
+    "properties": {
+      "hits": {
+        "type": "array",
+        "description": "Matching segments, newest meeting first, best match first within a meeting.",
+        "items": {
+          "type": "object",
+          "required": [
+            "meeting_id",
+            "meeting_name",
+            "source_id",
+            "segment_id",
+            "start",
+            "end",
+            "speaker",
+            "text"
+          ],
+          "properties": {
+            "meeting_id": { "$ref": "../defs/common.json#/$defs/meeting_id" },
+            "meeting_name": { "type": "string" },
+            "source_id": {
+              "type": "string",
+              "description": "Transcript source the segment belongs to: merged | own-mic | own-system | ext-<context_id>.",
+              "minLength": 1
+            },
+            "segment_id": {
+              "type": "string",
+              "description": "Segment id within the source (matches get_transcript segment ids).",
+              "minLength": 1
+            },
+            "start": { "type": "number", "minimum": 0 },
+            "end": { "type": "number", "minimum": 0 },
+            "speaker": {
+              "type": ["string", "null"],
+              "description": "Resolved speaker name or label; null when unknown."
+            },
+            "text": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {
+        "query": "オンボーディング"
+      },
+      {
+        "query": "gaia-library",
+        "scope": ["cloudnative", "btcon"],
+        "limit": 50
+      }
+    ],
+    "output": [
+      {
+        "hits": [
+          {
+            "meeting_id": "20260827T030500Z-a1b2c3d4",
+            "meeting_name": "週次定例",
+            "source_id": "merged",
+            "segment_id": "merged:1",
+            "start": 4.5,
+            "end": 9.8,
+            "speaker": null,
+            "text": "先週のオンボーディングの進捗から共有します。"
+          },
+          {
+            "meeting_id": "20260820T030500Z-00c0ffee",
+            "meeting_name": "週次定例",
+            "source_id": "merged",
+            "segment_id": "merged:12",
+            "start": 130.2,
+            "end": 138.0,
+            "speaker": "岡村",
+            "text": "オンボーディング資料は gaia-library に置きます。"
+          }
+        ]
+      },
+      {
+        "hits": []
+      }
+    ]
+  }
+}

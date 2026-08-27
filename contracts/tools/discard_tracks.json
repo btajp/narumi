@@ -1,0 +1,88 @@
+{
+  "name": "discard_tracks",
+  "title": "Discard tracks",
+  "description": "Delete the media files of the given tracks from a meeting's bundle to reclaim disk space. Each discarded track keeps its manifest record with discarded=true and its recorded sha256 / duration, so idempotent regeneration can still verify what the existing transcripts were made from — but the media itself cannot be recovered. mic / system can only be discarded after their transcription artifact (transcripts/own-mic / transcripts/own-system) exists (invalid_argument otherwise); screen can be discarded at any time. Re-discarding an already-discarded track is a no-op. Returns the full track map after the operation. `scope` is the scope selector (default deny: a scoped meeting needs its scope in the request). `request_id` is the client-generated idempotency key: repeating the call returns the original result. On failure returns an error_envelope (isError=true) with code: not_found (unknown meeting, or the meeting has no such track), scope_denied (the request does not cover the meeting's scope), busy (the meeting is still recording, or a job is queued / running for it), invalid_argument (mic / system requested before its transcript exists), internal.",
+  "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "meeting_id": { "$ref": "../defs/common.json#/$defs/meeting_id" },
+      "tracks": {
+        "type": "array",
+        "description": "Track names to discard.",
+        "items": { "type": "string", "enum": ["screen", "mic", "system"] },
+        "minItems": 1,
+        "maxItems": 3,
+        "uniqueItems": true
+      },
+      "scope": {
+        "$ref": "../defs/common.json#/$defs/scope",
+        "description": "Omitted = unscoped meetings only. One name = that scope + unscoped. Array of 2+ names = cross-scope lookup (audit-logged)."
+      },
+      "request_id": { "$ref": "../defs/common.json#/$defs/request_id" }
+    },
+    "required": ["meeting_id", "tracks", "request_id"],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["meeting_id", "tracks"],
+    "properties": {
+      "meeting_id": { "$ref": "../defs/common.json#/$defs/meeting_id" },
+      "tracks": {
+        "type": "object",
+        "description": "Full track map after the operation. Discarded tracks have discarded=true but keep their recorded sha256 / duration.",
+        "additionalProperties": { "$ref": "../defs/common.json#/$defs/track_status" }
+      }
+    },
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "tracks": ["screen"],
+        "request_id": "cc33dd44-ee55-4f66-8a77-112233445566"
+      },
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "tracks": ["mic", "system"],
+        "scope": "cloudnative",
+        "request_id": "dd44ee55-ff66-4a77-9b88-223344556677"
+      }
+    ],
+    "output": [
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "tracks": {
+          "screen": {
+            "path": "tracks/screen.mp4",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "bytes": null,
+            "duration_sec": 3430.2,
+            "discarded": true
+          },
+          "mic": {
+            "path": "tracks/mic.m4a",
+            "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+            "bytes": 41943040,
+            "duration_sec": 3430.1,
+            "discarded": false
+          },
+          "system": {
+            "path": "tracks/system.m4a",
+            "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            "bytes": 41000000,
+            "duration_sec": 3430.1,
+            "discarded": false
+          }
+        }
+      }
+    ]
+  }
+}

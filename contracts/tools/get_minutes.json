@@ -1,0 +1,97 @@
+{
+  "name": "get_minutes",
+  "title": "Get minutes",
+  "description": "Return one minutes version of a meeting as markdown. `version` selects which one (defaults to the latest); `available_versions` lists every generated version in ascending order. Versions are append-only: regenerate appends a new version and never overwrites an existing one, so a version, once returned, is stable. `generated_at` and `provider` (LLM provider registry name; none = plain minutes) describe how this version was produced. `unresolved_speakers` lists the speaker labels that could not be resolved to real names (rendered as 話者不明 in the markdown). `scope` is the scope selector (default deny): omitted = only unscoped meetings; a single name = that scope + unscoped; an array of 2+ names = explicit cross-scope lookup (audit-logged). Read-only. On failure returns an error_envelope (isError=true) with code: not_found (unknown meeting, unknown version, or no minutes generated yet — check get_meeting.minutes_versions and the processing job), scope_denied (the request does not cover the meeting's scope), invalid_argument, internal.",
+  "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "meeting_id": { "$ref": "../defs/common.json#/$defs/meeting_id" },
+      "version": {
+        "type": "integer",
+        "description": "Minutes version to return (see available_versions / get_meeting.minutes_versions). Defaults to the latest version.",
+        "minimum": 1
+      },
+      "scope": {
+        "$ref": "../defs/common.json#/$defs/scope",
+        "description": "Omitted = unscoped meetings only. One name = that scope + unscoped. Array of 2+ names = cross-scope lookup (audit-logged)."
+      }
+    },
+    "required": ["meeting_id"],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": [
+      "meeting_id",
+      "version",
+      "markdown",
+      "generated_at",
+      "provider",
+      "unresolved_speakers",
+      "available_versions"
+    ],
+    "properties": {
+      "meeting_id": { "$ref": "../defs/common.json#/$defs/meeting_id" },
+      "version": {
+        "type": "integer",
+        "description": "The version that was returned.",
+        "minimum": 1
+      },
+      "markdown": {
+        "type": "string",
+        "description": "Full minutes markdown (minutes/v<N>/minutes.md)."
+      },
+      "generated_at": {
+        "$ref": "../defs/common.json#/$defs/timestamp",
+        "description": "UTC time this version was generated."
+      },
+      "provider": {
+        "type": "string",
+        "description": "LLM provider registry name used for generation (none = plain minutes).",
+        "minLength": 1
+      },
+      "unresolved_speakers": {
+        "type": "array",
+        "description": "Speaker labels without a resolved name (shown as 話者不明 in the markdown).",
+        "items": { "type": "string", "minLength": 1 },
+        "uniqueItems": true
+      },
+      "available_versions": {
+        "type": "array",
+        "description": "All generated versions, ascending.",
+        "items": { "type": "integer", "minimum": 1 },
+        "uniqueItems": true
+      }
+    },
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4"
+      },
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "version": 1,
+        "scope": "cloudnative"
+      }
+    ],
+    "output": [
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "version": 2,
+        "markdown": "# 週次定例\n\n## 決定事項\n- オンボーディング資料を来週までに更新する\n",
+        "generated_at": "2026-08-27T04:12:00Z",
+        "provider": "none",
+        "unresolved_speakers": ["SPEAKER_01"],
+        "available_versions": [1, 2]
+      }
+    ]
+  }
+}

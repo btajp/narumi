@@ -1,0 +1,69 @@
+{
+  "name": "get_recording_status",
+  "title": "Get recording status",
+  "description": "Return whether a recording is currently running. `active=false` means no recording is running and every other key is absent. When active, `meeting_id` / `meeting_name` identify the meeting being recorded, `started_at` is the UTC capture start, `elapsed_sec` the seconds recorded so far, and `tracks` maps track name (screen / mic / system) to its file path relative to the bundle. Poll this to render a menu-bar recording indicator; use stop_recording to end the recording. Read-only, takes no arguments. On failure returns an error_envelope (isError=true) with code: internal.",
+  "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "description": "No arguments.",
+    "properties": {},
+    "required": [],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["active"],
+    "properties": {
+      "active": {
+        "type": "boolean",
+        "description": "True while a recording is running. When false, no other key is present."
+      },
+      "meeting_id": { "$ref": "../defs/common.json#/$defs/meeting_id" },
+      "meeting_name": {
+        "type": "string",
+        "description": "Name of the meeting being recorded.",
+        "minLength": 1
+      },
+      "started_at": {
+        "$ref": "../defs/common.json#/$defs/timestamp",
+        "description": "UTC time capture began."
+      },
+      "elapsed_sec": {
+        "type": "number",
+        "description": "Seconds recorded so far.",
+        "minimum": 0
+      },
+      "tracks": {
+        "type": "object",
+        "description": "Track name (screen / mic / system) → file path relative to the bundle (e.g. tracks/mic.m4a).",
+        "additionalProperties": { "type": "string", "minLength": 1 }
+      }
+    },
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [{}, {}],
+    "output": [
+      {
+        "active": false
+      },
+      {
+        "active": true,
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "meeting_name": "週次定例",
+        "started_at": "2026-08-27T03:05:00Z",
+        "elapsed_sec": 754.3,
+        "tracks": {
+          "screen": "tracks/screen.mp4",
+          "mic": "tracks/mic.m4a",
+          "system": "tracks/system.m4a"
+        }
+      }
+    ]
+  }
+}

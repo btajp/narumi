@@ -1,0 +1,75 @@
+{
+  "name": "list_profiles",
+  "title": "List profiles",
+  "description": "List the saved meeting profiles (source of truth: <NARUMI_HOME>/profiles.json). A profile bundles config defaults, a default scope / engagement and automatic export destinations; start_recording / import_recording apply the named (or default) profile as defaults, explicit arguments win, and on process job success the profile's export_destinations are exported automatically (recorded in manifest.exports). Exactly one profile has is_default=true and `default` names it; the built-in \"default\" profile (local-only Whisper, no diarization, plain minutes) always exists. Read-only, takes no arguments. On failure returns an error_envelope (isError=true) with code: internal.",
+  "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "description": "No arguments.",
+    "properties": {},
+    "required": [],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["profiles", "default"],
+    "properties": {
+      "profiles": {
+        "type": "array",
+        "description": "All saved profiles.",
+        "items": { "$ref": "../defs/common.json#/$defs/profile" }
+      },
+      "default": {
+        "type": "string",
+        "description": "Name of the profile marked is_default (applied when start_recording / import_recording omit `profile`).",
+        "minLength": 1,
+        "maxLength": 64
+      }
+    },
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [{}, {}],
+    "output": [
+      {
+        "profiles": [
+          {
+            "name": "default",
+            "config": {
+              "transcription_engine": "auto",
+              "diarization_engine": "none",
+              "llm_provider": "none",
+              "external_send_policy": "local_only",
+              "language": "ja"
+            },
+            "scope": null,
+            "engagement": null,
+            "export_destinations": [],
+            "is_default": true
+          },
+          {
+            "name": "customer-meetings",
+            "config": {
+              "transcription_engine": "mlx-whisper",
+              "diarization_engine": "pyannote",
+              "llm_provider": "claude-agent-sdk",
+              "external_send_policy": "subscription_ok",
+              "language": "ja",
+              "self_name": "岡村"
+            },
+            "scope": "cloudnative",
+            "engagement": null,
+            "export_destinations": ["markdown"],
+            "is_default": false
+          }
+        ],
+        "default": "default"
+      }
+    ]
+  }
+}

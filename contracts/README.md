@@ -15,6 +15,23 @@ contracts/
 - `manifest.json` の `tools` はツール名の配列。`tools/<name>.json` と **過不足なく一致** させる（一致しなければローダーが起動時に `contract_mismatch` を投げる）
 - `manifest.json` の `defs` は共通定義ファイルの相対パス配列。定義名は全ファイルを通して一意
 
+## v1 ツール一覧（24）
+
+アプリ（narumi.app）の全操作をカバーする app-first のツールセット（`docs/superpowers/specs/2026-08-27-narumi-surface-parity-design.md`）。
+
+| 分類 | ツール |
+|---|---|
+| サーバー | `get_server_info`（capabilities + diagnostics） |
+| 録画 | `start_recording` / `stop_recording` / `get_recording_status` / `import_recording` |
+| 会議の閲覧 | `list_meetings`（`active_job` 付き）/ `search_transcripts` / `get_meeting` / `get_transcript` / `get_minutes` |
+| 会議の変更 | `register_context` / `regenerate` / `set_meeting_config` / `discard_tracks` / `delete_meeting` |
+| エクスポート | `export_minutes` / `list_export_destinations` |
+| ジョブ | `get_job_status` / `cancel_job` |
+| プロファイル | `list_profiles` / `get_profile` / `set_profile` / `delete_profile` |
+| カタログ | `rebuild_catalog` |
+
+`defs/common.json` の主な共通型: `meeting_id` `request_id` `job_id` `context_id` `scope_name` `scope` `timestamp` `external_send_policy` `job_status` `job_kind` `job` `error_code`（`cancelled` を含む）`error` `error_envelope` `meeting_config` `track_status` `meeting_summary`（任意の `active_job` 付き）`segment` `context_source_type` `export_destination` `profile`。
+
 ## ツールファイルの形式
 
 ```jsonc

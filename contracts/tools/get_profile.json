@@ -1,0 +1,57 @@
+{
+  "name": "get_profile",
+  "title": "Get profile",
+  "description": "Return one saved meeting profile by name (see list_profiles for all of them and for what a profile does). Read-only. On failure returns an error_envelope (isError=true) with code: not_found (unknown profile name), invalid_argument, internal.",
+  "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "Profile name (see list_profiles).",
+        "minLength": 1,
+        "maxLength": 64
+      }
+    },
+    "required": ["name"],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["profile"],
+    "properties": {
+      "profile": { "$ref": "../defs/common.json#/$defs/profile" }
+    },
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      { "name": "default" },
+      { "name": "customer-meetings" }
+    ],
+    "output": [
+      {
+        "profile": {
+          "name": "customer-meetings",
+          "config": {
+            "transcription_engine": "mlx-whisper",
+            "diarization_engine": "pyannote",
+            "llm_provider": "claude-agent-sdk",
+            "external_send_policy": "subscription_ok",
+            "language": "ja",
+            "self_name": "岡村"
+          },
+          "scope": "cloudnative",
+          "engagement": null,
+          "export_destinations": ["markdown"],
+          "is_default": false
+        }
+      }
+    ]
+  }
+}

@@ -86,6 +86,7 @@
         "scope_denied",
         "contract_mismatch",
         "busy",
+        "cancelled",
         "invalid_argument",
         "policy_violation",
         "recorder_unavailable",
@@ -146,7 +147,32 @@
         "status": { "type": "string", "enum": ["recording", "recorded", "processing", "ready", "failed"] },
         "started_at": { "$ref": "#/$defs/timestamp" },
         "stopped_at": { "oneOf": [ { "$ref": "#/$defs/timestamp" }, { "type": "null" } ] },
-        "latest_minutes_version": { "type": ["integer", "null"] }
+        "latest_minutes_version": { "type": ["integer", "null"] },
+        "active_job": {
+          "description": "The queued or running job for this meeting, or null / absent when none.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["job_id", "kind", "status"],
+              "properties": {
+                "job_id": { "$ref": "#/$defs/job_id" },
+                "kind": { "$ref": "#/$defs/job_kind" },
+                "status": { "$ref": "#/$defs/job_status" },
+                "progress": {
+                  "type": "object",
+                  "description": "Free-form progress info (stage name, fraction).",
+                  "properties": {
+                    "stage": { "type": "string" },
+                    "fraction": { "type": "number", "minimum": 0, "maximum": 1 }
+                  },
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": false
+            },
+            { "type": "null" }
+          ]
+        }
       },
       "additionalProperties": false
     },
@@ -172,6 +198,34 @@
       "type": "string",
       "description": "Exporter registry name, e.g. markdown | html | notion | gaia-library",
       "minLength": 1
+    },
+    "profile": {
+      "type": "object",
+      "description": "Saved meeting profile (<NARUMI_HOME>/profiles.json): config defaults, default scope / engagement and automatic export destinations applied to new meetings.",
+      "required": ["name", "config", "scope", "engagement", "export_destinations", "is_default"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "config": { "$ref": "#/$defs/meeting_config" },
+        "scope": {
+          "description": "Default affiliation scope for meetings created with this profile (null = unscoped).",
+          "oneOf": [{ "$ref": "#/$defs/scope_name" }, { "type": "null" }]
+        },
+        "engagement": {
+          "type": ["string", "null"],
+          "description": "Default engagement label for meetings created with this profile."
+        },
+        "export_destinations": {
+          "type": "array",
+          "description": "Exporter registry names run automatically when a meeting using this profile finishes processing.",
+          "items": { "$ref": "#/$defs/export_destination" },
+          "uniqueItems": true
+        },
+        "is_default": {
+          "type": "boolean",
+          "description": "True for exactly one profile: the one applied when start_recording / import_recording omit `profile`."
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

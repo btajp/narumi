@@ -1,0 +1,68 @@
+{
+  "name": "delete_meeting",
+  "title": "Delete meeting",
+  "description": "Delete a meeting: its entire session bundle is moved to <NARUMI_HOME>/trash/<meeting_id>-<timestamp>/ (returned as `moved_to`) and the meeting is removed from the catalog. Nothing is erased immediately — a mistaken deletion can be undone by moving the directory back under meetings/ and calling rebuild_catalog; emptying the trash is a manual step outside this tool. `confirm` must be literally true (a client must not set it without an explicit user confirmation). `scope` is the scope selector (default deny: a scoped meeting needs its scope in the request). `request_id` is the client-generated idempotency key: repeating the call returns the original result. On failure returns an error_envelope (isError=true) with code: not_found (unknown meeting_id), scope_denied (the request does not cover the meeting's scope), busy (the meeting is still recording, or a job is queued / running for it — cancel it first), invalid_argument (confirm missing or not true), internal.",
+  "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "meeting_id": { "$ref": "../defs/common.json#/$defs/meeting_id" },
+      "scope": {
+        "$ref": "../defs/common.json#/$defs/scope",
+        "description": "Omitted = unscoped meetings only. One name = that scope + unscoped. Array of 2+ names = cross-scope lookup (audit-logged)."
+      },
+      "confirm": {
+        "type": "boolean",
+        "const": true,
+        "description": "Must be literally true. Guards against accidental deletion; only set it after an explicit user confirmation."
+      },
+      "request_id": { "$ref": "../defs/common.json#/$defs/request_id" }
+    },
+    "required": ["meeting_id", "confirm", "request_id"],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["meeting_id", "deleted", "moved_to"],
+    "properties": {
+      "meeting_id": { "$ref": "../defs/common.json#/$defs/meeting_id" },
+      "deleted": {
+        "type": "boolean",
+        "const": true
+      },
+      "moved_to": {
+        "type": "string",
+        "description": "Absolute path the bundle was moved to (<NARUMI_HOME>/trash/<meeting_id>-<timestamp>/).",
+        "minLength": 1
+      }
+    },
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "confirm": true,
+        "request_id": "ee55ff66-0a77-4b88-8c99-334455667788"
+      },
+      {
+        "meeting_id": "20260826T010000Z-0badf00d",
+        "scope": "cloudnative",
+        "confirm": true,
+        "request_id": "ff660a77-1b88-4c99-9daa-445566778899"
+      }
+    ],
+    "output": [
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "deleted": true,
+        "moved_to": "/Users/me/Library/Application Support/narumi/trash/20260827T030500Z-a1b2c3d4-20260827T051500Z"
+      }
+    ]
+  }
+}

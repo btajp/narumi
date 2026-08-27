@@ -1,0 +1,60 @@
+{
+  "name": "delete_profile",
+  "title": "Delete profile",
+  "description": "Delete a saved meeting profile from <NARUMI_HOME>/profiles.json. The default profile cannot be deleted — make another profile default first with set_profile (make_default=true). Meetings already created with the profile are unaffected (their config was copied into their manifest). `request_id` is the client-generated idempotency key: repeating the call returns the original result. On failure returns an error_envelope (isError=true) with code: not_found (unknown profile name), invalid_argument (the profile is the current default), internal.",
+  "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "Profile name to delete (see list_profiles).",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "request_id": { "$ref": "../defs/common.json#/$defs/request_id" }
+    },
+    "required": ["name", "request_id"],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["name", "deleted"],
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "Name of the deleted profile.",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "deleted": {
+        "type": "boolean",
+        "const": true
+      }
+    },
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {
+        "name": "customer-meetings",
+        "request_id": "4e5f6071-8293-4ab2-8def-012345678901"
+      },
+      {
+        "name": "old-profile",
+        "request_id": "5f607182-93a4-4bc3-9ef0-123456789012"
+      }
+    ],
+    "output": [
+      {
+        "name": "customer-meetings",
+        "deleted": true
+      }
+    ]
+  }
+}

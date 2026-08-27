@@ -1,7 +1,7 @@
 {
   "name": "get_server_info",
   "title": "Get server info",
-  "description": "Return the narumi server identity, version and capabilities. `capabilities` reports whether recording can be attempted on this machine (narumi-recorder binary present and no permission known to be denied; `permissions` gives the per-permission state from `narumi-recorder check`), the active transports, and the registry names of the installed transcription engines, diarization engines, LLM providers and export destinations. Call this first to learn which names are valid for set_meeting_config / export_minutes and to detect a contract_version mismatch with your client. Read-only, takes no arguments. On failure returns an error_envelope (isError=true) with code: internal.",
+  "description": "Return the narumi server identity, version, capabilities and diagnostics. `capabilities` reports whether recording can be attempted on this machine (narumi-recorder binary present and no permission known to be denied; `permissions` gives the per-permission state from `narumi-recorder check`), the active transports, and the registry names of the installed transcription engines, diarization engines, LLM providers and export destinations. `diagnostics` reports the local environment for a diagnostics screen: resolved ffmpeg / ffprobe binaries (null when not found), the data root (<NARUMI_HOME>), the meetings root, the catalog database path, the narumi-recorder binary path (null when not found) and the contracts directory the server loaded. Call this first to learn which names are valid for set_meeting_config / export_minutes and to detect a contract_version mismatch with your client. Read-only, takes no arguments. On failure returns an error_envelope (isError=true) with code: internal.",
   "annotations": {
     "readOnlyHint": true,
     "destructiveHint": false,
@@ -17,7 +17,7 @@
   },
   "outputSchema": {
     "type": "object",
-    "required": ["name", "server_version", "contract_version", "capabilities"],
+    "required": ["name", "server_version", "contract_version", "capabilities", "diagnostics"],
     "properties": {
       "name": {
         "type": "string",
@@ -85,6 +85,76 @@
           }
         },
         "additionalProperties": false
+      },
+      "diagnostics": {
+        "type": "object",
+        "description": "Local environment diagnostics. Binary entries are null when the binary was not found.",
+        "required": [
+          "ffmpeg",
+          "ffprobe",
+          "data_root",
+          "meetings_root",
+          "catalog_path",
+          "recorder_path",
+          "contracts_dir"
+        ],
+        "properties": {
+          "ffmpeg": {
+            "description": "Resolved ffmpeg binary, or null when not found (preprocessing is then unavailable).",
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["path", "version"],
+                "properties": {
+                  "path": { "type": "string", "minLength": 1 },
+                  "version": { "type": "string", "minLength": 1 }
+                },
+                "additionalProperties": false
+              },
+              { "type": "null" }
+            ]
+          },
+          "ffprobe": {
+            "description": "Resolved ffprobe binary, or null when not found.",
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["path", "version"],
+                "properties": {
+                  "path": { "type": "string", "minLength": 1 },
+                  "version": { "type": "string", "minLength": 1 }
+                },
+                "additionalProperties": false
+              },
+              { "type": "null" }
+            ]
+          },
+          "data_root": {
+            "type": "string",
+            "description": "Absolute path of <NARUMI_HOME>.",
+            "minLength": 1
+          },
+          "meetings_root": {
+            "type": "string",
+            "description": "Absolute path of the directory holding the session bundles (<NARUMI_HOME>/meetings).",
+            "minLength": 1
+          },
+          "catalog_path": {
+            "type": "string",
+            "description": "Absolute path of the catalog database (narumi.db).",
+            "minLength": 1
+          },
+          "recorder_path": {
+            "type": ["string", "null"],
+            "description": "Absolute path of the narumi-recorder binary, or null when not found (recording is then unavailable)."
+          },
+          "contracts_dir": {
+            "type": "string",
+            "description": "Absolute path of the contracts directory the server loaded.",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
       }
     },
     "additionalProperties": false
@@ -104,6 +174,37 @@
           "diarization_engines": ["none", "fake"],
           "llm_providers": ["none", "fake", "claude-agent-sdk"],
           "export_destinations": ["markdown", "html"]
+        },
+        "diagnostics": {
+          "ffmpeg": { "path": "/opt/homebrew/bin/ffmpeg", "version": "7.1.1" },
+          "ffprobe": { "path": "/opt/homebrew/bin/ffprobe", "version": "7.1.1" },
+          "data_root": "/Users/me/Library/Application Support/narumi",
+          "meetings_root": "/Users/me/Library/Application Support/narumi/meetings",
+          "catalog_path": "/Users/me/Library/Application Support/narumi/narumi.db",
+          "recorder_path": "/Applications/narumi.app/Contents/MacOS/narumi-recorder",
+          "contracts_dir": "/Applications/narumi.app/Contents/Resources/contracts"
+        }
+      },
+      {
+        "name": "narumi",
+        "server_version": "0.1.0",
+        "contract_version": "1.0.0",
+        "capabilities": {
+          "recording": false,
+          "transports": ["stdio"],
+          "transcription_engines": ["auto", "fake"],
+          "diarization_engines": ["none", "fake"],
+          "llm_providers": ["none", "fake"],
+          "export_destinations": ["markdown", "html"]
+        },
+        "diagnostics": {
+          "ffmpeg": null,
+          "ffprobe": null,
+          "data_root": "/Users/me/Library/Application Support/narumi",
+          "meetings_root": "/Users/me/Library/Application Support/narumi/meetings",
+          "catalog_path": "/Users/me/Library/Application Support/narumi/narumi.db",
+          "recorder_path": null,
+          "contracts_dir": "/Users/me/ghq/github.com/btajp/narumi/contracts"
         }
       }
     ]

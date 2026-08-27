@@ -38,15 +38,27 @@ EXPECTED_TOOLS = {
     "get_server_info",
     "start_recording",
     "stop_recording",
+    "get_recording_status",
+    "import_recording",
     "list_meetings",
+    "search_transcripts",
     "get_meeting",
     "get_transcript",
+    "get_minutes",
     "register_context",
     "regenerate",
     "set_meeting_config",
     "export_minutes",
     "list_export_destinations",
     "get_job_status",
+    "cancel_job",
+    "discard_tracks",
+    "delete_meeting",
+    "list_profiles",
+    "get_profile",
+    "set_profile",
+    "delete_profile",
+    "rebuild_catalog",
 }
 MEETING_ID = "20260827T030500Z-a1b2c3d4"
 REQUEST_ID = "6f1c2a1e-9b7d-4c2e-8f0a-1a2b3c4d5e6f"
@@ -240,6 +252,8 @@ def test_tool_definition_has_mcp_shape(contracts: ContractSet) -> None:
 
 # ----------------------------------------------------------------------------- defs ↔ python
 def test_error_code_enum_matches_errors_module(contracts: ContractSet) -> None:
+    # cancel_job introduced the ``cancelled`` code; ``narumi.errors.ErrorCode`` must carry it too.
+    assert "cancelled" in contracts.defs["error_code"]["enum"]
     assert set(contracts.defs["error_code"]["enum"]) == {e.value for e in ErrorCode}
 
 
@@ -385,6 +399,99 @@ def test_set_meeting_config_nullable_fields(contracts: ContractSet) -> None:
         contracts.validate_input("set_meeting_config", {**base, "scope": None})
 
 
+def test_import_recording_requires_mic_or_system(contracts: ContractSet) -> None:
+    base = {"meeting_name": "取り込み", "request_id": REQUEST_ID}
+    contracts.validate_input("import_recording", {**base, "mic_path": "/tmp/mic.m4a"})
+    contracts.validate_input("import_recording", {**base, "system_path": "/tmp/system.m4a"})
+    contracts.validate_input(
+        "import_recording",
+        {**base, "mic_path": "/tmp/mic.m4a", "system_path": "/tmp/system.m4a"},
+    )
+    with pytest.raises(InvalidArgumentError):
+        contracts.validate_input("import_recording", base)
+    with pytest.raises(InvalidArgumentError):  # screen alone is not enough
+        contracts.validate_input("import_recording", {**base, "screen_path": "/tmp/screen.mp4"})
+    with pytest.raises(InvalidArgumentError):  # paths must be absolute
+        contracts.validate_input("import_recording", {**base, "mic_path": "mic.m4a"})
+
+
+def test_discard_tracks_track_list(contracts: ContractSet) -> None:
+    base = {"meeting_id": MEETING_ID, "request_id": REQUEST_ID}
+    contracts.validate_input("discard_tracks", {**base, "tracks": ["screen"]})
+    contracts.validate_input("discard_tracks", {**base, "tracks": ["screen", "mic", "system"]})
+    with pytest.raises(InvalidArgumentError):
+        contracts.validate_input("discard_tracks", {**base, "tracks": []})
+    with pytest.raises(InvalidArgumentError):
+        contracts.validate_input("discard_tracks", {**base, "tracks": ["mic", "mic"]})
+    with pytest.raises(InvalidArgumentError):
+        contracts.validate_input("discard_tracks", {**base, "tracks": ["video"]})
+
+
+def test_delete_meeting_requires_literal_confirm(contracts: ContractSet) -> None:
+    base = {"meeting_id": MEETING_ID, "request_id": REQUEST_ID}
+    contracts.validate_input("delete_meeting", {**base, "confirm": True})
+    with pytest.raises(InvalidArgumentError):
+        contracts.validate_input("delete_meeting", base)
+    with pytest.raises(InvalidArgumentError):
+        contracts.validate_input("delete_meeting", {**base, "confirm": False})
+
+
+def test_destructive_tools_are_flagged(contracts: ContractSet) -> None:
+    assert contracts["discard_tracks"].annotations["destructiveHint"] is True
+    assert contracts["delete_meeting"].annotations["destructiveHint"] is True
+
+
+def test_search_transcripts_query_and_limit(contracts: ContractSet) -> None:
+    contracts.validate_input("search_transcripts", {"query": "議事録"})
+    contracts.validate_input(
+        "search_transcripts", {"query": "x", "scope": ["a", "b"], "limit": 200}
+    )
+    with pytest.raises(InvalidArgumentError):
+        contracts.validate_input("search_transcripts", {"query": ""})
+    with pytest.raises(InvalidArgumentError):
+        contracts.validate_input("search_transcripts", {"query": "x", "limit": 0})
+    with pytest.raises(InvalidArgumentError):
+        contracts.validate_input("search_transcripts", {"query": "x", "limit": 201})
+
+
+def test_get_minutes_version_bounds(contracts: ContractSet) -> None:
+    contracts.validate_input("get_minutes", {"meeting_id": MEETING_ID})
+    contracts.validate_input("get_minutes", {"meeting_id": MEETING_ID, "version": 3})
+    with pytest.raises(InvalidArgumentError):
+        contracts.validate_input("get_minutes", {"meeting_id": MEETING_ID, "version": 0})
+
+
+def test_set_profile_nullable_defaults(contracts: ContractSet) -> None:
+    base = {"name": "customer-meetings", "request_id": REQUEST_ID}
+    contracts.validate_input("set_profile", {**base, "scope": None, "engagement": None})
+    contracts.validate_input(
+        "set_profile",
+        {**base, "scope": "cloudnative", "export_destinations": ["markdown"], "make_default": True},
+    )
+    with pytest.raises(InvalidArgumentError):  # profile scope is a single value, not a selector
+        contracts.validate_input("set_profile", {**base, "scope": ["a", "b"]})
+    with pytest.raises(InvalidArgumentError):
+        contracts.validate_input("set_profile", {**base, "export_destinations": ["md", "md"]})
+
+
+def test_profile_def_and_meeting_summary_active_job(contracts: ContractSet) -> None:
+    assert set(contracts.defs["profile"]["required"]) == {
+        "name",
+        "config",
+        "scope",
+        "engagement",
+        "export_destinations",
+        "is_default",
+    }
+    summary_props = contracts.defs["meeting_summary"]
+    assert "active_job" in summary_props["properties"]
+    assert "active_job" not in summary_props["required"]
+    # examples exercise active_job as both null and an object
+    meetings = contracts["list_meetings"].output_examples[0]["meetings"]
+    assert any(m.get("active_job") is None for m in meetings)
+    assert any(isinstance(m.get("active_job"), dict) for m in meetings)
+
+
 # ----------------------------------------------------------------------------- validate_output
 def test_validate_output_rejects_contract_violation(contracts: ContractSet) -> None:
     with pytest.raises(ContractMismatchError) as info:
@@ -429,11 +536,16 @@ def test_read_only_tools_have_no_request_id_and_write_tools_require_it(
     write = set(contracts.tools) - read_only
     assert read_only == {
         "get_server_info",
+        "get_recording_status",
         "list_meetings",
+        "search_transcripts",
         "get_meeting",
         "get_transcript",
+        "get_minutes",
         "list_export_destinations",
         "get_job_status",
+        "list_profiles",
+        "get_profile",
     }
     for name in read_only:
         assert "request_id" not in contracts[name].input_schema["properties"], name

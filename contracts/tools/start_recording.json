@@ -1,7 +1,7 @@
 {
   "name": "start_recording",
   "title": "Start recording",
-  "description": "Start recording a new meeting and create its session bundle. The screen, the microphone and the system audio are captured as separate track files (the first layer of speaker separation). Only one recording can run at a time. `request_id` is the client-generated idempotency key: repeating the call with the same request_id returns the original result instead of starting a second recording. Returns the new meeting_id, the absolute bundle path and the track files (relative to the bundle). On failure returns an error_envelope (isError=true) with code: busy (a recording is already running), recorder_unavailable (narumi-recorder binary missing, or screen / microphone permission denied), policy_violation (`config` selects an engine or provider not allowed by its external_send_policy — nothing is silently substituted), engine_unavailable (`config` names an engine / provider not registered on this server), invalid_argument (unknown profile, bad config), internal.",
+  "description": "Start recording a new meeting and create its session bundle. The screen, the microphone and the system audio are captured as separate track files (the first layer of speaker separation). Only one recording can run at a time. `profile` names a saved profile (see list_profiles / set_profile) applied as defaults for config, scope, engagement and automatic export destinations — explicit arguments and config keys win; omitted = the default profile. `request_id` is the client-generated idempotency key: repeating the call with the same request_id returns the original result instead of starting a second recording. Returns the new meeting_id, the absolute bundle path and the track files (relative to the bundle). On failure returns an error_envelope (isError=true) with code: busy (a recording is already running), recorder_unavailable (narumi-recorder binary missing, or screen / microphone permission denied), policy_violation (`config` selects an engine or provider not allowed by its external_send_policy — nothing is silently substituted), engine_unavailable (`config` names an engine / provider not registered on this server), invalid_argument (unknown profile, bad config), internal.",
   "annotations": {
     "readOnlyHint": false,
     "destructiveHint": false,
@@ -29,10 +29,9 @@
       },
       "profile": {
         "type": "string",
-        "description": "Meeting profile name providing config defaults. Defaults to \"default\" (local-only Whisper, no diarization, plain minutes).",
+        "description": "Saved profile name (see list_profiles / set_profile) whose config, scope, engagement and export_destinations are applied as defaults; explicit arguments and config keys win. Omitted = the profile marked is_default (the built-in \"default\" profile is local-only Whisper, no diarization, plain minutes).",
         "minLength": 1,
-        "maxLength": 64,
-        "default": "default"
+        "maxLength": 64
       },
       "config": {
         "$ref": "../defs/common.json#/$defs/meeting_config",

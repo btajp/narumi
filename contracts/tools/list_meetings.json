@@ -1,7 +1,7 @@
 {
   "name": "list_meetings",
   "title": "List meetings",
-  "description": "List meetings from the catalog, newest first. `query` is a free-text search over meeting name, engagement and transcript text. `range` filters by recording start time (inclusive from, exclusive to). `scope` is the confidentiality boundary and defaults to deny: omitted = only meetings with no scope; a single scope name = meetings in that scope plus unscoped meetings; an array of 2 or more names = explicit cross-scope query, which is written to the audit log. `limit` caps the number of results (1..500, default 50). Read-only; use get_meeting for details. On failure returns an error_envelope (isError=true) with code: scope_denied, invalid_argument (bad range or limit), internal.",
+  "description": "List meetings from the catalog, newest first. `query` is a free-text search over meeting name, engagement and transcript text (use search_transcripts for segment-level hits). `range` filters by recording start time (inclusive from, exclusive to). `scope` is the confidentiality boundary and defaults to deny: omitted = only meetings with no scope; a single scope name = meetings in that scope plus unscoped meetings; an array of 2 or more names = explicit cross-scope query, which is written to the audit log. `limit` caps the number of results (1..500, default 50). Each meeting_summary may carry `active_job` — the queued / running job for that meeting with its progress (null or absent when none) — so a list UI can show progress without polling get_job_status per meeting. Read-only; use get_meeting for details. On failure returns an error_envelope (isError=true) with code: scope_denied, invalid_argument (bad range or limit), internal.",
   "annotations": {
     "readOnlyHint": true,
     "destructiveHint": false,
@@ -84,7 +84,8 @@
             "status": "ready",
             "started_at": "2026-08-27T03:05:00Z",
             "stopped_at": "2026-08-27T04:02:10Z",
-            "latest_minutes_version": 2
+            "latest_minutes_version": 2,
+            "active_job": null
           },
           {
             "meeting_id": "20260826T010000Z-0badf00d",
@@ -95,6 +96,22 @@
             "started_at": "2026-08-26T01:00:00Z",
             "stopped_at": null,
             "latest_minutes_version": null
+          },
+          {
+            "meeting_id": "20260825T090000Z-00c0ffee",
+            "meeting_name": "顧客キックオフ",
+            "engagement": "acme-onboarding",
+            "scope": "cloudnative",
+            "status": "processing",
+            "started_at": "2026-08-25T09:00:00Z",
+            "stopped_at": "2026-08-25T10:00:00Z",
+            "latest_minutes_version": null,
+            "active_job": {
+              "job_id": "job-0123456789ab",
+              "kind": "process",
+              "status": "running",
+              "progress": { "stage": "transcribe", "fraction": 0.4 }
+            }
           }
         ]
       }
