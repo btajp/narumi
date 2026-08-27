@@ -237,3 +237,68 @@ def test_run_align_idempotent(tmp_path: Path):
     # a changed transcript hash invalidates the stage
     record_transcript(bundle, make_transcript("own-mic", "mic", sentence_spans(shift=2.0)))
     assert not run_align(bundle).skipped
+
+
+# ------------------------------------------------------------------ external sources (Step 3)
+def vtt_clock(seconds: float) -> str:
+    total = int(seconds)
+    millis = round((seconds - total) * 1000)
+    return f"{total // 3600:02d}:{total % 3600 // 60:02d}:{total % 60:02d}.{millis:03d}"
+
+
+def render_vtt(spans: list[tuple[float, float, str]], speaker: str | None = None) -> str:
+    blocks = ["WEBVTT"]
+    for start, end, text in spans:
+        prefix = f"{speaker}: " if speaker else ""
+        blocks.append(f"{vtt_clock(start)} --> {vtt_clock(end)}\n{prefix}{text}")
+    return "\n\n".join(blocks) + "\n"
+
+
+def test_ext_vtt_shifted_by_seven_seconds_recovers_offset(tmp_path: Path):
+    from narumi.context_sources import parse_context
+
+    bundle = Bundle.create(tmp_path, meeting_name="定例")
+    record_transcript(bundle, make_transcript("own-system", "system", sentence_spans()))
+    record_transcript(bundle, make_transcript("own-mic", "mic", sentence_spans()))
+
+    vtt = render_vtt(sentence_spans(shift=7.0), speaker="田中 太郎")
+    ext = parse_context("zoom_transcript", vtt, context_id="ctx-shifted")
+    assert ext is not None and ext.source_id == "ext-ctx-shifted"
+    record_transcript(bundle, ext)
+
+    result = run_align(bundle)
+    assert set(result.record.inputs) == {
+        "transcripts/ext-ctx-shifted",
+        "transcripts/own-mic",
+        "transcripts/own-system",
+    }
+    alignment = Alignment.model_validate_json(result.path.read_text(encoding="utf-8"))
+    assert alignment.params["reference"] == "own-system"
+    assert alignment.params["unaligned"] == []
+    assert alignment.offsets["ext-ctx-shifted"] == pytest.approx(-7.0, abs=0.1)
+    # every interval carries the ext column next to the own columns after the correction
+    assert len(alignment.intervals) == len(SENTENCES)
+    for i, interval in enumerate(alignment.intervals):
+        assert set(interval.columns) == {"ext-ctx-shifted", "own-mic", "own-system"}
+        assert interval.columns["ext-ctx-shifted"] == [f"ext-ctx-shifted:{i}"]
+    # the parsed speaker names survive the round trip through the bundle
+    from narumi.align import load_transcripts
+
+    stored = load_transcripts(bundle)["transcripts/ext-ctx-shifted"]
+    assert {s.speaker for s in stored.segments} == {"田中 太郎"}
+
+
+def test_build_alignment_ext_only_interval_is_kept(tmp_path: Path):
+    from narumi.context_sources import parse_context
+
+    spans = sentence_spans(shift=7.0)
+    extra = (len(SENTENCES) * 6.0 + 7.0, len(SENTENCES) * 6.0 + 11.0, "こちらだけの追加発言です。")
+    vtt = render_vtt([*spans, extra], speaker="鈴木 花子")
+    ext = parse_context("zoom_transcript", vtt, context_id="ctx-extra")
+    assert ext is not None
+    system = make_transcript("own-system", "system", sentence_spans())
+    alignment = build_alignment([system, ext])
+    assert alignment.offsets["ext-ctx-extra"] == pytest.approx(-7.0, abs=0.1)
+    last = alignment.intervals[-1]
+    assert set(last.columns) == {"ext-ctx-extra"}  # speech only the external tool heard
+    assert last.columns["ext-ctx-extra"] == [f"ext-ctx-extra:{len(SENTENCES)}"]

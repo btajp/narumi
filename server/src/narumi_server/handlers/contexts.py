@@ -1,8 +1,13 @@
-"""``register_context``: store an external source verbatim in the bundle (status ``stored``).
+"""``register_context``: store an external source verbatim, then try to parse a transcript.
 
-Parsing external transcripts into ``transcripts/ext-<context_id>.json`` is a later step (design
-doc §11); v1 keeps the raw payload as the source of truth and lets ``regenerate`` pick it up once
-a parser exists.
+The raw payload saved under ``context/sources/`` stays the source of truth. When ``source_type``
+is a transcript kind and the payload is text, the deterministic parsers
+(:mod:`narumi.context_sources`: WebVTT / SRT / Zoom txt / plain) run immediately; success writes
+the ``transcripts/ext-<context_id>`` artifact (keyed to the stored source's hash, 絶対原則 2)
+and the context reports ``parsed``. Anything unparseable simply stays ``stored`` — never an
+error. ``url`` payloads are stored as references only: fetching a URL would send the request
+out of the machine, so it is left to a later, policy-checked step (design doc §11), and such
+contexts always report ``stored``.
 """
 
 from __future__ import annotations
@@ -12,8 +17,11 @@ import secrets
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from narumi.bundle import ContextRecord, utc_now_iso
+from narumi.bundle import Bundle, ContextRecord, utc_now_iso
+from narumi.bundle.hashing import sha256_file
+from narumi.context_sources import PARSER_VERSION, parse_context
 from narumi.errors import InvalidArgumentError, NotFoundError
+from narumi.models import Transcript
 
 from narumi_server.handlers.common import locked_bundle, sync_catalog
 from narumi_server.handlers.processing import enqueue_regenerate
@@ -69,13 +77,14 @@ def register_context(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]
 
         rel = f"{SOURCES_DIR}/{context_id}.json"
         bundle.write_json(rel, source)
+        status = _try_parse(bundle, rel, source, context_id=context_id, kind=kind)
         bundle.manifest.contexts.append(
             ContextRecord(
                 context_id=context_id,
                 source_type=args["source_type"],
                 registered_at=registered_at,
                 path=rel,
-                status="stored",
+                status=status,
                 label=args.get("label"),
                 request_id=args.get("request_id"),
             )
@@ -83,7 +92,7 @@ def register_context(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]
         bundle.save()
         sync_catalog(ctx, bundle)
         ctx.catalog.record_context(
-            bundle.meeting_id, context_id, args["source_type"], "stored", registered_at
+            bundle.meeting_id, context_id, args["source_type"], status, registered_at
         )
         ctx.catalog.audit(
             ctx.actor,
@@ -91,12 +100,53 @@ def register_context(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]
             {"meeting_id": bundle.meeting_id, "context_id": context_id, "kind": kind},
         )
 
-        result: dict[str, Any] = {"context_id": context_id, "status": "stored"}
+        result: dict[str, Any] = {"context_id": context_id, "status": status}
         if auto_regenerate:
             result["job_id"] = enqueue_regenerate(
                 ctx, bundle.meeting_id, force=False, reason=f"register_context {context_id}"
             )
     return result
+
+
+def _try_parse(
+    bundle: Bundle, rel: str, source: dict[str, Any], *, context_id: str, kind: str
+) -> str:
+    """Parse the stored source into ``transcripts/ext-<context_id>`` when possible.
+
+    Returns the context status: ``parsed`` when a transcript artifact was written, ``stored``
+    otherwise (url references are never fetched here; binary payloads and non-transcript
+    source types have nothing to parse — none of that is an error).
+    """
+    if kind == "url" or source.get("content_encoding") is not None:
+        return "stored"
+    text = source.get("content")
+    if not isinstance(text, str):
+        return "stored"
+    transcript = parse_context(source["source_type"], text, context_id=context_id)
+    if transcript is None:
+        return "stored"
+    _record_ext_transcript(bundle, rel, transcript, context_id=context_id)
+    return "parsed"
+
+
+def _record_ext_transcript(
+    bundle: Bundle, source_rel: str, transcript: Transcript, *, context_id: str
+) -> None:
+    """Write the parsed transcript as an idempotent stage keyed to the stored source's hash."""
+    output = f"transcripts/ext-{context_id}.json"
+    fmt = transcript.engine.name.removeprefix("parser-")
+
+    def produce(out: Path) -> None:
+        bundle.write_json(output, transcript)
+
+    bundle.run_stage(
+        f"transcripts/ext-{context_id}",
+        inputs={f"context/{context_id}": sha256_file(bundle.abspath(source_rel))},
+        params={"parser": fmt, "version": int(PARSER_VERSION)},
+        producer=(transcript.engine.name, transcript.engine.version),
+        output=output,
+        fn=produce,
+    )
 
 
 def read_context_file(file_path: str) -> dict[str, Any]:

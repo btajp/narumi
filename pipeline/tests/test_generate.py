@@ -328,7 +328,7 @@ def test_llm_minutes_snapshot(tmp_path: Path):
     assert len(fake.calls) == 2  # one chunk + final integration
     assert "<transcript>" in fake.calls[0].prompt and "<summaries>" in fake.calls[1].prompt
     assert PLAIN_PLACEHOLDER not in text
-    assert meta.prompt_version == MINUTES_PROMPT_VERSION == "minutes-v1"
+    assert meta.prompt_version == MINUTES_PROMPT_VERSION == "minutes-v2"
     assert meta.params["chunks"] == 1 and meta.params["mode"] == "llm"
 
 
@@ -458,3 +458,114 @@ def test_run_stages_enforce_policy_before_instantiation(tmp_path: Path, monkeypa
     with pytest.raises(PolicyViolationError):
         run_generate(bundle)
     assert bundle.manifest.minutes_versions == []
+
+
+# ------------------------------------------------------------------ layer 4 (external names)
+def ext_named(source_id: str, spans):
+    """External transcript with (start, end, speaker, text) spans."""
+    return Transcript(
+        source_id=source_id,
+        kind="external",
+        engine=EngineInfo(name="parser-vtt", version="1"),
+        segments=[
+            Segment(id=f"{source_id}:{i}", start=s, end=e, text=t, speaker=sp)
+            for i, (s, e, sp, t) in enumerate(spans)
+        ],
+    )
+
+
+def test_integrate_layer4_resolves_speaker_labels():
+    """SPEAKER_xx labels overlapped by exactly one external name get that name (evidence 4)."""
+    ts = transcripts()
+    ext = ext_named(
+        "ext-ctx1",
+        [
+            (6.1, 9.9, "田中", "先週のリリース状況を教えてください"),
+            (18.1, 21.9, "鈴木", "障害は二件ありましたが復旧済みです"),
+        ],
+    )
+    ts["ext-ctx1"] = ext
+    alignment = build_alignment(list(ts.values()))
+    merged = integrate(alignment, ts, [layer1(), layer2()], MeetingConfig(self_name="岡村"), None)
+    speakers = merged.speaker_map.speakers
+    assert speakers["SPEAKER_00"].name == "田中"
+    assert speakers["SPEAKER_01"].name == "鈴木"
+    assert [e.layer for e in speakers["SPEAKER_00"].evidence] == [2, 4]
+    assert "ext-ctx1" in speakers["SPEAKER_00"].evidence[1].detail
+    assert 0 < speakers["SPEAKER_00"].confidence < 1
+    named = {s.text: s.speaker_name for s in merged.segments}
+    assert named["先週のリリース状況を教えてください。"] == "田中"
+    assert named["障害は二件ありましたが復旧済みです。"] == "鈴木"
+    assert named["お疲れさまです。定例を始めます。"] == "岡村"  # me stays self_name
+    assert merged.params["layer4_sources"] == ["ext-ctx1"]
+
+
+def test_integrate_layer4_ambiguous_label_fills_per_segment_only():
+    """One 'other' label over two external names: the map stays unresolved, segments resolve."""
+    ts = transcripts()
+    ts["ext-ctx2"] = ext_named(
+        "ext-ctx2",
+        [
+            (6.1, 9.9, "田中", "先週のリリース状況を教えてください"),
+            (18.1, 21.9, "鈴木", "障害は二件ありましたが復旧済みです"),
+        ],
+    )
+    alignment = build_alignment(list(ts.values()))
+    merged = integrate(alignment, ts, [layer1()], MeetingConfig(self_name="岡村"), None)
+    other = merged.speaker_map.speakers["other"]
+    assert other.name is None  # two candidates → no label-level resolution
+    assert all(e.layer != 4 for e in other.evidence)
+    named = {s.text: s.speaker_name for s in merged.segments}
+    assert named["先週のリリース状況を教えてください。"] == "田中"
+    assert named["障害は二件ありましたが復旧済みです。"] == "鈴木"
+    # the 12-16 s overlap has no layer-4 turn → stays unresolved
+    assert named["リリースは金曜に完了しました、了解です。"] is None
+
+
+def test_integrate_layer4_ext_only_segment_gets_its_name():
+    mic = make_transcript("own-mic", "mic", [(0.0, 4.0, "自分の発話")])
+    ext = ext_named("ext-c", [(10.0, 13.0, "佐藤", "外部だけが聞き取った発話")])
+    ts = {"own-mic": mic, "ext-c": ext}
+    alignment = build_alignment(list(ts.values()), reference="own-mic")
+    merged = integrate(alignment, ts, [], MeetingConfig(), None)
+    tail = merged.segments[-1]
+    assert tail.sources == ["ext-c:0"]
+    assert tail.speaker_label is None and tail.speaker_name == "佐藤"
+
+
+def test_integrate_prefers_recorded_layer4_artifact():
+    """A diarization/layer4 artifact wins over deriving turns from the ext transcripts."""
+    ts = transcripts()
+    ts["ext-ctx3"] = ext_named("ext-ctx3", [(6.1, 9.9, "田中", "先週のリリース状況")])
+    recorded = Diarization(
+        layer=4,
+        engine=EngineInfo(name="external-transcripts", version="1"),
+        turns=[Turn(start=6.1, end=9.9, speaker="上書希子", layer=4, source_id="ext-ctx3")],
+    )
+    alignment = build_alignment(list(ts.values()))
+    merged = integrate(alignment, ts, [layer1(), recorded], MeetingConfig(), None)
+    named = {s.text: s.speaker_name for s in merged.segments}
+    assert named["先週のリリース状況を教えてください。"] == "上書希子"
+    assert merged.params["diarization_layers"] == [1, 4]
+
+
+def test_minutes_note_layer4_names(tmp_path: Path):
+    ts = transcripts()
+    ts["ext-ctx4"] = ext_named(
+        "ext-ctx4",
+        [
+            (6.1, 9.9, "田中", "先週のリリース状況を教えてください"),
+            (18.1, 21.9, "田中", "障害は二件ありましたが復旧済みです"),
+        ],
+    )
+    alignment = build_alignment(list(ts.values()))
+    config = MeetingConfig(self_name="岡村")
+    merged = integrate(alignment, ts, [layer1()], config, None)
+    assert merged.speaker_map.speakers["other"].name == "田中"
+    text, meta = generate_minutes(
+        merged, manifest_fixture(tmp_path, config), config, None, version=1
+    )
+    assert "- **other**: 田中（外部トランスクリプトより）" in text
+    assert "- **me**: 岡村\n" in text  # self_name carries no layer-4 note
+    assert "**田中**: 先週のリリース状況を教えてください。" in text
+    assert "other" not in meta.unresolved_speakers

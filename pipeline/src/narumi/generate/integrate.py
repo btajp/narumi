@@ -5,13 +5,22 @@ the configured LLM provider with the fixed ``integrate_interval`` prompt. Withou
 merge is deterministic and lossless: the own tracks are *complementary* speakers (mic = ``me``,
 system = the others), so each own column of an interval becomes its own segment; external
 columns (another tool's transcript of the same speech) are redundant with them and only stand in
-when no own column exists.
+when no own column exists — an interval only the external source heard therefore still appears.
+
+Layer 4 (speaker names from external transcripts) resolves identities: a label such as ``other``
+or ``SPEAKER_00`` gets a real name when its segments overlap layer-4 turns that agree on exactly
+one name (single candidate; anything ambiguous stays unresolved).
+
+Re-runs are incremental (Step 8): each interval's result is cached in
+``merged/integrate_cache.json`` under a content fingerprint (see :mod:`narumi.generate.cache`),
+so adding one source re-runs the LLM only for the intervals that source touches.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from narumi.align.pipeline_stage import (
     ALIGNMENT_KEY,
@@ -19,10 +28,14 @@ from narumi.align.pipeline_stage import (
     load_alignment,
     load_transcripts,
 )
+from narumi.brief import load_brief
 from narumi.bundle import Bundle, StageResult
+from narumi.diarize.layer3 import LAYER_SCREEN, NameSuggestion, load_layer3_names
+from narumi.diarize.layer4 import LAYER_EXTERNAL, build_layer4
 from narumi.errors import InvalidArgumentError, NotFoundError
+from narumi.generate.cache import CACHE_PATH, IntegrateCache, interval_fingerprint
 from narumi.generate.prompts import render_prompt
-from narumi.generate.speakers import assign_by_overlap
+from narumi.generate.speakers import assign_by_overlap, overlap
 from narumi.llm.base import LLMProvider
 from narumi.llm.policy import check_policy
 from narumi.llm.registry import get_provider, provider_profile
@@ -54,6 +67,8 @@ INTEGRATE_SYSTEM_PROMPT = (
 )
 PRODUCER = ("integrate", "1")
 NO_SPACE_LANGUAGES = ("ja", "zh")
+LAYER4_MAP_CONFIDENCE = 0.8
+"""Confidence of a speaker-map entry resolved through layer 4 (external transcript names)."""
 
 
 def uses_llm(provider: LLMProvider | None) -> bool:
@@ -91,18 +106,32 @@ def integrate(
     diarizations: list[Diarization],
     config: MeetingConfig,
     provider: LLMProvider | None,
+    *,
+    cache: IntegrateCache | None = None,
+    layer3_names: dict[str, NameSuggestion] | None = None,
 ) -> MergedTranscript:
     """Build the integrated transcript. ``transcripts`` is keyed by ``source_id``.
 
     Every interval yields one segment, except deterministic multi-source intervals in which two
     or more *own* tracks speak: those yield one segment per own track so that neither speaker's
     words are dropped (the tracks are different people, not redundant transcriptions).
-    Speaker turns are compared on the aligned clock: layer-1 turns carry their ``source_id`` and
-    are shifted by ``alignment.offsets`` like the segments they came from.
+    Speaker turns are compared on the aligned clock: layer-1 and layer-4 turns carry their
+    ``source_id`` and are shifted by ``alignment.offsets`` like the segments they came from.
+
+    With a ``cache``, intervals whose fingerprint (contributing text + provider + prompt +
+    overlapping speaker turns) is unchanged reuse their cached rows without an LLM call;
+    ``params`` reports the split as ``{"reused": n, "recomputed": m}``. Speaker *names* are
+    always resolved fresh — the cache stores labels only.
+
+    ``layer3_names`` are the screen-vision name suggestions (``diarization/layer3-names.json``):
+    a label still unresolved after ``self_name`` and layer 4 takes its layer-3 suggestion, with
+    layer-3 evidence. Layer 4 (real names printed by external tools) outranks layer 3 (names
+    read off pixels).
     """
     index = _segment_index(transcripts)
     reference = str(alignment.params.get("reference") or REFERENCE_SOURCE)
     llm = uses_llm(provider)
+    provider_name = provider.name if provider is not None else "none"
     shifts = {
         sid: t.time_offset + alignment.offsets.get(sid, 0.0) for sid, t in transcripts.items()
     }
@@ -113,14 +142,34 @@ def integrate(
         for turn in d.turns
     ]
     layer2 = [turn for d in diarizations if d.layer == 2 for turn in d.turns]
+    layer4 = _layer4_turns(transcripts, diarizations, alignment.offsets)
     tracks = {sid: t.track for sid, t in transcripts.items()}
+    all_turns = [*layer1, *layer2, *layer4]
 
-    segments: list[MergedSegment] = []
-    labels_seen: list[str] = []
+    rows: list[dict[str, Any]] = []
+    reused = 0
+    recomputed = 0
     for interval in alignment.intervals:
         contributing = [sid for sid, ids in interval.columns.items() if ids]
         if not contributing:
             continue
+        fingerprint = interval_fingerprint(
+            interval,
+            contributing,
+            index,
+            all_turns,
+            provider=provider_name,
+            prompt_version=INTEGRATE_PROMPT_VERSION,
+            reference=reference,
+            language=config.language,
+            vocab_hints=list(config.vocab_hints),
+        )
+        cached = cache.get(fingerprint) if cache is not None else None
+        if cached is not None:
+            rows.extend(cached)
+            reused += 1
+            continue
+        interval_rows: list[dict[str, Any]] = []
         drafts = _interval_drafts(
             interval, contributing, index, reference, config, provider, llm, tracks, shifts
         )
@@ -128,8 +177,6 @@ def integrate(
             if not draft.text:
                 continue
             label = _draft_label(draft, tracks, layer1, layer2)
-            if label is not None and label not in labels_seen:
-                labels_seen.append(label)
             sources = [
                 seg_id
                 for seg_id, _ in sorted(
@@ -141,25 +188,33 @@ def integrate(
                     key=lambda pair: (pair[1].start + shifts[index[pair[0]][0]], pair[0]),
                 )
             ]
-            segments.append(
-                MergedSegment(
-                    id=f"m-{len(segments) + 1:05d}",
-                    start=draft.start,
-                    end=draft.end,
-                    text=draft.text,
-                    speaker_label=label,
-                    sources=sources,
-                )
+            interval_rows.append(
+                {
+                    "start": draft.start,
+                    "end": draft.end,
+                    "text": draft.text,
+                    "speaker_label": label,
+                    "sources": sources,
+                }
             )
+        recomputed += 1
+        if cache is not None:
+            cache.put(fingerprint, interval_rows)
+        rows.extend(interval_rows)
+
+    segments = [MergedSegment(id=f"m-{i:05d}", **row) for i, row in enumerate(rows, start=1)]
+    labels_seen: list[str] = []
+    for segment in segments:
+        if segment.speaker_label is not None and segment.speaker_label not in labels_seen:
+            labels_seen.append(segment.speaker_label)
 
     speaker_map = build_speaker_map(labels_seen, config, diarizations)
-    for segment in segments:
-        segment.speaker_name = speaker_map.name_for(segment.speaker_label)
+    _apply_speaker_names(segments, speaker_map, layer4, layer3_names or {})
 
     return MergedTranscript(
         segments=segments,
         speaker_map=speaker_map,
-        provider=provider.name if provider is not None else "none",
+        provider=provider_name,
         params={
             "integration": "llm" if llm else "deterministic",
             "prompt_version": INTEGRATE_PROMPT_VERSION if llm else None,
@@ -168,8 +223,87 @@ def integrate(
             "self_name": config.self_name,
             "vocab_hints": list(config.vocab_hints),
             "diarization_layers": sorted({d.layer for d in diarizations}),
+            "layer3_labels": sorted(layer3_names or {}),
+            "layer4_sources": sorted({t.source_id for t in layer4 if t.source_id}),
+            "reused": reused,
+            "recomputed": recomputed,
         },
     )
+
+
+def _layer4_turns(
+    transcripts: dict[str, Transcript],
+    diarizations: list[Diarization],
+    offsets: dict[str, float],
+) -> list[Turn]:
+    """Aligned-clock layer-4 turns: a recorded ``diarization/layer4`` artifact when present,
+    otherwise derived on the fly from the external transcripts (same deterministic inputs)."""
+    provided = [d for d in diarizations if d.layer == LAYER_EXTERNAL]
+    if provided:
+        return [_shift_turn(turn, offsets) for d in provided for turn in d.turns]
+    external = [t for t in transcripts.values() if t.kind == "external"]
+    if not external:
+        return []
+    return [_shift_turn(turn, offsets) for turn in build_layer4(external).turns]
+
+
+def _apply_speaker_names(
+    segments: list[MergedSegment],
+    speaker_map: SpeakerMap,
+    layer4: list[Turn],
+    layer3_names: dict[str, NameSuggestion],
+) -> None:
+    """Resolve ``speaker_name`` from the map, then layer 4, then layer 3 (in that order).
+
+    Label level: an unresolved label (``other`` / ``SPEAKER_xx``) whose segments overlap layer-4
+    turns that all agree on one name gets that name in the speaker map, with layer-4 evidence;
+    a label still unresolved afterwards takes its layer-3 (screen vision) suggestion with
+    layer-3 evidence. Segment level: a segment whose label stays unresolved — including a
+    label-less ext-only segment — still gets a name when exactly one layer-4 name overlaps it
+    (the same label may cover different people over the meeting).
+    ``me`` is never renamed by layer 3 / 4 — the mic track is the user, ``self_name`` decides.
+    """
+    candidates: list[set[str]] = []
+    by_label: dict[str, set[str]] = {}
+    for segment in segments:
+        label = segment.speaker_label
+        if label == SPEAKER_ME or not layer4:
+            candidates.append(set())
+            continue
+        names = {
+            turn.speaker
+            for turn in layer4
+            if overlap(segment.start, segment.end, turn.start, turn.end) > 0
+        }
+        candidates.append(names)
+        if label is not None:
+            by_label.setdefault(label, set()).update(names)
+    sources_by_name: dict[str, set[str]] = {}
+    for turn in layer4:
+        if turn.source_id:
+            sources_by_name.setdefault(turn.speaker, set()).add(turn.source_id)
+    for label, names in sorted(by_label.items()):
+        entry = speaker_map.speakers.get(label)
+        if entry is None or entry.name is not None or len(names) != 1:
+            continue
+        name = next(iter(names))
+        entry.name = name
+        entry.confidence = LAYER4_MAP_CONFIDENCE
+        ids = ", ".join(sorted(sources_by_name.get(name, set())))
+        detail = f"external transcript ({ids})" if ids else "external transcript"
+        entry.evidence.append(SpeakerEvidence(layer=LAYER_EXTERNAL, detail=detail))
+    for label, suggestion in sorted(layer3_names.items()):
+        entry = speaker_map.speakers.get(label)
+        if entry is None or entry.name is not None or label == SPEAKER_ME:
+            continue
+        entry.name = suggestion.name
+        entry.confidence = suggestion.confidence
+        entry.evidence.append(SpeakerEvidence(layer=LAYER_SCREEN, detail=suggestion.evidence))
+    for segment, names in zip(segments, candidates, strict=True):
+        name = speaker_map.name_for(segment.speaker_label)
+        if name is None and len(names) == 1:
+            name = next(iter(names))
+        segment.speaker_name = name
 
 
 def build_speaker_map(
@@ -300,7 +434,7 @@ def _interval_drafts(
 
 
 def _shift_turn(turn: Turn, offsets: dict[str, float]) -> Turn:
-    """Project a layer-1 turn onto the aligned clock (``+ offsets[source_id]``)."""
+    """Project a source-bound turn (layer 1 / 4) onto the aligned clock (``+ offsets[source]``)."""
     offset = offsets.get(turn.source_id, 0.0) if turn.source_id else 0.0
     if offset == 0.0:
         return turn
@@ -360,8 +494,23 @@ def load_merged(bundle: Bundle) -> MergedTranscript:
 
 
 def run_integrate(bundle: Bundle, *, force: bool = False) -> StageResult:
-    """Run stage 2 idempotently; the send policy is checked before anything is instantiated."""
+    """Run stage 2 idempotently; the send policy is checked before anything is instantiated.
+
+    The interval cache (``merged/integrate_cache.json``) makes a re-run after a new source only
+    call the LLM for the intervals that source touches. ``force`` bypasses cache *reads* (every
+    interval recomputes, so a forced run reproduces a from-scratch run byte for byte) but still
+    rewrites the cache for the next run.
+
+    When the brief stage ran, its merged ``vocab_hints`` (config + gaia glossary) replace the
+    config's own hints — in the prompt, the fingerprint and the stage params, so richer hints
+    re-integrate. Layer-3 name suggestions (``diarization/layer3-names.json``) are loaded here
+    and resolve labels that ``self_name`` / layer 4 left open.
+    """
     config = bundle.manifest.config
+    brief = load_brief(bundle)
+    if brief is not None:
+        config = config.model_copy(update={"vocab_hints": list(brief.vocab_hints)})
+    layer3_names = load_layer3_names(bundle)
     alignment = load_alignment(bundle)
     transcripts_by_key = load_transcripts(bundle)
     diarizations_by_key = load_diarizations(bundle)
@@ -382,13 +531,18 @@ def run_integrate(bundle: Bundle, *, force: bool = False) -> StageResult:
 
     def produce(out: Path) -> None:
         provider = get_provider(name)
+        cache_path = bundle.abspath(CACHE_PATH)
+        cache = IntegrateCache() if force else IntegrateCache.load(cache_path)
         merged = integrate(
             alignment,
             {t.source_id: t for t in transcripts_by_key.values()},
             list(diarizations_by_key.values()),
             config,
             provider,
+            cache=cache,
+            layer3_names=layer3_names,
         )
+        cache.save(cache_path, provider=name, prompt_version=INTEGRATE_PROMPT_VERSION)
         bundle.write_json(bundle.relpath(out), merged)
         bundle.write_json(SPEAKER_MAP_PATH, merged.speaker_map)
 
