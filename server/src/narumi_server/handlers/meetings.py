@@ -1,4 +1,5 @@
-"""``list_meetings`` / ``get_meeting`` / ``get_transcript`` / ``set_meeting_config``."""
+"""``list_meetings`` / ``get_meeting`` / ``get_transcript`` / ``get_minutes`` /
+``search_transcripts`` / ``set_meeting_config``."""
 
 from __future__ import annotations
 
@@ -8,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from narumi.bundle import Bundle
 from narumi.catalog import row_to_summary
 from narumi.errors import NotFoundError
-from narumi.models import MergedTranscript, SpeakerMap, Transcript
+from narumi.models import MergedTranscript, MinutesMeta, SpeakerMap, Transcript
 
 from narumi_server.handlers.common import (
     CONFIG_KEYS,
@@ -102,6 +103,55 @@ def get_meeting(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
         ],
         "artifacts": sorted(manifest.artifacts),
     }
+
+
+# ---------------------------------------------------------------------------- minutes / search
+def get_minutes(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
+    """One minutes version: ``minutes/v<N>/minutes.md`` + its ``meta.json`` (source of truth)."""
+    bundle = find_bundle(ctx, args["meeting_id"])
+    ctx.catalog.check_scope(
+        bundle.manifest.scope, args.get("scope"), actor=ctx.actor, meeting_id=bundle.meeting_id
+    )
+    records = sorted(bundle.manifest.minutes_versions, key=lambda v: v.version)
+    if not records:
+        raise NotFoundError(
+            "no minutes have been generated for this meeting yet",
+            details={"meeting_id": bundle.meeting_id, "status": bundle.manifest.status},
+        )
+    available = [record.version for record in records]
+    version = int(args.get("version") or available[-1])
+    record = next((r for r in records if r.version == version), None)
+    if record is None:
+        raise NotFoundError(
+            f"minutes version {version} does not exist",
+            details={"meeting_id": bundle.meeting_id, "available": available},
+        )
+    path = bundle.abspath(record.path)
+    if not path.is_file():
+        raise NotFoundError(
+            f"minutes file missing for version {version}: {record.path}",
+            details={"meeting_id": bundle.meeting_id, "path": record.path},
+        )
+    meta = MinutesMeta.model_validate(bundle.read_json(f"minutes/v{version}/meta.json"))
+    return {
+        "meeting_id": bundle.meeting_id,
+        "version": version,
+        "markdown": path.read_text(encoding="utf-8"),
+        "generated_at": record.generated_at,
+        "provider": record.provider,
+        "unresolved_speakers": list(dict.fromkeys(meta.unresolved_speakers)),
+        "available_versions": available,
+    }
+
+
+def search_transcripts(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
+    hits = ctx.catalog.search_segments(
+        args["query"],
+        scope=args.get("scope"),
+        limit=int(args.get("limit", 20)),
+        actor=ctx.actor,
+    )
+    return {"hits": hits}
 
 
 # ---------------------------------------------------------------------------- transcript

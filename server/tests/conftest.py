@@ -13,7 +13,7 @@ from mcp.client import Client
 from mcp.server import Server
 from mcp_types import CallToolResult, ListToolsResult
 from narumi.bundle import Bundle, MinutesVersionRecord, utc_now_iso
-from narumi.models import MergedSegment, MergedTranscript, SpeakerEntry, SpeakerMap
+from narumi.models import MergedSegment, MergedTranscript, MinutesMeta, SpeakerEntry, SpeakerMap
 from narumi.pipeline import ProcessResult
 from narumi_server.app import build_server
 from narumi_server.context import ServerContext, build_context
@@ -172,6 +172,15 @@ def write_fake_minutes(bundle: Bundle, text: str = "# 議事録\n\n- 決定事�
     version = bundle.next_minutes_version()
     minutes_dir = bundle.minutes_dir(version)
     (minutes_dir / "minutes.md").write_text(text, encoding="utf-8")
+    bundle.write_json(
+        f"minutes/v{version}/meta.json",
+        MinutesMeta(
+            version=version,
+            generated_at=utc_now_iso(),
+            provider="none",
+            unresolved_speakers=["other"],
+        ),
+    )
     bundle.run_stage(
         f"minutes/v{version}",
         inputs={"merged/merged": bundle.artifact_hash("merged/merged")},

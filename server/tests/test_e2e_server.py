@@ -6,11 +6,16 @@ job worker; only the recorder is faked (``NARUMI_RECORDER=server/tests/fake_reco
 
 from __future__ import annotations
 
+import json
 import uuid
+from pathlib import Path
 
+from click.testing import CliRunner
 from conftest import PerCallClient, call, wait_job
 from narumi.bundle import Bundle
+from narumi_server import cli_tools
 from narumi_server.context import ServerContext
+from test_surface_tools import write_silence_wav  # shared helper (rootdir is on sys.path)
 
 FAKE_CONFIG = {
     "transcription_engine": "fake",
@@ -234,3 +239,153 @@ async def test_policy_violation_inside_the_job_fails_it(client: PerCallClient, c
     assert job["error"]["details"]["provider"] == "anthropic-api"
     meeting = await call(client, "get_meeting", {"meeting_id": meeting_id})
     assert meeting["meeting"]["status"] == "failed"
+
+
+async def test_import_profile_export_lifecycle(
+    client: PerCallClient, ctx: ServerContext, tmp_path: Path
+):
+    """Import → minutes → search → profile auto-export → discard → delete → rebuild, one flow.
+
+    The whole surface-parity lifecycle in the order a user would drive it from the app: two
+    imports through the real pipeline (fake engines), the second one picking up a saved default
+    profile whose ``export_destinations`` trigger the auto-export.
+    """
+    mic = write_silence_wav(tmp_path / "mic.wav")
+    system = write_silence_wav(tmp_path / "system.wav")
+
+    # ------------------------------------------------------------ import #1 (explicit config)
+    first = await call(
+        client,
+        "import_recording",
+        {
+            "meeting_name": "取り込み一本目",
+            "mic_path": str(mic),
+            "system_path": str(system),
+            "started_at": "2026-08-27T09:00:00Z",
+            "config": FAKE_CONFIG,
+            "request_id": rid(),
+        },
+    )
+    assert "error" not in first, first
+    first_id = first["meeting_id"]
+    job = await wait_job(ctx, first["job_id"], timeout=120.0)
+    assert job["status"] == "succeeded", job.get("error")
+    assert job["kind"] == "process"
+    assert "exports" not in job["result"]  # no profile destinations configured yet
+
+    minutes = await call(client, "get_minutes", {"meeting_id": first_id})
+    assert minutes["version"] == 1 and minutes["available_versions"] == [1]
+    assert minutes["markdown"]
+
+    found = await call(client, "search_transcripts", {"query": "ダミー発話"})
+    assert {h["meeting_id"] for h in found["hits"]} == {first_id}
+    assert found["hits"][0]["meeting_name"] == "取り込み一本目"
+    assert found["hits"][0]["segment_id"] and found["hits"][0]["source_id"]
+
+    # ------------------------------------------------------------ profile with auto-export
+    saved = await call(
+        client,
+        "set_profile",
+        {
+            "name": "auto-md",
+            "config": FAKE_CONFIG,
+            "export_destinations": ["markdown"],
+            "make_default": True,
+            "request_id": rid(),
+        },
+    )
+    assert saved["profile"]["is_default"] is True
+    assert (await call(client, "list_profiles"))["default"] == "auto-md"
+
+    # ------------------------------------------------------------ import #2 (profile defaults)
+    second = await call(
+        client,
+        "import_recording",
+        {
+            "meeting_name": "取り込み二本目",
+            "mic_path": str(mic),
+            "system_path": str(system),
+            "started_at": "2026-08-27T10:00:00Z",
+            "request_id": rid(),
+        },
+    )
+    assert "error" not in second, second
+    second_id = second["meeting_id"]
+    job = await wait_job(ctx, second["job_id"], timeout=120.0)
+    assert job["status"] == "succeeded", job.get("error")
+    exports = job["result"]["exports"]  # the profile's destinations were auto-exported
+    assert [e["destination"] for e in exports] == ["markdown"]
+    assert exports[0]["minutes_version"] == 1
+    assert Path(exports[0]["ref"]).is_file()
+    assert "export_errors" not in job["result"]
+    manifest = Bundle.find(ctx.meetings_root, second_id).manifest
+    assert manifest.profile == "auto-md"
+    assert manifest.config.transcription_engine == "fake"  # profile config applied as default
+    assert [(e.destination, e.minutes_version) for e in manifest.exports] == [("markdown", 1)]
+
+    # ------------------------------------------------------------ discard mic (transcript exists)
+    meeting = await call(client, "get_meeting", {"meeting_id": second_id})
+    assert "transcripts/own-mic" in meeting["artifacts"]
+    discarded = await call(
+        client,
+        "discard_tracks",
+        {"meeting_id": second_id, "tracks": ["mic"], "request_id": rid()},
+    )
+    assert discarded["tracks"]["mic"]["discarded"] is True
+    assert len(discarded["tracks"]["mic"]["sha256"]) == 64  # sha256 survives the discard
+    assert discarded["tracks"]["mic"]["bytes"] is None
+    assert not (ctx.meetings_root / second_id / "tracks" / "mic.wav").exists()
+    transcript = await call(client, "get_transcript", {"meeting_id": second_id})
+    assert transcript["segments"]  # the derived transcript is untouched
+
+    # ------------------------------------------------------------ delete meeting #1 → trash
+    deleted = await call(
+        client,
+        "delete_meeting",
+        {"meeting_id": first_id, "confirm": True, "request_id": rid()},
+    )
+    assert deleted["deleted"] is True
+    moved_to = Path(deleted["moved_to"])
+    assert moved_to.parent == ctx.data_root / "trash"
+    assert (moved_to / "manifest.json").is_file()
+    assert not (ctx.meetings_root / first_id).exists()
+
+    # ------------------------------------------------------------ rebuild counts the survivor
+    rebuilt = await call(client, "rebuild_catalog", {"request_id": rid()})
+    assert rebuilt["meetings"] == 1
+    assert rebuilt["segments"] >= 1
+    assert rebuilt["errors"] == []
+    listed = await call(client, "list_meetings")
+    assert [m["meeting_id"] for m in listed["meetings"]] == [second_id]
+    found = await call(client, "search_transcripts", {"query": "ダミー発話"})
+    assert {h["meeting_id"] for h in found["hits"]} == {second_id}
+
+
+def test_product_cli_import_then_list_meetings_in_process(home: Path, tmp_path: Path):
+    """``narumi`` (product CLI) drives import + list in-process — no server, no subprocess."""
+    cli = cli_tools.build_cli()
+    runner = CliRunner()
+    mic = write_silence_wav(tmp_path / "mic.wav")
+
+    imported = runner.invoke(
+        cli,
+        [
+            "--in-process",
+            "import-recording",
+            "--meeting-name",
+            "CLI 取り込み",
+            "--mic-path",
+            str(mic),
+            "--no-auto-process",
+        ],
+        catch_exceptions=False,
+    )
+    assert imported.exit_code == 0, imported.stderr
+    meeting_id = json.loads(imported.stdout)["meeting_id"]
+
+    listed = runner.invoke(cli, ["--in-process", "list-meetings"], catch_exceptions=False)
+    assert listed.exit_code == 0, listed.stderr
+    payload = json.loads(listed.stdout)
+    assert [m["meeting_id"] for m in payload["meetings"]] == [meeting_id]
+    assert payload["meetings"][0]["status"] == "recorded"
+    assert payload["meetings"][0]["active_job"] is None

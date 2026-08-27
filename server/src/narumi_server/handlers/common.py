@@ -3,15 +3,25 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from narumi import diarize, llm, transcribe
 from narumi.bundle import Bundle, Manifest
-from narumi.errors import BusyError, EngineUnavailableError, InvalidArgumentError
+from narumi.errors import (
+    BusyError,
+    EngineUnavailableError,
+    InvalidArgumentError,
+    NarumiError,
+    NotFoundError,
+)
 from narumi.models import MeetingConfig
+from narumi.preprocess import probe_duration
+from narumi.profiles import Profile
 from pydantic import ValidationError
 
 from narumi_server.locks import HANDLER_WAIT_SECONDS
@@ -19,11 +29,10 @@ from narumi_server.locks import HANDLER_WAIT_SECONDS
 if TYPE_CHECKING:
     from narumi_server.context import ServerContext
 
+logger = logging.getLogger(__name__)
+
 Handler = Callable[["ServerContext", dict[str, Any]], dict[str, Any]]
 """A tool handler: ``(ctx, validated_args) -> result`` (the tool's structured content)."""
-
-PROFILES: dict[str, MeetingConfig] = {"default": MeetingConfig()}
-"""Meeting profiles → config defaults. v1 has only ``default`` (local Whisper, plain minutes)."""
 
 CONFIG_KEYS: tuple[str, ...] = tuple(MeetingConfig.model_fields)
 
@@ -109,6 +118,37 @@ def meeting_summary(manifest: Manifest) -> dict[str, Any]:
 def default_meeting_name(now: datetime | None = None) -> str:
     stamp = (now or datetime.now()).astimezone()
     return f"会議 {stamp:%Y-%m-%d %H:%M}"
+
+
+def resolve_profile(ctx: ServerContext, name: Any) -> Profile:
+    """The saved profile ``name`` names, or the default profile when ``name`` is ``None``.
+
+    ``start_recording`` / ``import_recording`` treat an unknown profile as ``invalid_argument``
+    (the profile-management tools use ``not_found`` instead — see ``get_profile``).
+    """
+    if name is None:
+        return ctx.profiles.default()
+    try:
+        return ctx.profiles.get(str(name))
+    except NotFoundError as exc:
+        known = ctx.profiles.names()
+        raise InvalidArgumentError(
+            f"unknown profile {name!r}; known: {', '.join(known)}",
+            details={"profile": name, "known": known},
+        ) from exc
+
+
+def probe_duration_or_none(path: Path) -> float | None:
+    """``ffprobe`` duration for track metadata; ``None`` (logged) when the probe fails.
+
+    Metadata only — this is not an engine fallback: preprocessing fails loudly later when
+    ffmpeg is genuinely unusable.
+    """
+    try:
+        return probe_duration(path)
+    except NarumiError as exc:
+        logger.warning("ffprobe failed for %s: %s", path, exc.message)
+        return None
 
 
 def config_from_mapping(base: MeetingConfig, updates: Mapping[str, Any] | None) -> MeetingConfig:

@@ -18,7 +18,13 @@ from typing import TYPE_CHECKING, Any
 from jsonschema import Draft202012Validator
 from narumi import pipeline as narumi_pipeline
 from narumi.bundle import Bundle
-from narumi.errors import InvalidArgumentError, NotFoundError
+from narumi.errors import (
+    CancelledError,
+    ErrorCode,
+    InvalidArgumentError,
+    NarumiError,
+    NotFoundError,
+)
 from narumi.export import get_exporter
 
 from narumi_server.handlers.common import (
@@ -39,6 +45,7 @@ logger = logging.getLogger(__name__)
 JOB_LOCK_PURPOSE = "job"
 
 __all__ = [
+    "cancel_job",
     "enqueue_process",
     "enqueue_regenerate",
     "ensure_not_busy",
@@ -72,12 +79,28 @@ def run_pipeline_job(
     The meeting lock is held for the whole job. The bundle is read from disk only once the lock
     is ours, so a handler write made before the job started is seen, and no handler can write
     underneath the running stage.
+
+    A :class:`CancelledError` (cooperative ``cancel_job``) restores the pre-run status instead
+    of marking the meeting ``failed`` — ``narumi.pipeline`` does the same on disk for real runs,
+    but the restore is repeated here from a fresh read so faked stages behave identically and
+    the catalog is refreshed. On success the meeting profile's ``export_destinations`` are
+    exported automatically; an auto-export failure is reported in the job result, never fatal.
     """
     with ctx.locks.hold(meeting_id, purpose=JOB_LOCK_PURPOSE):
         bundle = find_bundle(ctx, meeting_id)
+        previous_status = bundle.manifest.status
         _set_status(ctx, bundle, "processing")
         try:
             result = stage(bundle)
+        except CancelledError:
+            try:
+                fresh = find_bundle(ctx, meeting_id)
+                fresh.manifest.status = previous_status
+                fresh.save()
+                sync_catalog(ctx, fresh)
+            except Exception:  # never mask the cancellation with a bookkeeping error
+                logger.exception("could not restore status of %s after cancellation", meeting_id)
+            raise
         except BaseException:
             try:
                 _set_status(ctx, find_bundle(ctx, meeting_id), "failed")
@@ -89,7 +112,54 @@ def run_pipeline_job(
         fresh.save()
         sync_catalog(ctx, fresh)
         ctx.catalog.index_segments(fresh)
-        return process_result_payload(result)
+        payload = process_result_payload(result)
+        exports, export_errors = _auto_export(ctx, meeting_id, fresh)
+        if exports:
+            payload["exports"] = exports
+        if export_errors:
+            payload["export_errors"] = export_errors
+        return payload
+
+
+def _auto_export(
+    ctx: ServerContext, meeting_id: str, bundle: Bundle
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Export the latest minutes to the meeting profile's ``export_destinations``.
+
+    Runs after a successful process / regenerate job; the caller holds the meeting lock.
+    Failures are logged and returned for the job result — they never fail the job. A profile
+    that was deleted since the meeting was created simply exports nothing.
+    """
+    profile = ctx.profiles.peek(bundle.manifest.profile)
+    version = bundle.manifest.latest_minutes_version
+    if profile is None or not profile.export_destinations or version is None:
+        return [], []
+    exports: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for destination in profile.export_destinations:
+        try:
+            exports.append(perform_export(ctx, meeting_id, destination, {}, version, None))
+        except NarumiError as exc:
+            logger.warning(
+                "auto-export of %s to %s failed: %s: %s",
+                meeting_id,
+                destination,
+                exc.code,
+                exc.message,
+            )
+            errors.append({"destination": destination, "error": exc.to_payload()["error"]})
+        except Exception as exc:  # noqa: BLE001 - auto-export must never fail the job
+            logger.exception("auto-export of %s to %s crashed", meeting_id, destination)
+            errors.append(
+                {
+                    "destination": destination,
+                    "error": {
+                        "code": str(ErrorCode.INTERNAL),
+                        "message": f"{type(exc).__name__}: {exc}",
+                    },
+                }
+            )
+    return exports, errors
 
 
 def _set_status(ctx: ServerContext, bundle: Bundle, status: str) -> None:
@@ -252,3 +322,8 @@ def get_job_status(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
     if job is None:
         raise NotFoundError(f"job not found: {args['job_id']}", details={"job_id": args["job_id"]})
     return {"job": job}
+
+
+def cancel_job(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
+    """``JobManager.cancel``: queued → cancelled now, running → cooperative flag."""
+    return {"job": ctx.jobs.cancel(args["job_id"])}

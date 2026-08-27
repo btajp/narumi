@@ -180,8 +180,15 @@ def normalize_scope(requested: str | Sequence[str] | None) -> list[str]:
 
 
 def row_to_summary(row: Mapping[str, Any]) -> dict[str, Any]:
-    """Project a ``meetings`` row onto the contract's ``meeting_summary`` shape."""
-    return {column: row.get(column) for column in SUMMARY_COLUMNS}
+    """Project a ``meetings`` row onto the contract's ``meeting_summary`` shape.
+
+    ``active_job`` (attached by :meth:`Catalog.list_meetings`) is carried over when present;
+    rows from :meth:`Catalog.get_meeting_row` do not have it and the key is then omitted.
+    """
+    summary = {column: row.get(column) for column in SUMMARY_COLUMNS}
+    if "active_job" in row:
+        summary["active_job"] = row["active_job"]
+    return summary
 
 
 def _dumps(value: Any) -> str:
@@ -360,7 +367,43 @@ class Catalog:
         with self._lock:
             self._audit_cross_scope(actor, scopes, action="list_meetings", meeting_id=None)
             rows = self._conn.execute(sql, params).fetchall()
-        return [dict(row) for row in rows]
+            meetings = [dict(row) for row in rows]
+            self._attach_active_jobs(meetings)
+        return meetings
+
+    def _attach_active_jobs(self, meetings: list[dict[str, Any]]) -> None:
+        """Set ``active_job`` on every row: the newest queued / running job (``None`` if idle).
+
+        Caller holds ``self._lock``.
+        """
+        for row in meetings:
+            row["active_job"] = None
+        ids = [row["meeting_id"] for row in meetings]
+        if not ids:
+            return
+        placeholders = ", ".join("?" for _ in ids)
+        job_rows = self._conn.execute(
+            "SELECT job_id, meeting_id, kind, status, progress FROM jobs"
+            f" WHERE status IN ('queued', 'running') AND meeting_id IN ({placeholders})"  # noqa: S608
+            " ORDER BY created_at DESC, rowid DESC",  # rowid: insertion order within one second
+            ids,
+        ).fetchall()
+        newest: dict[str, sqlite3.Row] = {}
+        for job in job_rows:
+            newest.setdefault(job["meeting_id"], job)
+        for row in meetings:
+            job = newest.get(row["meeting_id"])
+            if job is None:
+                continue
+            active: dict[str, Any] = {
+                "job_id": job["job_id"],
+                "kind": job["kind"],
+                "status": job["status"],
+            }
+            progress = _loads(job["progress"])
+            if progress is not None:
+                active["progress"] = progress
+            row["active_job"] = active
 
     def check_scope(
         self,
@@ -451,7 +494,13 @@ class Catalog:
         limit: int = 50,
         actor: str = "server",
     ) -> list[dict[str, Any]]:
-        """Full-text search over indexed segments, restricted by the same scope rules."""
+        """Full-text search over indexed segments, restricted by the same scope rules.
+
+        Hit shape matches the ``search_transcripts`` contract: ``meeting_id``, ``meeting_name``,
+        ``source_id``, ``segment_id``, ``start``, ``end``, ``speaker`` (name or label, ``None``
+        when unknown) and ``text`` — ordered newest meeting first, best match first within a
+        meeting.
+        """
         if not text:
             raise InvalidArgumentError("search text must not be empty")
         if limit < 1:
@@ -461,14 +510,15 @@ class Catalog:
         if len(text) >= TRIGRAM_MIN_CHARS:
             where.append("segments_fts MATCH ?")
             params.append(_fts_phrase(text))
-            order = "ORDER BY rank, s.meeting_id, s.start_sec"
+            order = "ORDER BY m.started_at DESC, m.meeting_id DESC, rank, s.start_sec"
         else:
             where.append("s.text LIKE ? ESCAPE '\\'")
             params.append(_like_pattern(text))
-            order = "ORDER BY s.meeting_id, s.start_sec"
+            order = "ORDER BY m.started_at DESC, m.meeting_id DESC, s.start_sec"
         sql = (
-            "SELECT s.meeting_id, s.source_id, s.segment_id, s.start_sec, s.end_sec,"
-            " s.speaker, s.text FROM segments_fts s JOIN meetings m ON m.meeting_id = s.meeting_id"
+            "SELECT s.meeting_id, m.meeting_name, s.source_id, s.segment_id, s.start_sec,"
+            " s.end_sec, s.speaker, s.text"
+            " FROM segments_fts s JOIN meetings m ON m.meeting_id = s.meeting_id"
             " WHERE " + " AND ".join(where) + f" {order} LIMIT ?"
         )
         params.append(limit)
@@ -478,6 +528,7 @@ class Catalog:
         return [
             {
                 "meeting_id": row["meeting_id"],
+                "meeting_name": row["meeting_name"],
                 "source_id": row["source_id"],
                 "segment_id": row["segment_id"],
                 "start": row["start_sec"],

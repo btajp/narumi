@@ -435,3 +435,90 @@ def test_audit_log(catalog: Catalog):
     assert rows[1]["detail"] == {"meeting_id": "m1", "path": "/x"}
     assert catalog.list_audit(limit=1)[0]["actor"] == "agent"
     assert json.dumps(rows) is not None  # plain JSON data
+
+
+# ---------------------------------------------------------------------------- active_job
+def test_list_meetings_attaches_active_job(catalog: Catalog, meetings: Path):
+    a = make_bundle(meetings, meeting_id="20260827T010000Z-00000001", name="A")
+    b = make_bundle(
+        meetings,
+        meeting_id="20260827T020000Z-00000002",
+        name="B",
+        started_at="2026-08-27T02:00:00Z",
+    )
+    for bundle in (a, b):
+        catalog.upsert_meeting(bundle)
+
+    rows = catalog.list_meetings()
+    assert [row["active_job"] for row in rows] == [None, None]
+
+    job_id = catalog.create_job("process", a.meeting_id)
+    catalog.update_job(job_id, status="running", progress={"stage": "transcribe", "fraction": 0.4})
+    done = catalog.create_job("export", b.meeting_id)
+    catalog.update_job(done, status="succeeded", result={})
+
+    by_id = {row["meeting_id"]: row for row in catalog.list_meetings()}
+    assert by_id[a.meeting_id]["active_job"] == {
+        "job_id": job_id,
+        "kind": "process",
+        "status": "running",
+        "progress": {"stage": "transcribe", "fraction": 0.4},
+    }
+    assert by_id[b.meeting_id]["active_job"] is None  # finished jobs are not active
+
+    # the newest queued / running job wins when several are active
+    newer = catalog.create_job("regenerate", a.meeting_id)
+    active = {r["meeting_id"]: r["active_job"] for r in catalog.list_meetings()}[a.meeting_id]
+    assert active is not None and active["job_id"] == newer
+    assert active["kind"] == "regenerate" and active["status"] == "queued"
+    assert "progress" not in active
+
+    # row_to_summary carries active_job through when present, and omits it otherwise
+    summary = row_to_summary(by_id[a.meeting_id])
+    assert summary["active_job"]["job_id"] == job_id
+    row = catalog.get_meeting_row(a.meeting_id)
+    assert row is not None and "active_job" not in row_to_summary(row)
+
+    catalog.update_job(job_id, status="cancelled", error={"code": "cancelled", "message": "x"})
+    catalog.update_job(newer, status="failed", error={"code": "internal", "message": "x"})
+    assert [r["active_job"] for r in catalog.list_meetings()] == [None, None]
+
+
+# ---------------------------------------------------------------------------- search hit shape
+def test_search_segments_hit_shape_and_order(catalog: Catalog, meetings: Path):
+    old = make_bundle(
+        meetings,
+        meeting_id="20260820T030500Z-00c0ffee",
+        name="先週定例",
+        started_at="2026-08-20T03:05:00Z",
+    )
+    write_merged(old, ["オンボーディング資料は gaia-library に置きます。"])
+    new = make_bundle(
+        meetings,
+        meeting_id="20260827T030500Z-a1b2c3d4",
+        name="週次定例",
+        started_at="2026-08-27T03:05:00Z",
+    )
+    write_merged(new, ["先週のオンボーディングの進捗から共有します。"])
+    for bundle in (old, new):
+        catalog.upsert_meeting(bundle)
+        catalog.index_segments(bundle)
+
+    hits = catalog.search_segments("オンボーディング")
+    # newest meeting first; every hit carries the full search_transcripts contract shape
+    assert [h["meeting_id"] for h in hits] == [new.meeting_id, old.meeting_id]
+    assert [h["meeting_name"] for h in hits] == ["週次定例", "先週定例"]
+    assert hits[0] == {
+        "meeting_id": new.meeting_id,
+        "meeting_name": "週次定例",
+        "source_id": "merged",
+        "segment_id": "merged:0",
+        "start": 0.0,
+        "end": 0.9,
+        "speaker": "岡村",
+        "text": "先週のオンボーディングの進捗から共有します。",
+    }
+    assert catalog.search_segments("オンボーディング", limit=1) == [hits[0]]
+    # the short-query LIKE fallback orders the same way
+    short = catalog.search_segments("進捗")
+    assert [h["meeting_id"] for h in short] == [new.meeting_id]

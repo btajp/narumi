@@ -12,6 +12,7 @@ from narumi.catalog import Catalog
 from narumi.config import catalog_path, data_root, meetings_root
 from narumi.contracts import ContractSet, load_contracts
 from narumi.errors import ErrorCode, NarumiError
+from narumi.profiles import PROFILES_FILE, ProfileStore
 
 from narumi_server.handlers import HANDLERS, Handler
 from narumi_server.idempotency import IdempotencyStore
@@ -33,6 +34,8 @@ class ServerContext:
     catalog: Catalog
     jobs: JobManager
     recorder: RecordingController
+    profiles: ProfileStore
+    """Saved meeting profiles (``<NARUMI_HOME>/profiles.json``); see ``narumi.profiles``."""
     transports: list[str] = field(default_factory=list)
     validate_output: bool = False
     handlers: Mapping[str, Handler] = field(default_factory=lambda: dict(HANDLERS))
@@ -114,6 +117,7 @@ def build_context(
         catalog=catalog,
         jobs=jobs,
         recorder=recorder,
+        profiles=ProfileStore(root / PROFILES_FILE),
         transports=list(transports),
         validate_output=(
             validate_output_from_env() if validate_output is None else bool(validate_output)

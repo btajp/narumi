@@ -1,29 +1,29 @@
-"""``start_recording`` / ``stop_recording``."""
+"""``start_recording`` / ``stop_recording`` / ``get_recording_status``."""
 
 from __future__ import annotations
 
 import logging
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from narumi.bundle import Bundle, TrackRecord, sha256_file
 from narumi.errors import (
     BusyError,
-    InvalidArgumentError,
     NarumiError,
     NotFoundError,
     RecorderUnavailableError,
 )
-from narumi.preprocess import probe_duration
 
 from narumi_server.handlers.common import (
-    PROFILES,
     check_config_policy,
     config_from_mapping,
     default_meeting_name,
     find_bundle,
     jsonable,
+    probe_duration_or_none,
+    resolve_profile,
     sync_catalog,
 )
 from narumi_server.handlers.processing import enqueue_process
@@ -56,21 +56,16 @@ def start_recording(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
             "Privacy & Security › Microphone and start again",
             details={"recorder_code": "permission_denied", "permissions": permissions},
         )
-    profile = args.get("profile", "default")
-    if profile not in PROFILES:
-        raise InvalidArgumentError(
-            f"unknown profile {profile!r}; known: {', '.join(PROFILES)}",
-            details={"profile": profile, "known": list(PROFILES)},
-        )
-    config = config_from_mapping(PROFILES[profile], args.get("config"))
+    profile = resolve_profile(ctx, args.get("profile"))
+    config = config_from_mapping(profile.config, args.get("config"))
     check_config_policy(config)
 
     bundle = Bundle.create(
         ctx.meetings_root,
         meeting_name=args.get("meeting_name") or default_meeting_name(),
-        engagement=args.get("engagement"),
-        scope=args.get("scope"),
-        profile=profile,
+        engagement=args["engagement"] if "engagement" in args else profile.engagement,
+        scope=args["scope"] if "scope" in args else profile.scope,
+        profile=profile.name,
         config=config,
     )
     try:
@@ -159,6 +154,28 @@ def stop_recording(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def get_recording_status(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
+    """Recorder state + the recording meeting's manifest; ``{"active": false}`` when idle."""
+    meeting_id = ctx.recorder.active_meeting_id
+    if meeting_id is None:
+        return {"active": False}
+    manifest = find_bundle(ctx, meeting_id).manifest
+    recording = manifest.recording
+    result: dict[str, Any] = {
+        "active": True,
+        "meeting_id": meeting_id,
+        "meeting_name": manifest.meeting_name,
+        "tracks": {name: track.path for name, track in recording.tracks.items()},
+    }
+    if recording.started_at:
+        result["started_at"] = recording.started_at
+        started = datetime.fromisoformat(recording.started_at)
+        if started.tzinfo is None:  # recorder timestamps are RFC3339 UTC; be defensive
+            started = started.replace(tzinfo=UTC)
+        result["elapsed_sec"] = max(0.0, (datetime.now(UTC) - started).total_seconds())
+    return result
+
+
 # ---------------------------------------------------------------------------- helpers
 def track_relpath(bundle: Bundle, value: str) -> str:
     """Bundle-relative path (``tracks/<file>``) for a file name reported by the recorder."""
@@ -211,7 +228,7 @@ def finalize_tracks(
             continue
         duration = summary.duration_sec if summary is not None else None
         if duration is None:
-            duration = _probe_duration(path)
+            duration = probe_duration_or_none(path)
         tracks[name] = TrackRecord(
             path=rel,
             sha256=sha256_file(path),
@@ -223,19 +240,6 @@ def finalize_tracks(
         path.unlink()
         logger.info("discarded screen track %s", rel)
     return tracks
-
-
-def _probe_duration(path: Path) -> float | None:
-    """``ffprobe`` duration when the recorder omitted ``duration_sec`` (metadata only).
-
-    A failure here leaves ``duration_sec`` null and is logged; it is not an engine fallback —
-    preprocessing fails loudly later if ffmpeg is genuinely unusable.
-    """
-    try:
-        return probe_duration(path)
-    except NarumiError as exc:
-        logger.warning("ffprobe failed for %s: %s", path, exc.message)
-        return None
 
 
 def _mark_failed(

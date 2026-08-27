@@ -15,6 +15,7 @@ class ErrorCode(StrEnum):
     SCOPE_DENIED = "scope_denied"
     CONTRACT_MISMATCH = "contract_mismatch"
     BUSY = "busy"
+    CANCELLED = "cancelled"
     INVALID_ARGUMENT = "invalid_argument"
     POLICY_VIOLATION = "policy_violation"
     RECORDER_UNAVAILABLE = "recorder_unavailable"
@@ -61,6 +62,12 @@ class ContractMismatchError(NarumiError):
 
 class BusyError(NarumiError):
     code = ErrorCode.BUSY
+
+
+class CancelledError(NarumiError):
+    """A job was cancelled cooperatively (``cancel_job``); not a failure."""
+
+    code = ErrorCode.CANCELLED
 
 
 class InvalidArgumentError(NarumiError):

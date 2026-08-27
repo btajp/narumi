@@ -124,11 +124,12 @@ def run_tool(
 
 def ffmpeg_version() -> str:
     """Version of the resolved ffmpeg binary, e.g. ``"9.0.1"`` (cached per binary path)."""
-    return _tool_version(str(ffmpeg_path()))
+    return tool_version(str(ffmpeg_path()))
 
 
 @functools.lru_cache(maxsize=8)
-def _tool_version(binary: str) -> str:
+def tool_version(binary: str) -> str:
+    """Version of the ffmpeg-family binary at ``binary``, e.g. ``"9.0.1"`` (cached per path)."""
     proc = run_tool([binary, "-version"])
     lines = proc.stdout.decode("utf-8", errors="replace").splitlines()
     match = _VERSION_RE.match(lines[0]) if lines else None

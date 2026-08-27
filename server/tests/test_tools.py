@@ -58,7 +58,7 @@ async def test_single_session_flow(server, ctx: ServerContext):
     """One persistent in-process session: list_tools, then several calls."""
     async with Client(server) as session:
         listed = await session.list_tools()
-        assert len(listed.tools) == 12
+        assert len(listed.tools) == 24
         info = await session.call_tool("get_server_info", {})
         assert not info.is_error and info.structured_content["name"] == "narumi"
         started = await session.call_tool("start_recording", {"request_id": rid()})
@@ -77,7 +77,7 @@ async def test_list_tools_matches_contracts(client: PerCallClient, ctx: ServerCo
     listed = await client.list_tools()
     by_name = {tool.name: tool for tool in listed.tools}
     assert list(by_name) == ctx.contracts.tool_names()
-    assert len(by_name) == 12
+    assert len(by_name) == 24
     for contract in ctx.contracts:
         tool = by_name[contract.name]
         assert tool.title == contract.title

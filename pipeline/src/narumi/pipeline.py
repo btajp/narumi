@@ -28,7 +28,7 @@ from typing import Any
 from narumi.align import run_align, transcript_artifact_keys
 from narumi.bundle import Bundle, ExportRecord, RegenerationRecord, StageResult, utc_now_iso
 from narumi.diarize import run_diarize
-from narumi.errors import NotFoundError
+from narumi.errors import CancelledError, NotFoundError
 from narumi.export import get_exporter
 from narumi.generate import run_generate, run_integrate
 from narumi.models import MinutesMeta
@@ -210,7 +210,14 @@ def _run_steps(
     force: bool | Collection[str],
     progress: ProgressFn | None,
 ) -> ProcessResult:
-    """Run ``steps`` in order; ``force`` is a bool for all of them or the names to force."""
+    """Run ``steps`` in order; ``force`` is a bool for all of them or the names to force.
+
+    A :class:`CancelledError` raised by a step or the ``progress`` hook (cooperative job
+    cancellation) restores ``manifest.status`` to what it was before this run — the meeting is
+    not ``failed``, and completed stage outputs stay for the next run. Any other exception
+    marks the meeting ``failed``; both are re-raised unchanged.
+    """
+    previous_status = bundle.manifest.status
     _set_status(bundle, "processing")
     result = ProcessResult(meeting_id=bundle.meeting_id, minutes_version=None)
     total = len(steps)
@@ -221,6 +228,9 @@ def _run_steps(
                 (result.skipped if stage.skipped else result.stages).append(stage.key)
             if progress is not None:
                 progress(name, index / total)
+    except CancelledError:
+        _set_status(bundle, previous_status)
+        raise
     except Exception:
         _set_status(bundle, "failed")
         raise

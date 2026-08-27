@@ -1,4 +1,4 @@
-"""Developer CLI ``narumi``.
+"""Developer CLI ``narumi-dev``.
 
 This CLI is a *developer tool*: it calls the ``narumi`` library directly (bundle, catalog,
 pipeline) from the same process. It is **not** the product surface. The UI = API parity rule
@@ -13,7 +13,7 @@ Every command follows the same conventions:
   exit code 2, so scripts can parse ``{"error": {"code", "message", "details?"}}``
 
 Stage modules (catalog, pipeline, preprocess, engines) are imported lazily inside the commands so
-that ``narumi --help`` and unrelated commands keep working while one module is broken.
+that ``narumi-dev --help`` and unrelated commands keep working while one module is broken.
 """
 
 from __future__ import annotations
@@ -172,7 +172,7 @@ def _load_catalog_class() -> type | None:
     try:
         from narumi.catalog import Catalog
     except ImportError as exc:
-        _warn(f"catalog unavailable ({exc}); run `narumi catalog rebuild` once it is fixed")
+        _warn(f"catalog unavailable ({exc}); run `narumi-dev catalog rebuild` once it is fixed")
         return None
     return Catalog
 
@@ -290,7 +290,7 @@ class NarumiGroup(click.Group):
 
 
 @click.group(cls=NarumiGroup, context_settings={"help_option_names": ["-h", "--help"]})
-@click.version_option(__version__, prog_name="narumi")
+@click.version_option(__version__, prog_name="narumi-dev")
 @click.option(
     "--data-root",
     "data_root_opt",
@@ -302,7 +302,7 @@ class NarumiGroup(click.Group):
 )
 @click.pass_context
 def cli(ctx: click.Context, data_root_opt: Path | None) -> None:
-    """narumi developer CLI: bundle import, processing, export and catalog maintenance."""
+    """narumi-dev developer CLI: bundle import, processing, export and catalog maintenance."""
     ctx.obj = CliState(root=data_root(data_root_opt))
 
 
@@ -696,8 +696,8 @@ def config(
 
 
 def main() -> None:
-    """Console-script entry point (``narumi``)."""
-    cli(prog_name="narumi")
+    """Console-script entry point (``narumi-dev``)."""
+    cli(prog_name="narumi-dev")
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -12,6 +12,7 @@ from narumi.preprocess.ffmpeg import (
     probe,
     probe_duration,
     run_tool,
+    tool_version,
 )
 from narumi.preprocess.stage import (
     AUDIO_TRACKS,
@@ -42,4 +43,5 @@ __all__ = [
     "probe_duration",
     "run_preprocess",
     "run_tool",
+    "tool_version",
 ]

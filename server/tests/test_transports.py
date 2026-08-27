@@ -64,7 +64,7 @@ async def test_stdio_subprocess(home: Path):
     async with Client(params) as client:
         assert client.server_info is not None and client.server_info.name == "narumi"
         listed = await client.list_tools()
-        assert len(listed.tools) == 12
+        assert len(listed.tools) == 24
         info = await client.call_tool("get_server_info", {})
         assert not info.is_error
         assert info.structured_content["capabilities"]["transports"] == ["stdio"]
