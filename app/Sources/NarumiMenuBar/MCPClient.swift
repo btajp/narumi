@@ -1,4 +1,5 @@
 import Foundation
+import NarumiMenuBarCore
 
 enum MCPClientError: Error, CustomStringConvertible {
     case transport(String)
@@ -35,7 +36,7 @@ actor MCPClient {
 
     let serverURL: URL
     private let clientVersion: String
-    private let session: URLSession
+    private let transport: MCPHTTPTransport
     private var sessionID: String?
     private var initialized = false
     private var nextID = 1
@@ -43,10 +44,7 @@ actor MCPClient {
     init(serverURL: URL, clientVersion: String) {
         self.serverURL = serverURL
         self.clientVersion = clientVersion
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 30
-        configuration.timeoutIntervalForResource = 120
-        session = URLSession(configuration: configuration)
+        transport = MCPHTTPTransport()
     }
 
     static func serverURLFromEnvironment() -> URL {
@@ -61,18 +59,45 @@ actor MCPClient {
 
     /// `tools/call`. Throws `MCPClientError.tool` when the server reports `isError`.
     func callTool(_ name: String, arguments: [String: JSONNode]) async throws -> ToolCallResult {
-        try await ensureInitialized()
+        let confidential = MCPHTTPTransport.isConfidentialTool(name)
+        do {
+            if confidential {
+                _ = try MCPHTTPTransport.confidentialEndpoint(serverURL)
+            }
+            return try await performToolCall(name, arguments: arguments, confidential: confidential)
+        } catch {
+            guard confidential else { throw error }
+            // Servers and URLSession errors may reflect the write-only input. Keep only a
+            // known contract code (notably invalid_argument for the sheet's recovery flow).
+            var code: String?
+            if case MCPClientError.tool(_, let payload) = error {
+                code = payload?["error"]?["code"]?.stringValue
+            }
+            let message = MCPHTTPTransport.confidentialErrorMessage
+            throw MCPClientError.tool(
+                message: message,
+                payload: .object(["error": .object([
+                    "code": .string(MCPHTTPTransport.confidentialErrorCode(code)),
+                    "message": .string(message),
+                ])]))
+        }
+    }
+
+    private func performToolCall(
+        _ name: String, arguments: [String: JSONNode], confidential: Bool
+    ) async throws -> ToolCallResult {
+        try await ensureInitialized(confidential: confidential)
         let params: JSONNode = .object(["name": .string(name), "arguments": .object(arguments)])
         let result: JSONNode
         do {
-            result = try await request(method: "tools/call", params: params)
+            result = try await request(method: "tools/call", params: params, confidential: confidential)
         } catch MCPClientError.httpStatus(404, let body) {
             // Session expired on the server side: re-initialize once and retry.
             sessionID = nil
             initialized = false
-            try await ensureInitialized()
+            try await ensureInitialized(confidential: confidential)
             do {
-                result = try await request(method: "tools/call", params: params)
+                result = try await request(method: "tools/call", params: params, confidential: confidential)
             } catch {
                 throw MCPClientError.httpStatus(404, body)
             }
@@ -112,7 +137,7 @@ actor MCPClient {
 
     // MARK: Session
 
-    private func ensureInitialized() async throws {
+    private func ensureInitialized(confidential: Bool) async throws {
         if initialized {
             return
         }
@@ -124,14 +149,14 @@ actor MCPClient {
                 "version": .string(clientVersion),
             ]),
         ])
-        _ = try await request(method: "initialize", params: params)
-        try await notify(method: "notifications/initialized")
+        _ = try await request(method: "initialize", params: params, confidential: confidential)
+        try await notify(method: "notifications/initialized", confidential: confidential)
         initialized = true
     }
 
     // MARK: Transport
 
-    private func request(method: String, params: JSONNode) async throws -> JSONNode {
+    private func request(method: String, params: JSONNode, confidential: Bool) async throws -> JSONNode {
         let id = nextID
         nextID += 1
         let body: JSONNode = .object([
@@ -140,7 +165,7 @@ actor MCPClient {
             "method": .string(method),
             "params": params,
         ])
-        let (data, response) = try await post(body)
+        let (data, response) = try await post(body, confidential: confidential)
         let message = try MCPClient.extractResponse(data: data, response: response, expectedID: id)
         if let error = message["error"] {
             let code = Int(error["code"].flatMap { node -> Double? in
@@ -155,15 +180,15 @@ actor MCPClient {
         return result
     }
 
-    private func notify(method: String) async throws {
+    private func notify(method: String, confidential: Bool) async throws {
         let body: JSONNode = .object([
             "jsonrpc": .string("2.0"),
             "method": .string(method),
         ])
-        _ = try await post(body)
+        _ = try await post(body, confidential: confidential)
     }
 
-    private func post(_ body: JSONNode) async throws -> (Data, HTTPURLResponse) {
+    private func post(_ body: JSONNode, confidential: Bool) async throws -> (Data, HTTPURLResponse) {
         var request = URLRequest(url: serverURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -177,7 +202,7 @@ actor MCPClient {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            (data, response) = try await transport.data(for: request, protectingSecrets: confidential)
         } catch {
             throw MCPClientError.transport(error.localizedDescription)
         }

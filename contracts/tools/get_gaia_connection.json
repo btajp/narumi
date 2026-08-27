@@ -1,0 +1,19 @@
+{
+  "name": "get_gaia_connection",
+  "title": "Get Gaia connection",
+  "description": "Return the effective local Gaia connection URL, whether an API key is configured, and its source. Never return the key. Saved settings take precedence over NARUMI_GAIA_URL / NARUMI_GAIA_API_KEY; a saved null URL explicitly disables Gaia. This does not contact Gaia. On failure returns an error_envelope (isError=true) with code: invalid_argument, internal.",
+  "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+  "inputSchema": { "type": "object", "required": [], "properties": {}, "additionalProperties": false },
+  "outputSchema": {
+    "type": "object", "required": ["connection"],
+    "properties": { "connection": { "$ref": "../defs/common.json#/$defs/gaia_connection" } },
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [{}, {}],
+    "output": [
+      { "connection": { "url": null, "has_api_key": false, "source": "unconfigured" } },
+      { "connection": { "url": "http://127.0.0.1:4111/mcp", "has_api_key": true, "source": "saved" } }
+    ]
+  }
+}

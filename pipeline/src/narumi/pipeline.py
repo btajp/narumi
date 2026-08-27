@@ -39,7 +39,7 @@ from narumi.brief import load_brief, run_brief
 from narumi.bundle import Bundle, ExportRecord, RegenerationRecord, StageResult, utc_now_iso
 from narumi.diarize import run_diarize, run_layer3, run_layer4
 from narumi.errors import CancelledError, NotFoundError
-from narumi.export import get_exporter
+from narumi.export import GaiaExporter, get_exporter
 from narumi.gaia import GaiaClient
 from narumi.generate import run_generate, run_integrate
 from narumi.models import MinutesMeta
@@ -49,6 +49,7 @@ from narumi.transcribe import run_transcribe
 
 ProgressFn = Callable[[str, float], None]
 StepFn = Callable[[Bundle, bool], StageResult | Sequence[StageResult]]
+GaiaClientFactory = Callable[[], GaiaClient | None]
 
 STAGE_PREPROCESS = "preprocess"
 STAGE_BRIEF = "brief"
@@ -61,13 +62,16 @@ STAGE_INTEGRATE = "integrate"
 STAGE_GENERATE = "generate"
 
 
-def _step_brief(bundle: Bundle, force: bool) -> StageResult:
+def _step_brief(
+    bundle: Bundle, force: bool, *, client_factory: GaiaClientFactory | None = None
+) -> StageResult:
     """Build the meeting brief; gaia-library is consulted only when ``NARUMI_GAIA_URL`` is set.
 
     ``GaiaClient.from_env()`` returns ``None`` without the env var (任意依存: local-only brief);
     with it set, an unreachable gaia-library raises instead of silently thinning the brief.
     """
-    return run_brief(bundle, GaiaClient.from_env(), force=force)
+    factory = GaiaClient.from_env if client_factory is None else client_factory
+    return run_brief(bundle, factory(), force=force)
 
 
 def _step_transcribe(bundle: Bundle, force: bool) -> Sequence[StageResult]:
@@ -122,6 +126,21 @@ date first when needed)."""
 STAGE_ORDER: tuple[str, ...] = tuple(name for name, _ in PROCESS_STEPS)
 
 
+def _process_steps(client_factory: GaiaClientFactory | None) -> Sequence[tuple[str, StepFn]]:
+    """Bind the caller's connection settings without changing the shared stage registry."""
+    if client_factory is None:
+        return PROCESS_STEPS
+    return tuple(
+        (
+            name,
+            (lambda bundle, force: _step_brief(bundle, force, client_factory=client_factory))
+            if name == STAGE_BRIEF
+            else step,
+        )
+        for name, step in PROCESS_STEPS
+    )
+
+
 @dataclass
 class ProcessResult:
     meeting_id: str
@@ -147,6 +166,7 @@ def process_meeting(
     *,
     force: bool = False,
     progress: ProgressFn | None = None,
+    gaia_client_factory: GaiaClientFactory | None = None,
 ) -> ProcessResult:
     """Full run: preprocess → brief → transcribe → diarize → slides → align → layer3 →
     integrate → generate.
@@ -154,7 +174,7 @@ def process_meeting(
     Sets ``manifest.status`` to ``processing`` first, ``ready`` on success and ``failed`` when
     any stage raises (the exception is re-raised unchanged; nothing is swallowed).
     """
-    return _run_steps(bundle, PROCESS_STEPS, force=force, progress=progress)
+    return _run_steps(bundle, _process_steps(gaia_client_factory), force=force, progress=progress)
 
 
 def regenerate_meeting(
@@ -187,6 +207,7 @@ def refresh_meeting(
     progress: ProgressFn | None = None,
     reason: str = "regenerate",
     job_id: str | None = None,
+    gaia_client_factory: GaiaClientFactory | None = None,
 ) -> ProcessResult:
     """Bring the minutes up to date with the bundle and its config (the MCP ``regenerate`` tool).
 
@@ -201,7 +222,9 @@ def refresh_meeting(
     :func:`regenerate_meeting`.
     """
     forced = {name for name, _ in REGENERATE_STEPS} if force else set()
-    result = _run_steps(bundle, PROCESS_STEPS, force=forced, progress=progress)
+    result = _run_steps(
+        bundle, _process_steps(gaia_client_factory), force=forced, progress=progress
+    )
     _record_regeneration(bundle, result, reason=reason, job_id=job_id)
     return result
 
@@ -213,6 +236,7 @@ def export_meeting(
     options: dict[str, Any] | None = None,
     minutes_version: int | None = None,
     request_id: str | None = None,
+    gaia_client_factory: GaiaClientFactory | None = None,
 ) -> ExportResult:
     """Export a minutes version through a registered exporter and record it in the manifest.
 
@@ -220,6 +244,8 @@ def export_meeting(
     minutes yet, the version does not exist or ``destination`` is not a registered exporter.
     """
     exporter = get_exporter(destination)
+    if gaia_client_factory is not None and isinstance(exporter, GaiaExporter):
+        exporter = GaiaExporter(client_factory=gaia_client_factory)
     versions = sorted(v.version for v in bundle.manifest.minutes_versions)
     if not versions:
         raise NotFoundError(

@@ -71,12 +71,22 @@ struct NarumiClient: Sendable {
         } catch let error as MCPClientError {
             throw ToolFailure(from: error)
         } catch {
-            throw ToolFailure(code: "protocol", message: "\(name) の応答を解釈できません: \(error)")
+            throw ToolFailure(
+                code: "protocol",
+                message: ToolResponseErrorMessage.decoding(toolName: name, error: error))
         }
     }
 
     private static func requestID() -> JSONNode {
         .string(UUID().uuidString)
+    }
+
+    private static func arguments<T: Encodable>(_ request: T) throws -> [String: JSONNode] {
+        let data = try JSONEncoder().encode(request)
+        guard case .object(let arguments) = try JSONNode.parse(data) else {
+            throw ToolFailure(code: "protocol", message: "ツールの入力が JSON オブジェクトではありません")
+        }
+        return arguments
     }
 
     /// Scope selector: empty = omit (unscoped only), one name = string, 2+ = explicit array.
@@ -363,6 +373,25 @@ struct NarumiClient: Sendable {
     func deleteProfile(name: String) async throws -> DeleteProfileResponse {
         try await call(
             ToolCatalog.deleteProfile, ["name": .string(name), "request_id": Self.requestID()])
+    }
+
+    // MARK: Gaia connection (credentials are write-only)
+
+    func gaiaConnection() async throws -> GaiaConnection {
+        let response: GaiaConnectionResponse = try await call(ToolCatalog.getGaiaConnection)
+        return response.connection
+    }
+
+    func setGaiaConnection(_ request: SetGaiaConnectionRequest) async throws -> GaiaConnection {
+        let response: GaiaConnectionResponse = try await call(
+            ToolCatalog.setGaiaConnection, Self.arguments(request))
+        return response.connection
+    }
+
+    func testGaiaConnection(
+        _ request: TestGaiaConnectionRequest = TestGaiaConnectionRequest()
+    ) async throws -> GaiaConnectionTestResult {
+        try await call(ToolCatalog.testGaiaConnection, Self.arguments(request))
     }
 
     // MARK: Diagnostics

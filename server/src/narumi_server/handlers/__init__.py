@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from narumi_server.handlers import (
     contexts,
+    gaia,
     importing,
     lifecycle,
     meetings,
@@ -16,6 +17,9 @@ from narumi_server.handlers.common import Handler
 
 HANDLERS: dict[str, Handler] = {
     "get_server_info": server_info.get_server_info,
+    "get_gaia_connection": gaia.get_gaia_connection,
+    "set_gaia_connection": gaia.set_gaia_connection,
+    "test_gaia_connection": gaia.test_gaia_connection,
     "start_recording": recording.start_recording,
     "stop_recording": recording.stop_recording,
     "get_recording_status": recording.get_recording_status,

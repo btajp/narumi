@@ -43,6 +43,11 @@ public enum ToolCatalog {
     public static let setProfile = "set_profile"
     public static let deleteProfile = "delete_profile"
 
+    // Optional Gaia connection settings
+    public static let getGaiaConnection = "get_gaia_connection"
+    public static let setGaiaConnection = "set_gaia_connection"
+    public static let testGaiaConnection = "test_gaia_connection"
+
     // Diagnostics
     public static let getServerInfo = "get_server_info"
     public static let rebuildCatalog = "rebuild_catalog"
@@ -71,6 +76,9 @@ public enum ToolCatalog {
         getProfile,
         setProfile,
         deleteProfile,
+        getGaiaConnection,
+        setGaiaConnection,
+        testGaiaConnection,
         getServerInfo,
         rebuildCatalog,
     ]

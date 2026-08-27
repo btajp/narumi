@@ -59,6 +59,9 @@ EXPECTED_TOOLS = {
     "set_profile",
     "delete_profile",
     "rebuild_catalog",
+    "get_gaia_connection",
+    "set_gaia_connection",
+    "test_gaia_connection",
 }
 MEETING_ID = "20260827T030500Z-a1b2c3d4"
 REQUEST_ID = "6f1c2a1e-9b7d-4c2e-8f0a-1a2b3c4d5e6f"
@@ -546,6 +549,8 @@ def test_read_only_tools_have_no_request_id_and_write_tools_require_it(
         "get_job_status",
         "list_profiles",
         "get_profile",
+        "get_gaia_connection",
+        "test_gaia_connection",
     }
     for name in read_only:
         assert "request_id" not in contracts[name].input_schema["properties"], name

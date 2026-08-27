@@ -35,6 +35,8 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "FAKE_RECORDER_ERROR_AFTER_STOP",
         "FAKE_RECORDER_CHECK",
         "NARUMI_CONTRACTS_DIR",
+        "NARUMI_GAIA_URL",
+        "NARUMI_GAIA_API_KEY",
     ):
         monkeypatch.delenv(knob, raising=False)
     return root
@@ -201,7 +203,9 @@ def write_fake_minutes(bundle: Bundle, text: str = "# 議事録\n\n- 決定事�
     return version
 
 
-def fake_process_meeting(bundle: Bundle, *, force: bool = False, progress=None) -> ProcessResult:
+def fake_process_meeting(
+    bundle: Bundle, *, force: bool = False, progress=None, gaia_client_factory=None
+) -> ProcessResult:
     """Stand-in for ``narumi.pipeline.process_meeting`` used via monkeypatch."""
     if progress is not None:
         progress("transcribe", 0.4)

@@ -51,6 +51,38 @@ final class ContractModelsTests: XCTestCase {
         }
     }
 
+    // MARK: Gaia connection
+
+    func testGetGaiaConnection() throws {
+        let responses = try decodeAll(GaiaConnectionResponse.self, tool: "get_gaia_connection")
+        XCTAssertNil(responses[0].connection.url)
+        XCTAssertFalse(responses[0].connection.hasAPIKey)
+        XCTAssertEqual(responses[0].connection.source, .unconfigured)
+        XCTAssertEqual(responses[1].connection.url, "http://127.0.0.1:4111/mcp")
+        XCTAssertTrue(responses[1].connection.hasAPIKey)
+        XCTAssertEqual(responses[1].connection.source, .saved)
+    }
+
+    func testSetGaiaConnection() throws {
+        let responses = try decodeAll(GaiaConnectionResponse.self, tool: "set_gaia_connection")
+        XCTAssertTrue(responses[0].connection.hasAPIKey)
+        XCTAssertNil(responses[1].connection.url)
+        XCTAssertFalse(responses[1].connection.hasAPIKey)
+        XCTAssertEqual(responses[1].connection.source, .saved)
+    }
+
+    func testTestGaiaConnection() throws {
+        let responses = try decodeAll(GaiaConnectionTestResult.self, tool: "test_gaia_connection")
+        let result = try XCTUnwrap(responses.first)
+        XCTAssertTrue(result.connected)
+        XCTAssertEqual(result.name, "gaia_library")
+        XCTAssertEqual(result.version, "0.1.0")
+        XCTAssertEqual(result.contractVersion, "1.0.0")
+        XCTAssertEqual(result.client.name, "narumi")
+        XCTAssertEqual(result.client.role, .agent)
+        XCTAssertEqual(result.client.defaultScope, "cloudnative")
+    }
+
     // MARK: Meetings / search
 
     func testListMeetings() throws {

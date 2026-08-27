@@ -1,0 +1,31 @@
+{
+  "name": "set_gaia_connection",
+  "title": "Set Gaia connection",
+  "description": "Save the local Gaia connection used by briefs and exports. Only supplied keys change. url must be a loopback HTTP endpoint with no userinfo, query or fragment. Changing the URL clears the old key unless a replacement is supplied in the same call. url=null disables Gaia and clears its key; api_key=null clears only the key. Credentials are stored in a dedicated owner-only connection file, never in meeting profiles, bundles, responses, request caches or audit details. Saved settings override environment settings. This saves without contacting Gaia; use test_gaia_connection to verify authentication and compatibility. On failure returns an error_envelope (isError=true) with code: invalid_argument, internal.",
+  "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+  "inputSchema": {
+    "type": "object", "required": ["request_id"],
+    "properties": {
+      "url": { "type": ["string", "null"], "minLength": 1, "maxLength": 2048 },
+      "api_key": { "type": ["string", "null"], "minLength": 1, "maxLength": 4096, "writeOnly": true, "description": "Write-only bearer key. Omit to retain it when the URL is unchanged; null clears it." },
+      "request_id": { "$ref": "../defs/common.json#/$defs/request_id" }
+    },
+    "anyOf": [{ "required": ["url"] }, { "required": ["api_key"] }],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object", "required": ["connection"],
+    "properties": { "connection": { "$ref": "../defs/common.json#/$defs/gaia_connection" } },
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      { "url": "http://127.0.0.1:4111/mcp", "api_key": "example-not-a-real-key", "request_id": "8a3ad2ce-870d-47b9-8b6a-d60fdcb01424" },
+      { "url": null, "request_id": "653e8b29-4423-4217-9f55-bf10efeb4d65" }
+    ],
+    "output": [
+      { "connection": { "url": "http://127.0.0.1:4111/mcp", "has_api_key": true, "source": "saved" } },
+      { "connection": { "url": null, "has_api_key": false, "source": "saved" } }
+    ]
+  }
+}

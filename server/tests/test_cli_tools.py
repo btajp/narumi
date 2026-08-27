@@ -25,6 +25,7 @@ from conftest import make_recorded_bundle
 from narumi.contracts import ContractSet, load_contracts
 from narumi_server import cli_tools
 from narumi_server.app import ToolOutcome, build_server
+from narumi_server.cli_input import NullOption
 from narumi_server.context import ServerContext, build_context
 from narumi_server.handlers import HANDLERS
 from narumi_server.transports import build_http_app
@@ -79,7 +80,11 @@ def test_every_contract_tool_has_a_subcommand(cli: click.Group, contracts: Contr
 def test_options_cover_every_schema_property(cli: click.Group, contracts: ContractSet):
     for contract in contracts:
         command = get_command(cli, contract.name.replace("_", "-"))
-        assert set(options_of(command)) == set(contract.input_schema.get("properties", {}))
+        properties = set(contract.input_schema.get("properties", {}))
+        assert properties <= set(options_of(command))
+        assert {
+            option.name for option in command.params if not isinstance(option, NullOption)
+        } == properties
 
 
 def test_write_tools_never_require_request_id_option(cli: click.Group, contracts: ContractSet):

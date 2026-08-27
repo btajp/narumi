@@ -21,6 +21,7 @@ from conftest import FAKE_RECORDER
 from mcp import StdioServerParameters
 from mcp.client import Client
 from mcp.server import Server
+from narumi.contracts.loader import load_contracts
 from narumi.errors import InvalidArgumentError
 from narumi_server.transports import (
     ShutdownRequested,
@@ -64,7 +65,7 @@ async def test_stdio_subprocess(home: Path):
     async with Client(params) as client:
         assert client.server_info is not None and client.server_info.name == "narumi"
         listed = await client.list_tools()
-        assert len(listed.tools) == 24
+        assert len(listed.tools) == len(load_contracts().tool_names())
         info = await client.call_tool("get_server_info", {})
         assert not info.is_error
         assert info.structured_content["capabilities"]["transports"] == ["stdio"]

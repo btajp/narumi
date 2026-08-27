@@ -3,6 +3,17 @@
   "$id": "narumi:defs/common.json",
   "title": "narumi common contract definitions",
   "$defs": {
+    "gaia_connection": {
+      "type": "object",
+      "description": "Public Gaia connection settings. Credentials are write-only and are never returned.",
+      "required": ["url", "has_api_key", "source"],
+      "properties": {
+        "url": { "type": ["string", "null"] },
+        "has_api_key": { "type": "boolean" },
+        "source": { "type": "string", "enum": ["saved", "environment", "unconfigured"] }
+      },
+      "additionalProperties": false
+    },
     "meeting_id": {
       "type": "string",
       "description": "Meeting identifier: UTC recording start + 8 hex chars, e.g. 20260827T030500Z-a1b2c3d4",

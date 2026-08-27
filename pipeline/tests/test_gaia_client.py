@@ -1,8 +1,7 @@
-"""GaiaClient against an in-process fake gaia-library MCP server (http.server, no mcp package).
+"""Gaia contract-v1 client tests using an in-process HTTP fake, never a real Gaia service.
 
-``FakeGaiaServer`` speaks just enough Streamable HTTP MCP for the client: JSON-RPC over POST,
-``initialize`` / ``notifications/initialized`` / ``tools/call``, a ``Mcp-Session-Id`` header,
-plain JSON responses (or SSE when ``sse=True``). ``test_export_gaia`` reuses it.
+The fake is also reused by exporter tests. All fixtures use the actual contract structures,
+including get_server_info, so a draft-schema response cannot accidentally pass as empty data.
 """
 
 from __future__ import annotations
@@ -11,17 +10,25 @@ import json
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 import pytest
-from narumi.errors import EngineUnavailableError, ErrorCode, NarumiError
-from narumi.gaia import ENV_GAIA_URL, GaiaClient
+from narumi.errors import ContractMismatchError, EngineUnavailableError, ErrorCode, NarumiError
+from narumi.gaia import ENV_GAIA_API_KEY, ENV_GAIA_URL, GaiaClient
 
 SESSION_ID = "sess-1234"
+CORE_TOOLS = [
+    "get_server_info",
+    "search_context",
+    "get_engagement",
+    "get_glossary",
+    "resolve_speakers",
+    "propose_update",
+]
 
 
 def tool_ok(structured: dict[str, Any]) -> dict[str, Any]:
-    """A successful MCP tools/call result carrying ``structured`` as structuredContent."""
     return {
         "content": [{"type": "text", "text": json.dumps(structured, ensure_ascii=False)}],
         "structuredContent": structured,
@@ -29,24 +36,63 @@ def tool_ok(structured: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def tool_error(code: str, message: str) -> dict[str, Any]:
-    payload = {"error": {"code": code, "message": message}}
+def tool_error(code: str, message: str, details: Any = None) -> dict[str, Any]:
     return {
         "content": [{"type": "text", "text": message}],
-        "structuredContent": payload,
+        "structuredContent": {"error": {"code": code, "message": message, "details": details}},
         "isError": True,
     }
 
 
+def server_info() -> dict[str, Any]:
+    return {
+        "name": "gaia_library",
+        "version": "0.1.0",
+        "contract_version": "1.0.0",
+        "protocol": {"transports": ["stdio", "http"]},
+        "capabilities": {"tools": list(CORE_TOOLS), "resolvers": [], "search": {"fts": "trigram"}},
+        "client": {"name": "narumi", "role": "agent", "default_scope": "cn"},
+    }
+
+
+def empty_search(query: str = "") -> dict[str, Any]:
+    return {
+        "query": query,
+        "scopes": ["cn"],
+        "cross_scope": False,
+        "entities": [],
+        "glossary": [],
+        "interactions": [],
+        "hints": [],
+    }
+
+
+def engagement_result(name: str = "acme", scope: str = "cn") -> dict[str, Any]:
+    return {
+        "engagement": {"id": 42, "name": name, "scope": scope},
+        "people": [],
+        "facts": [],
+        "refs": [],
+        "glossary": [],
+        "interactions": [],
+    }
+
+
 class FakeGaiaServer:
-    """Bounded-lifetime fake gaia-library endpoint. ``tools`` maps name → fn(args) → result."""
+    """Bounded-lifetime local endpoint; tools maps names to functions returning MCP results."""
 
     def __init__(self) -> None:
         self.frames: list[dict[str, Any]] = []
         self.headers: list[dict[str, str]] = []
-        self.tools: dict[str, Any] = {}
+        self.info = server_info()
+        self.tools: dict[str, Any] = {"get_server_info": lambda _: tool_ok(self.info)}
+        self.rpc_errors: dict[str, dict[str, Any]] = {}
+        self.session_id = SESSION_ID
         self.sse = False
         self.fail_next_call_with_404 = False
+        self.http_status: int | None = None
+        self.http_body = b""
+        self.redirect_url: str | None = None
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -59,19 +105,24 @@ class FakeGaiaServer:
         server = self
 
         class Handler(BaseHTTPRequestHandler):
-            def log_message(self, *args: Any) -> None:  # keep test output quiet
+            def log_message(self, *args: Any) -> None:
                 pass
+
+            def do_GET(self) -> None:
+                server.frames.append({"method": "HTTP_GET"})
+                self._http_error(405, b"")
 
             def do_POST(self) -> None:
                 length = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(length)) if length else {}
                 server.frames.append(body)
                 server.headers.append(dict(self.headers.items()))
+                if server.http_status is not None:
+                    self._http_error(server.http_status, server.http_body)
+                    return
                 method = body.get("method")
-                if "id" not in body:  # notification
-                    self.send_response(202)
-                    self.send_header("Content-Length", "0")
-                    self.end_headers()
+                if "id" not in body:
+                    self._http_error(202, b"")
                     return
                 if method == "initialize":
                     self._reply(
@@ -80,27 +131,36 @@ class FakeGaiaServer:
                             "result": {
                                 "protocolVersion": "2025-06-18",
                                 "capabilities": {"tools": {}},
-                                "serverInfo": {"name": "fake-gaia", "version": "0"},
+                                "serverInfo": {"name": "gaia_library", "version": "0.1.0"},
                             }
                         },
-                        session=SESSION_ID,
+                        session=server.session_id,
                     )
                     return
                 if method == "tools/call":
                     if server.fail_next_call_with_404:
                         server.fail_next_call_with_404 = False
-                        raw = b"session not found"
-                        self.send_response(404)
-                        self.send_header("Content-Length", str(len(raw)))
-                        self.end_headers()
-                        self.wfile.write(raw)
+                        self._http_error(404, b"session not found")
                         return
                     name = body["params"]["name"]
+                    if name in server.rpc_errors:
+                        self._reply(body["id"], {"error": server.rpc_errors[name]})
+                        return
                     fn = server.tools.get(name)
                     if fn is None:
                         self._reply(
                             body["id"],
-                            {"error": {"code": -32602, "message": f"Unknown tool: {name}"}},
+                            {
+                                "error": {
+                                    "code": -32602,
+                                    "message": f"unknown tool `{name}`",
+                                    "data": {
+                                        "code": "not_found",
+                                        "message": f"unknown tool `{name}`",
+                                        "details": {"tool": name},
+                                    },
+                                }
+                            },
                         )
                         return
                     self._reply(body["id"], {"result": fn(body["params"].get("arguments") or {})})
@@ -109,6 +169,14 @@ class FakeGaiaServer:
                     body["id"],
                     {"error": {"code": -32601, "message": f"Method not found: {method}"}},
                 )
+
+            def _http_error(self, code: int, raw: bytes) -> None:
+                self.send_response(code)
+                self.send_header("Content-Length", str(len(raw)))
+                if server.redirect_url is not None:
+                    self.send_header("Location", server.redirect_url)
+                self.end_headers()
+                self.wfile.write(raw)
 
             def _reply(
                 self, rpc_id: Any, payload: dict[str, Any], session: str | None = None
@@ -129,7 +197,9 @@ class FakeGaiaServer:
                 self.wfile.write(raw)
 
         self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        self._thread = threading.Thread(
+            target=lambda: self._httpd.serve_forever(poll_interval=0.01), daemon=True
+        )
         self._thread.start()
 
     def stop(self) -> None:
@@ -140,7 +210,7 @@ class FakeGaiaServer:
             self._thread.join(timeout=5)
 
     def call_frames(self) -> list[dict[str, Any]]:
-        return [f for f in self.frames if f.get("method") == "tools/call"]
+        return [frame for frame in self.frames if frame.get("method") == "tools/call"]
 
 
 @pytest.fixture()
@@ -159,131 +229,148 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
-# ---------------------------------------------------------------------------- protocol
-def test_initialize_handshake_and_session_header(gaia_server: FakeGaiaServer):
-    gaia_server.tools["search_context"] = lambda args: tool_ok({"references": []})
+def test_initialize_handshake_contract_gate_and_session_header(gaia_server: FakeGaiaServer):
+    gaia_server.tools["search_context"] = lambda args: tool_ok(empty_search(args["query"]))
     client = GaiaClient(gaia_server.url)
-    assert client.search_context("定例", engagement="acme") == []
-
-    methods = [frame.get("method") for frame in gaia_server.frames]
-    assert methods == ["initialize", "notifications/initialized", "tools/call"]
+    assert client.search_context("定例", scope="cn") == empty_search("定例")
+    assert [frame.get("method") for frame in gaia_server.frames] == [
+        "initialize",
+        "notifications/initialized",
+        "tools/call",
+        "tools/call",
+    ]
     init = gaia_server.frames[0]
     assert init["params"]["protocolVersion"] == "2025-06-18"
     assert init["params"]["clientInfo"]["name"] == "narumi-pipeline"
     assert "id" not in gaia_server.frames[1]
-    call = gaia_server.frames[2]
-    assert call["params"] == {
+    assert gaia_server.frames[2]["params"] == {"name": "get_server_info", "arguments": {}}
+    assert gaia_server.frames[3]["params"] == {
         "name": "search_context",
-        "arguments": {"query": "定例", "engagement": "acme"},
+        "arguments": {"query": "定例", "scope": "cn"},
     }
-    # the session id from initialize is echoed on the tools/call request
-    assert gaia_server.headers[2].get("Mcp-Session-Id") == SESSION_ID
-
-    # a second call reuses the session: exactly one more frame, still with the session header
+    assert all(headers.get("Mcp-Session-Id") == SESSION_ID for headers in gaia_server.headers[1:])
     client.search_context("次回")
-    assert [f.get("method") for f in gaia_server.frames] == [*methods, "tools/call"]
-    assert gaia_server.headers[3].get("Mcp-Session-Id") == SESSION_ID
+    assert len(gaia_server.frames) == 5
+    assert gaia_server.headers[4]["Mcp-Session-Id"] == SESSION_ID
 
 
-def test_sse_response_body(gaia_server: FakeGaiaServer):
+def test_sse_and_scoped_engagement_name_resolution(gaia_server: FakeGaiaServer):
     gaia_server.sse = True
-    gaia_server.tools["get_glossary"] = lambda args: tool_ok(
-        {"terms": [{"term": "SCIM", "aliases": ["scim"]}]}
-    )
-    client = GaiaClient(gaia_server.url)
-    assert client.get_glossary("acme") == [{"term": "SCIM", "aliases": ["scim"]}]
-
-
-def test_session_expiry_reinitializes_once(gaia_server: FakeGaiaServer):
-    gaia_server.tools["get_glossary"] = lambda args: tool_ok({"terms": []})
-    client = GaiaClient(gaia_server.url)
-    assert client.get_glossary() == []
-    gaia_server.fail_next_call_with_404 = True
-    assert client.get_glossary() == []
-    methods = [f.get("method") for f in gaia_server.frames]
-    # first call handshake + call, then 404'd call, re-handshake, retried call
-    assert methods == [
-        "initialize",
-        "notifications/initialized",
-        "tools/call",
-        "tools/call",
-        "initialize",
-        "notifications/initialized",
-        "tools/call",
+    gaia_server.tools["get_engagement"] = lambda args: tool_ok(engagement_result(args["name"]))
+    glossary = {
+        "terms": [{"id": 3, "term": "SCIM", "reading": "スキム", "scope": "cn"}],
+        "vocabulary_hints": ["SCIM", "スキム", "田中"],
+    }
+    gaia_server.tools["get_glossary"] = lambda _: tool_ok(glossary)
+    assert GaiaClient(gaia_server.url).get_glossary("123", scope="cn") == glossary
+    assert [frame["params"] for frame in gaia_server.call_frames()][1:] == [
+        {"name": "get_engagement", "arguments": {"name": "123", "scope": "cn"}},
+        {"name": "get_glossary", "arguments": {"engagement_id": 42, "scope": "cn"}},
     ]
 
 
-# ---------------------------------------------------------------------------- errors
+def test_session_expiry_reinitializes_and_rechecks_metadata(gaia_server: FakeGaiaServer):
+    empty = {"terms": [], "vocabulary_hints": []}
+    gaia_server.tools["get_glossary"] = lambda _: tool_ok(empty)
+    client = GaiaClient(gaia_server.url)
+    assert client.get_glossary() == empty
+    gaia_server.fail_next_call_with_404 = True
+    assert client.get_glossary() == empty
+    assert [frame["params"]["name"] for frame in gaia_server.call_frames()] == [
+        "get_server_info",
+        "get_glossary",
+        "get_glossary",
+        "get_server_info",
+        "get_glossary",
+    ]
+    assert sum(frame["method"] == "initialize" for frame in gaia_server.frames) == 2
+
+
+def test_session_expiry_cannot_bypass_changed_contract_gate(gaia_server: FakeGaiaServer):
+    gaia_server.tools["get_glossary"] = lambda _: tool_ok({"terms": [], "vocabulary_hints": []})
+    client = GaiaClient(gaia_server.url)
+    client.get_glossary()
+    gaia_server.info["contract_version"] = "2.0.0"
+    gaia_server.fail_next_call_with_404 = True
+    with pytest.raises(ContractMismatchError):
+        client.get_glossary()
+    assert gaia_server.call_frames()[-1]["params"]["name"] == "get_server_info"
+
+
+def test_http_404_is_retried_only_once(gaia_server: FakeGaiaServer):
+    gaia_server.http_status = 404
+    with pytest.raises(EngineUnavailableError):
+        GaiaClient(gaia_server.url).get_glossary()
+    assert [frame["method"] for frame in gaia_server.frames] == ["initialize", "initialize"]
+
+
 def test_unreachable_server_raises_engine_unavailable():
-    client = GaiaClient(f"http://127.0.0.1:{free_port()}/mcp")
-    with pytest.raises(EngineUnavailableError) as excinfo:
-        client.call("search_context", {"query": "x"})
-    assert "gaia-library unreachable" in str(excinfo.value)
+    with pytest.raises(EngineUnavailableError, match="gaia-library unreachable"):
+        GaiaClient(f"http://127.0.0.1:{free_port()}/mcp").get_server_info()
 
 
-def test_unknown_tool_raises_engine_unavailable_with_server_message(
-    gaia_server: FakeGaiaServer,
-):
-    client = GaiaClient(gaia_server.url)
-    with pytest.raises(EngineUnavailableError) as excinfo:
-        client.call("no_such_tool")
-    assert "Unknown tool: no_such_tool" in str(excinfo.value)
+def test_actual_unknown_tool_rpc_error(gaia_server: FakeGaiaServer):
+    with pytest.raises(EngineUnavailableError, match="unknown tool") as exc:
+        GaiaClient(gaia_server.url).call("missing")
+    assert exc.value.details["gaia_code"] == "not_found"
+    assert exc.value.details["rpc_code"] == -32602
 
 
-def test_tool_error_keeps_structured_code(gaia_server: FakeGaiaServer):
-    gaia_server.tools["search_context"] = lambda args: tool_error("not_found", "no such scope")
-    client = GaiaClient(gaia_server.url)
-    with pytest.raises(NarumiError) as excinfo:
-        client.search_context("x", scope="missing")
-    assert excinfo.value.code == ErrorCode.NOT_FOUND
-    assert excinfo.value.message == "no such scope"
+@pytest.mark.parametrize("via_rpc", [False, True])
+@pytest.mark.parametrize(
+    ("gaia_code", "expected"),
+    [
+        ("not_found", ErrorCode.NOT_FOUND),
+        ("scope_denied", ErrorCode.SCOPE_DENIED),
+        ("unauthorized", ErrorCode.SCOPE_DENIED),
+        ("invalid_params", ErrorCode.INVALID_ARGUMENT),
+        ("contract_mismatch", ErrorCode.CONTRACT_MISMATCH),
+        ("conflict", ErrorCode.INVALID_ARGUMENT),
+        ("busy", ErrorCode.BUSY),
+        ("not_implemented", ErrorCode.ENGINE_UNAVAILABLE),
+        ("internal", ErrorCode.INTERNAL),
+    ],
+)
+def test_structured_errors_preserve_gaia_code(gaia_server, via_rpc, gaia_code, expected):
+    error = {"code": gaia_code, "message": "resource not found", "details": {"scope": "cn"}}
+    if via_rpc:
+        gaia_server.rpc_errors["search_context"] = {
+            "code": -32602,
+            "message": error["message"],
+            "data": error,
+        }
+    else:
+        gaia_server.tools["search_context"] = lambda _: tool_error(
+            gaia_code, error["message"], error["details"]
+        )
+    with pytest.raises(NarumiError) as exc:
+        GaiaClient(gaia_server.url).search_context("x", scope="cn")
+    assert exc.value.code == expected
+    assert exc.value.message == error["message"]
+    assert exc.value.details["gaia_code"] == gaia_code
+    assert exc.value.details["gaia"] == {"scope": "cn"}
 
 
-# ---------------------------------------------------------------------------- typed helpers
-def test_typed_helpers_and_result_tolerance(gaia_server: FakeGaiaServer):
-    gaia_server.tools["resolve_speakers"] = lambda args: tool_ok(
-        {"speakers": {"tanaka": {"name": "田中太郎"}}}
-    )
-    gaia_server.tools["propose_update"] = lambda args: tool_ok(
-        {"proposal_id": "prop-1", "status": "queued"}
-    )
-    client = GaiaClient(gaia_server.url)
-
-    speakers = client.resolve_speakers(["tanaka"], engagement="acme")
-    assert speakers == {"tanaka": {"name": "田中太郎"}}
-
-    result = client.propose_update(
-        entity_type="interaction",
-        patch={"kind": "meeting_minutes"},
-        scope="client-a",
-        provenance="minutes://meeting/x",
-        request_id="req-1",
-    )
-    assert result == {"proposal_id": "prop-1", "status": "queued"}
-    frame = gaia_server.call_frames()[-1]
-    assert frame["params"]["name"] == "propose_update"
-    assert frame["params"]["arguments"] == {
-        "entity_type": "interaction",
-        "patch": {"kind": "meeting_minutes"},
-        "scope": "client-a",
-        "provenance": "minutes://meeting/x",
-        "request_id": "req-1",
-    }
-
-
-def test_text_only_result_is_parsed_as_json(gaia_server: FakeGaiaServer):
-    gaia_server.tools["search_context"] = lambda args: {
-        "content": [{"type": "text", "text": json.dumps({"references": [{"uri": "u"}]})}],
+def test_text_only_json_result(gaia_server: FakeGaiaServer):
+    result = empty_search("q")
+    gaia_server.tools["search_context"] = lambda _: {
+        "content": [{"type": "text", "text": json.dumps(result)}],
         "isError": False,
     }
-    client = GaiaClient(gaia_server.url)
-    assert client.search_context("q") == [{"uri": "u"}]
+    assert GaiaClient(gaia_server.url).search_context("q") == result
 
 
-# ---------------------------------------------------------------------------- construction
-def test_from_env(monkeypatch: pytest.MonkeyPatch):
+def test_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, gaia_server: FakeGaiaServer):
+    monkeypatch.setenv("NARUMI_HOME", str(tmp_path))
     monkeypatch.delenv(ENV_GAIA_URL, raising=False)
+    monkeypatch.delenv(ENV_GAIA_API_KEY, raising=False)
     assert GaiaClient.from_env() is None
-    monkeypatch.setenv(ENV_GAIA_URL, "http://127.0.0.1:1/mcp")
+    monkeypatch.setenv(ENV_GAIA_URL, gaia_server.url)
+    monkeypatch.setenv(ENV_GAIA_API_KEY, "gaia_narumi_test_12345678")
     client = GaiaClient.from_env()
-    assert client is not None and client.url == "http://127.0.0.1:1/mcp"
+    assert client is not None and client.url == gaia_server.url
+    assert client.get_server_info()["client"]["name"] == "narumi"
+    assert all(
+        header["Authorization"] == "Bearer gaia_narumi_test_12345678"
+        for header in gaia_server.headers
+    )
