@@ -71,3 +71,16 @@ solo-eikaiwa の `desktop/e2e-updater` と同型。`app/e2e-updater/README.md` �
 - Mac App Store 配布、x86_64 配布、delta 更新の細かな最適化
 - pyannote / torch のランタイム同梱（機密会議向けのローカル話者分離は別途 opt-in 手順）
 - 初回起動にネットワークが必要（uv の Python 取得と PyPI）。オフライン初回起動は非対応
+
+## 実装状況メモ（2026-08-27、スクリプト側）
+
+§1 のバンドル組み立て（`build-app.sh --runtime`、`scripts/runtime.lock.json` に uv 0.12.6 を sha256 固定）、§2 の `.app` 組み立て・署名順・`Info.plist` キー、§3 の `release-app.sh` / `check-version.sh` / `check-updater-key-policy.sh`、§4 の `app/e2e-updater/`（README + `run-e2e.sh`）を実装済み。実 Sparkle 2.9.6 のツール・実 uv 配布物・実 SwiftPM 展開物で検証した上での本文からの差分:
+
+- **E2E の使い捨て鍵は `generate_keys` を使わない**: 実 2.9.6 の `generate_keys` は `-f` でもログイン Keychain に書き込む。E2E はランダム 32 バイトのシードファイル（`sign_update` / `generate_appcast` の `--ed-key-file` が読む「新形式」）を使い、公開鍵は `app/e2e-updater/derive-pubkey.py` で導出する（Keychain 完全不使用。実ツールで署名・検証を確認済み）
+- **`spctl -a -t exec` は公証前は rejected が正常**なため、手順 5 では参考表示にとどめ、手順 6 の staple 後に必須検査する
+- `build-app.sh` に **`--build-override`** を追加（E2E 用。Sparkle の新旧比較は `CFBundleVersion` なので、`--version-override 99.0.0` だけでは更新と認識されない）
+- `generate_appcast` は `LSMinimumSystemVersion` と arm64 スライスから `sparkle:minimumSystemVersion` / `sparkle:hardwareRequirements` を自動付与する（実挙動で確認）。`release-app.sh` は欠けていた場合に備えて冪等に注入もする
+- `sparkle:edSignature` の検証は `sign_update --verify`（Keychain の鍵から導出した公開鍵で検証）。手順 3 の鍵ポリシー検査と合わせて `app/sparkle-public-key.txt` に対する検証と等価
+- **§1 の「torch は含めない」は現行ロックでは成立していない**: `uv export --extra whisper-mlx` が mlx-whisper 経由で torch を引き込む（`requirements.txt` に含まれる）。除外すると `--require-hashes` インストールが壊れるため、export 結果のまま同梱している。torch を外すには mlx-whisper の依存変更かロック調整が必要
+- **手順 2 の venv は `--relocatable` で作る**（Swift 側 `RuntimeSyncPlan`）: 手順 2〜3 をすべて `venv.new` に対して行い最後に `venv` へ rename する実装のため、既定のシェバン（venv の絶対パスを埋め込む）では rename 後に `venv/bin/narumi-server` が消えた `venv.new/bin/python3` を指して exit 126 になる。`uv venv --relocatable` はエントリポイントを自己相対（`$(dirname $(realpath $0))/python3`）にする。実 .app のバンドル起動（bundled モード）で再現・修正を確認済み
+- **Sparkle の再起動は環境変数を引き継がない**（実 2.9.6 の更新適用で確認）: 再起動されたアプリは `NARUMI_HOME` / `NARUMI_SPARKLE_FEED_URL` を持たず、既定データルートにランタイム同期を始める。§4 の合格条件 3・4 は、再起動の確認（条件 1・2）後に `run-e2e.sh` が更新後アプリを終了経路で止め、E2E 前に無かった場合のみ既定データルートの `runtime/` を片付け、E2E の env で起動し直して検証する方式に変更（本番動作には影響なし — 実運用の bundled アプリは env 無しで既定データルートに同期するのが正しい挙動）
