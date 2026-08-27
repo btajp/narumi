@@ -1,4 +1,4 @@
-"""Exporter registry (``markdown`` / ``html``; Notion / gaia-library arrive in later steps)."""
+"""Exporter registry (``markdown`` / ``html`` / ``notion`` / ``gaia-library``)."""
 
 from __future__ import annotations
 
@@ -6,12 +6,16 @@ from typing import Any
 
 from narumi.errors import NotFoundError
 from narumi.export.base import Exporter
+from narumi.export.gaia import GaiaExporter
 from narumi.export.html import HtmlExporter
 from narumi.export.markdown import MarkdownExporter
+from narumi.export.notion import NotionExporter
 
 EXPORTERS: dict[str, Exporter] = {
     MarkdownExporter.name: MarkdownExporter(),
     HtmlExporter.name: HtmlExporter(),
+    NotionExporter.name: NotionExporter(),
+    GaiaExporter.name: GaiaExporter(),
 }
 
 
