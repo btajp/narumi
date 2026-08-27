@@ -87,7 +87,7 @@ class GaiaClient:
             self._server_info = None
         if self._server_info is None:
             self._accept_server_info(self._perform("get_server_info", {}, typed=False))
-        return self._transport.scrub(copy.deepcopy(self._server_info))
+        return self._transport.redact_api_key(copy.deepcopy(self._server_info))
 
     def require_capabilities(self, *tool_names: str) -> dict[str, Any]:
         """Validate compatibility and required tool availability without invoking those tools."""
@@ -256,16 +256,16 @@ class GaiaClient:
         except RpcError as err:
             raise rpc_error(tool, err) from None
         payload = unwrap_tool_result(tool, result)
-        safe_payload = self._transport.scrub(payload)
         # All public/typed calls and implicit metadata reads pass this boundary. Do not
         # turn reflected credentials into glossary terms, facts, saved snapshots or prompts.
-        # Metadata keeps its existing redacted interface; business content fails closed
-        # instead of silently changing its meaning or dropping an additive field.
-        if tool != "get_server_info" and safe_payload != payload:
+        # Generic Bearer masking belongs to error display, not vocabulary/identity checks.
+        if tool == "get_server_info":
+            return self._transport.redact_api_key(payload)
+        if self._transport.contains_api_key(payload):
             raise ContractMismatchError(
                 "gaia-library returned credential material in a tool response"
             )
-        return safe_payload
+        return payload
 
     def _ensure_initialized(self) -> None:
         if self._initialized:

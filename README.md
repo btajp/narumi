@@ -124,6 +124,8 @@ uv run narumi tool <tool_name> --json '{"...": "..."}'   # 汎用エスケープ
 
 接続先は `--server-url`（既定 `NARUMI_SERVER_URL` → `http://127.0.0.1:8765/mcp`）です。サーバーが応答すればそこへ MCP（Streamable HTTP）で送り、応答が無ければ同じディスパッチ経路を in-process で実行します（`--require-server` / `--in-process` で強制。録画系ツールは in-process では拒否）。出力は結果 JSON（`--pretty` 既定、`--raw` で 1 行）で、エラーは契約の `error_envelope` を stderr に出し終了コード 2 で終わります。`--data-root PATH`（または `NARUMI_HOME`）は in-process 実行のデータルートを切り替えます。
 
+Gaia のキー保存など、契約に `writeOnly` 入力を持つツールの HTTP 通信は同じ Mac 上の loopback HTTP に限定します。`localhost` は数値アドレスへ固定し、接続確認・初期化から終了まで環境プロキシとリダイレクトを使いません。それ以外のツールの接続方法は変わりません。
+
 ### dev CLI `narumi-dev`
 
 `narumi-dev` はライブラリを直接呼ぶ **開発者向け** デバッグツールで、製品の操作面には数えません。UI = API パリティの原則（AGENTS.md 絶対原則 3）が適用されるのはアプリと製品 CLI で、どちらも MCP のツール面だけを使います。

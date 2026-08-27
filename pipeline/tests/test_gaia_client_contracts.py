@@ -316,6 +316,13 @@ def test_legal_server_metadata_without_default_scope_is_preserved(gaia_server):
     assert info["client"] == {"name": "narumi", "role": "agent"}
 
 
+def test_explicit_null_default_scope_is_rejected_by_gaia_v1_contract(gaia_server):
+    # Gaia's optional string is omitted when unset; its wire contract is not nullable.
+    gaia_server.info["client"]["default_scope"] = None
+    with pytest.raises(ContractMismatchError):
+        GaiaClient(gaia_server.url).get_server_info()
+
+
 def test_business_name_containing_unknown_tool_is_not_misclassified(gaia_server):
     gaia_server.rpc_errors["get_engagement"] = {
         "code": -32602,

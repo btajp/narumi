@@ -22,6 +22,7 @@ from narumi.errors import (
 
 PROTOCOL_VERSION = "2025-06-18"
 _ERROR_BODY_TAIL = 500
+_MAX_PERCENT_DECODE_PASSES = 32
 _ERROR_CODES = {
     "not_found": ErrorCode.NOT_FOUND,
     "scope_denied": ErrorCode.SCOPE_DENIED,
@@ -155,11 +156,58 @@ class Transport:
             code = ErrorCode.BUSY
         return NarumiError(message, code=code, details=details)
 
-    def scrub(self, value: Any) -> Any:
+    def _key_text(self, value: str) -> str | None:
+        """Find the actual key after RFC 3986 percent decoding, without rewriting safe text."""
+        if self._api_key is None:
+            return None
+        normalized = value
+        for _ in range(_MAX_PERCENT_DECODE_PASSES):
+            decoded = urllib.parse.unquote(normalized)
+            if decoded == normalized:
+                return normalized if self._api_key in normalized else None
+            normalized = decoded
+        # Repeated decoding has a work limit. Never return an unchecked, still-encoded
+        # credential merely because the peer wrapped it in too many percent escapes.
+        raise ContractMismatchError(
+            "gaia-library returned excessively nested percent encoding"
+        ) from None
+
+    def contains_api_key(self, value: Any) -> bool:
+        """Inspect every JSON string/key for this connection's key, not generic Bearer terms."""
         if isinstance(value, str):
-            if self._api_key:
-                for secret in (self._api_key, urllib.parse.quote(self._api_key, safe="")):
-                    value = value.replace(secret, "[REDACTED]")
+            return self._key_text(value) is not None
+        if isinstance(value, dict):
+            return any(
+                self.contains_api_key(key) or self.contains_api_key(item)
+                for key, item in value.items()
+            )
+        if isinstance(value, list):
+            return any(self.contains_api_key(item) for item in value)
+        return False
+
+    def redact_api_key(self, value: Any) -> Any:
+        """Redact only actual-key-bearing strings; keep unrelated metadata/vocabulary intact."""
+        if isinstance(value, str):
+            normalized = self._key_text(value)
+            if normalized is not None and self._api_key is not None:
+                return normalized.replace(self._api_key, "[REDACTED]")
+            return value
+        if isinstance(value, dict):
+            return {
+                self.redact_api_key(key): self.redact_api_key(item) for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [self.redact_api_key(item) for item in value]
+        return value
+
+    def scrub(self, value: Any) -> Any:
+        """Conservative error-display masking; never use this to reject successful content."""
+        if isinstance(value, str):
+            try:
+                value = self.redact_api_key(value)
+            except ContractMismatchError:
+                # An error string beyond the inspection limit is not safe to display.
+                return "[REDACTED]"
             return re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+=*", "Bearer [REDACTED]", value)
         if isinstance(value, dict):
             return {self.scrub(key): self.scrub(item) for key, item in value.items()}

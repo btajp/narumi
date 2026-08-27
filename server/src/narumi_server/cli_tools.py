@@ -25,7 +25,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from email.message import Message
 from pathlib import Path
 from typing import Any
@@ -43,6 +43,7 @@ from narumi_server.cli_input import (
     parse_json_option,
     with_request_id,
 )
+from narumi_server.cli_transport import ConfidentialHttpTransport
 from narumi_server.context import build_context
 
 ENV_SERVER_URL = "NARUMI_SERVER_URL"
@@ -73,12 +74,13 @@ _SECRET_TOOL_META = "narumi_secret_tool"
 
 @dataclass(frozen=True)
 class CliState:
-    """Global options resolved by the group callback, shared by every subcommand."""
+    """Global options plus the per-call transport policy derived from the contract."""
 
     server_url: str
     mode: str
     data_root: Path | None
     pretty: bool
+    confidential: bool = False
 
 
 def _redacted_error_payload(
@@ -212,7 +214,10 @@ class McpHttpClient:
     ``Mcp-Session-Id`` the server assigns.
     """
 
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, *, confidential: bool = False) -> None:
+        self._transport = ConfidentialHttpTransport(url) if confidential else None
+        if self._transport is not None:
+            url = self._transport.url
         parsed = urllib.parse.urlsplit(url)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             raise InvalidArgumentError(
@@ -224,6 +229,11 @@ class McpHttpClient:
         self._next_id = 0
 
     # -------------------------------------------------------------- wire helpers
+    def _open(self, request: urllib.request.Request, timeout: float) -> Any:
+        if self._transport is not None:
+            return self._transport.open(request, timeout=timeout)
+        return urllib.request.urlopen(request, timeout=timeout)
+
     def _headers(self) -> dict[str, str]:
         headers = {
             "Content-Type": _JSON_CONTENT_TYPE,
@@ -241,7 +251,7 @@ class McpHttpClient:
             self.url, data=data, headers=self._headers(), method="POST"
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with self._open(request, timeout) as response:
                 return response.status, response.headers, response.read()
         except urllib.error.HTTPError as exc:
             snippet = _snippet(exc.read())
@@ -350,7 +360,7 @@ class McpHttpClient:
             return
         request = urllib.request.Request(self.url, headers=self._headers(), method="DELETE")
         with contextlib.suppress(Exception):
-            with urllib.request.urlopen(request, timeout=PROBE_TIMEOUT) as response:
+            with self._open(request, PROBE_TIMEOUT) as response:
                 response.read()
 
 
@@ -379,7 +389,7 @@ def _call_over_http(
     state: CliState, tool: str, args: dict[str, Any]
 ) -> tuple[dict[str, Any], bool] | None:
     """``None`` when no server answers the probe and falling back in-process is allowed."""
-    client = McpHttpClient(state.server_url)
+    client = McpHttpClient(state.server_url, confidential=state.confidential)
     try:
         try:
             client.probe()
@@ -433,7 +443,8 @@ def _render(payload: dict[str, Any], *, pretty: bool) -> str:
 def _run(state: CliState, tool: str, args: dict[str, Any], *, redact: bool = False) -> None:
     """Execute and print: result JSON on stdout, error envelope on stderr with exit 2."""
     try:
-        payload, is_error = _call(state, tool, args)
+        # Use the same contract decision for input privacy and the entire HTTP session.
+        payload, is_error = _call(replace(state, confidential=redact), tool, args)
     except NarumiError as exc:
         payload = _redacted_error_payload(tool, exc.code) if redact else exc.to_payload()
         is_error = True
