@@ -45,15 +45,18 @@ open dist/narumi.app     # メニューバーに 🕵️ が出る。「録画�
 ```
 録画（screen.mp4 / mic.m4a / system.m4a を別トラック）
   → preprocess   ffmpeg で 16kHz mono wav に分離（決定的）
+  → brief        会議ブリーフ context/brief.json（NARUMI_GAIA_URL 設定時のみ gaia-library に照会。語彙は transcribe / integrate、本文は minutes プロンプトへ）
   → transcribe   文字起こし（エンジン抽象化。既定はローカル Whisper: mlx-whisper → faster-whisper）
-  → diarize      話者分離 第 1 層 = トラック（me / other）。第 2 層 pyannote は抽象化のみ（既定 none）
-  → align        第 1 段: タイムスタンプ＋テキストアンカーの決定的アライメント（区間対応表）
-  → integrate    第 2 段: 区間ごとの LLM 統合（単一系統なら素通し）
-  → generate     議事録 minutes/vN/（版は増えるだけ。上書きしない）
-  → export       プラグイン型エクスポート（markdown / html）
+  → diarize      話者分離 第 1 層 = トラック（me / other）、第 2 層 pyannote（既定 none）、第 4 層 = 外部トランスクリプトの話者名
+  → slides       キースライド抽出（画面トラックがあるときだけ。フレーム抽出 → pHash 重複除去 → preprocess/slides.json）
+  → align        第 1 段: タイムスタンプ＋テキストアンカーの決定的アライメント（own / ext 全系統の区間対応表）
+  → layer3       第 3 層 = 画面の話者ハイライト読解（vision 対応プロバイダが送信ポリシーで許可されたときだけ）
+  → integrate    第 2 段: 区間ごとの LLM 統合（単一系統なら素通し。merged/integrate_cache.json で影響区間だけ再実行）
+  → generate     議事録 minutes/vN/（版は増えるだけ。上書きしない。キースライド画像とブリーフを埋め込む）
+  → export       プラグイン型エクスポート（markdown / html / notion / gaia-library）
 ```
 
-各工程は `Bundle.run_stage(key, inputs, params, ...)` で実行され、`manifest.json` に入力ハッシュと生成パラメータを記録します。同じ入力＋同じパラメータなら再実行はスキップされ、「同じ入力 → 同じ版」が守られます。dev CLI の `regenerate` は align 以降だけを再実行します。MCP ツールの `regenerate` は、未処理・失敗した決定的工程（前処理・文字起こし・話者分離）と設定変更で params が変わった工程だけを冪等に実行してから align 以降を再実行します（`force` でも前処理・文字起こしは強制しません）。
+各工程は `Bundle.run_stage(key, inputs, params, ...)` で実行され、`manifest.json` に入力ハッシュと生成パラメータを記録します。同じ入力＋同じパラメータなら再実行はスキップされ、「同じ入力 → 同じ版」が守られます。dev CLI の `regenerate` は align → integrate → generate だけを再実行します。MCP ツールの `regenerate` は、未処理・失敗した上流工程（前処理・ブリーフ・文字起こし・話者分離・スライド抽出）と、設定変更や `register_context` で inputs / params が変わった工程だけを冪等に実行してから align 以降を再実行します（`force` でも上流工程は強制しません）。
 
 ### 実装状況
 
@@ -67,11 +70,11 @@ open dist/narumi.app     # メニューバーに 🕵️ が出る。「録画�
 | `narumi.app` によるサーバーの起動・停止（Terminal 不要） | 実装済み（repo モード＝uv とチェックアウトが必要 / bundled モード＝`--runtime` ビルドで自己完結） |
 | 自己完結 .app（ランタイム同梱）と Sparkle 自動更新 | 実装済み（`build-app.sh --runtime` / `release-app.sh`。Developer ID 署名・公証・実リリースは未実施） |
 | ffmpeg 分離 → Whisper → プレーン議事録（`narumi.pipeline`） | 実装済み（`fake` エンジンで E2E テスト済み。実エンジンは `-m real` の opt-in smoke） |
-| 外部トランスクリプト突合（Notion AI / Zoom / Meet） | 未実装（`register_context` は原文保存のみ） |
-| キースライド抽出（pHash）/ Vision 読解 / 第 3 層話者判定 | 未実装 |
-| gaia-library 照会によるコンテキスト注入 | 未実装 |
-| Notion / gaia-library エクスポーター | 未実装 |
-| アップグレード再生成（影響区間だけ第 2 段を再実行） | 未実装（拡張点のみ確保） |
+| 外部トランスクリプト突合（Notion AI / Zoom / Meet / Teams） | 実装済み（WebVTT / SRT / Zoom txt / プレーンの決定的パーサ。`register_context` が即時パースして `transcripts/ext-*` として突合に参加、話者名は第 4 層で実名解決。URL は参照保存のみで取得は未実装） |
+| キースライド抽出（pHash）/ Vision 読解 / 第 3 層話者判定 | 実装済み（pHash は pillow の自前実装、議事録へ画像埋め込みまで。第 3 層は vision 対応プロバイダが送信ポリシーで許可されたときだけ実行。実 vision プロバイダでの実機確認は未了） |
+| gaia-library 照会によるコンテキスト注入（会議ブリーフ v1） | 実装済み（`context/brief.json` を常時生成。語彙は transcribe / integrate、本文は minutes プロンプトに予算内で注入。gaia-library サーバー本体は別リポジトリで未実装 — `NARUMI_GAIA_URL` 設定時のみ照会し、テストはフェイクサーバーで通す） |
+| Notion / gaia-library エクスポーター | 実装済み（Notion は REST でページ作成＋Markdown→ブロック変換。スライド画像のアップロードは未対応で、ローカル画像の場所を callout で案内。gaia-library は `propose_update` の提案キューのみ＝絶対原則 5。実サーバーでの検証は未了） |
+| アップグレード再生成（影響区間だけ第 2 段を再実行） | 実装済み（`merged/integrate_cache.json` の区間フィンガープリントで、追加ソースが触れた区間だけ LLM を再実行） |
 
 ## コマンド
 

@@ -34,7 +34,12 @@ async def test_record_process_export_regenerate(client: PerCallClient, ctx: Serv
     assert "fake" in info["capabilities"]["transcription_engines"]
     assert "fake" in info["capabilities"]["diarization_engines"]
     assert {"none", "fake"} <= set(info["capabilities"]["llm_providers"])
-    assert info["capabilities"]["export_destinations"] == ["markdown", "html"]
+    assert info["capabilities"]["export_destinations"] == [
+        "markdown",
+        "html",
+        "notion",
+        "gaia-library",
+    ]
 
     # ---------------------------------------------------------------- record
     started = await call(
@@ -143,6 +148,30 @@ async def test_record_process_export_regenerate(client: PerCallClient, ctx: Serv
         (registered["context_id"], "stored", "メモ")
     ]
     assert bundle.abspath(f"context/sources/{registered['context_id']}.json").is_file()
+
+    # ------------------------------------------ register a VTT transcript (parsed) → regenerate
+    vtt = "WEBVTT\n\n1\n00:00:00.200 --> 00:00:00.900\n山田: 議題を確認します。\n"
+    parsed = await call(
+        client,
+        "register_context",
+        {
+            "meeting_id": meeting_id,
+            "source_type": "zoom_transcript",
+            "content": vtt,
+            "label": "Zoom 字幕",
+            "auto_regenerate": True,
+            "request_id": rid(),
+        },
+    )
+    assert parsed["status"] == "parsed"
+    ext_source = f"ext-{parsed['context_id']}"
+    job = await wait_job(ctx, parsed["job_id"], timeout=120.0)
+    assert job["status"] == "succeeded", job.get("error")
+    assert job["result"]["minutes_version"] == 3
+    transcript = await call(client, "get_transcript", {"meeting_id": meeting_id})
+    assert ext_source in transcript["available_sources"]
+    # layer 4: the VTT's speaker name resolves the anonymous system-side label
+    assert transcript["speaker_map"]["SPEAKER_00"]["name"] == "山田"
 
 
 async def test_stop_without_auto_process_then_regenerate(client: PerCallClient, ctx: ServerContext):

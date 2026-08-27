@@ -73,14 +73,21 @@ def transcribe_track(
     )
 
 
-def run_transcribe(bundle: Bundle, *, force: bool = False) -> list[StageResult]:
+def run_transcribe(
+    bundle: Bundle, *, force: bool = False, vocab_hints: list[str] | None = None
+) -> list[StageResult]:
     """Transcribe every ``preprocess/audio/<track>`` artifact with the configured engine.
 
     The engine is resolved from ``config.transcription_engine`` and checked against
     ``config.external_send_policy`` *before* any stage runs. Stage inputs are the preprocessed
     wav hashes; params are engine / version / model / language / vocab_hints / decode settings.
+
+    ``vocab_hints`` overrides ``config.vocab_hints`` (the pipeline passes the meeting brief's
+    merged hints — config first, then gaia glossary terms); ``None`` keeps the config's own
+    hints. The effective hints are part of the stage params, so changed hints re-transcribe.
     """
     config = bundle.manifest.config
+    hints = list(config.vocab_hints) if vocab_hints is None else list(vocab_hints)
     engine = get_engine(config.transcription_engine)
     check_send_policy(
         config.external_send_policy,
@@ -104,7 +111,7 @@ def run_transcribe(bundle: Bundle, *, force: bool = False) -> list[StageResult]:
                 wav,
                 track=track,
                 language=config.language,
-                vocab_hints=list(config.vocab_hints),
+                vocab_hints=list(hints),
             )
             bundle.write_json(output, transcript)
 
@@ -117,7 +124,7 @@ def run_transcribe(bundle: Bundle, *, force: bool = False) -> list[StageResult]:
                     "version": engine.version,
                     "model": engine.model,
                     "language": config.language,
-                    "vocab_hints": list(config.vocab_hints),
+                    "vocab_hints": list(hints),
                     "decode": dict(engine.params),
                 },
                 producer=(engine.name, engine.version),

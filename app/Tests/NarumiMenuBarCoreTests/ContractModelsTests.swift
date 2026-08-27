@@ -157,7 +157,7 @@ final class ContractModelsTests: XCTestCase {
 
     func testRegisterContext() throws {
         let responses = try decodeAll(RegisterContextResponse.self, tool: "register_context")
-        XCTAssertEqual(responses[0].status, "stored")
+        XCTAssertEqual(responses[0].status, "parsed")
         XCTAssertNil(responses[0].jobID)
         XCTAssertEqual(responses[1].jobID, "job-abcdef012345")
     }

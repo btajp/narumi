@@ -39,6 +39,7 @@ SYSTEM_SCRIPT = [
 FULL_RUN_KEYS = [
     "preprocess/audio/mic",
     "preprocess/audio/system",
+    "context/brief",
     "transcripts/own-mic",
     "transcripts/own-system",
     "diarization/layer1",
@@ -200,7 +201,7 @@ def test_full_pipeline_end_to_end(home: Path, tmp_path: Path) -> None:
     with pytest.raises(NotFoundError):
         export_meeting(bundle, "markdown", minutes_version=9)
     with pytest.raises(NotFoundError):
-        export_meeting(bundle, "notion")
+        export_meeting(bundle, "nope")
 
     # ---------------------------------------------------------------- catalog rebuild from disk
     with Catalog(home / "narumi.db") as catalog:
@@ -261,10 +262,10 @@ def test_refresh_runs_missing_and_changed_deterministic_stages(home: Path, tmp_p
     same = refresh_meeting(bundle, reason="noop")
     assert same.stages == [] and same.skipped == FULL_RUN_KEYS and same.minutes_version == 1
 
-    # force re-runs alignment onward only (never preprocess / transcribe / diarize)
+    # force re-runs alignment onward only (never preprocess / brief / transcribe / diarize)
     forced = refresh_meeting(bundle, force=True, reason="force")
     assert forced.stages == ["merged/alignment", "merged/merged", "minutes/v2"]
-    assert forced.skipped == FULL_RUN_KEYS[:6]
+    assert forced.skipped == FULL_RUN_KEYS[:7]
 
     # a diarization change made through the config is picked up: layer 2 is dropped, the
     # integration re-runs without it, a new version appears
@@ -277,11 +278,15 @@ def test_refresh_runs_missing_and_changed_deterministic_stages(home: Path, tmp_p
     assert changed.unresolved_speakers == ["other"]  # SPEAKER_00 came from the dropped layer 2
     assert "| 話者分離エンジン | tracks 1 |" in minutes_text(reopen(bundle), 3)
 
-    # vocab_hints reach transcription (and integration): the transcripts are redone
+    # vocab_hints reach the brief, transcription and integration: the transcripts are redone
     run_cli(home, "config", bundle.meeting_id, "--vocab-hint", "gaia-library")
     bundle = reopen(bundle)
     rehinted = refresh_meeting(bundle, reason="vocab")
-    assert rehinted.stages[:2] == ["transcripts/own-mic", "transcripts/own-system"]
+    assert rehinted.stages[:3] == [
+        "context/brief",
+        "transcripts/own-mic",
+        "transcripts/own-system",
+    ]
     # the fake engine ignores hints, so the transcript hashes (→ layer 1, alignment) are
     # unchanged; integration re-runs because vocab_hints are part of its params
     assert rehinted.skipped == [
@@ -290,7 +295,7 @@ def test_refresh_runs_missing_and_changed_deterministic_stages(home: Path, tmp_p
         "diarization/layer1",
         "merged/alignment",
     ]
-    assert rehinted.stages[2:] == ["merged/merged", "minutes/v4"]
+    assert rehinted.stages[3:] == ["merged/merged", "minutes/v4"]
     assert len(reopen(bundle).manifest.regenerations) == 5
 
     # a failed run leaves status failed and the exception propagates unchanged

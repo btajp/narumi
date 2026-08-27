@@ -468,7 +468,7 @@ async def test_register_context(client: PerCallClient, ctx: ServerContext, tmp_p
             "request_id": rid(),
         },
     )
-    assert result["status"] == "stored" and "job_id" not in result
+    assert result["status"] == "parsed" and "job_id" not in result
     context_id = result["context_id"]
     source_path = bundle.path / "context" / "sources" / f"{context_id}.json"
     stored = json.loads(source_path.read_text(encoding="utf-8"))
@@ -819,7 +819,7 @@ async def test_export_minutes(
     unknown = await call(
         client,
         "export_minutes",
-        {"meeting_id": MEETING_A, "destination": "notion", "request_id": rid()},
+        {"meeting_id": MEETING_A, "destination": "nope", "request_id": rid()},
     )
     assert unknown["error"]["code"] == "not_found"
     bad_version = await call(

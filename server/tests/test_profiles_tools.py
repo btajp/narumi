@@ -105,10 +105,10 @@ async def test_set_profile_validation(client: PerCallClient, ctx: ServerContext)
     destination = await call(
         client,
         "set_profile",
-        {"name": "bad", "export_destinations": ["notion"], "request_id": rid()},
+        {"name": "bad", "export_destinations": ["nope"], "request_id": rid()},
     )
     assert destination["error"]["code"] == "invalid_argument"
-    assert destination["error"]["details"]["unknown"] == ["notion"]
+    assert destination["error"]["details"]["unknown"] == ["nope"]
     # nothing was persisted by the rejected calls
     assert (await call(client, "get_profile", {"name": "bad"}))["error"]["code"] == "not_found"
 

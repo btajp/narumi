@@ -60,10 +60,10 @@ narumi/
 meetings/<meeting_id>/
 ├── manifest.json
 ├── tracks/         # 原録音・録画（破棄可）: screen.mp4 / mic.m4a / system.m4a / recorder.json
-├── preprocess/     # ffmpeg 派生物（破棄可・再生成可）: mic.16k.wav / system.16k.wav / frames/
+├── preprocess/     # ffmpeg 派生物（破棄可・再生成可）: mic.16k.wav / system.16k.wav / frames/ / slides.json / slides/
 ├── transcripts/    # 系統別: own-mic.json / own-system.json / ext-<context_id>.json
 ├── diarization/    # 層別: layer1-tracks.json / layer2-<engine>.json / layer3-screen.json / layer4-external.json
-├── merged/         # alignment.json（区間対応表）/ merged.json（統合済みセグメント。speaker_map を内包）/ speaker_map.json（merged.json の speaker_map の便宜コピー。artifact ではない）
+├── merged/         # alignment.json（区間対応表）/ merged.json（統合済みセグメント。speaker_map を内包）/ speaker_map.json（便宜コピー）/ integrate_cache.json（区間キャッシュ。どちらも artifact ではない）
 ├── minutes/        # v1/minutes.md, v1/meta.json, v1/slides/ … 版は増えるだけ（上書き禁止）
 ├── context/        # brief.json / sources/<context_id>.json（register_context で受けた原文）
 └── logs/           # ジョブログ
@@ -125,15 +125,20 @@ meetings/<meeting_id>/
 | 工程 | 決定的 / LLM | 出力 | Step |
 |---|---|---|---|
 | preprocess | 決定的（ffmpeg） | `preprocess/*.16k.wav`（key `preprocess/audio/{mic,system}`） | 2 |
-| transcribe | 決定的（固定パラメータ） | `transcripts/own-{mic,system}.json`（key `transcripts/own-{mic,system}`） | 2 |
+| brief | 決定的（gaia 照会は `NARUMI_GAIA_URL` 設定時のみ） | `context/brief.json`（key `context/brief`。inputs は設定サブセット＋登録済みコンテキスト原文のハッシュ） | 6 |
+| transcribe | 決定的（固定パラメータ） | `transcripts/own-{mic,system}.json`（key `transcripts/own-{mic,system}`。vocab_hints はブリーフのマージ済み語彙） | 2 |
+| context parse | 決定的（`register_context` 時に即時実行） | `transcripts/ext-<context_id>.json`（key `transcripts/ext-<context_id>`。WebVTT / SRT / Zoom txt / プレーン） | 3 |
 | diarize layer1 | 決定的 | `diarization/layer1-tracks.json`（key `diarization/layer1`） | 2 |
 | diarize layer2 | 決定的（pyannote 等） | `diarization/layer2-<engine>.json`（key は `diarization/layer2` 固定。エンジン名は params に記録し、エンジンを替えると同 key を差し替える） | 2（抽象化のみ・既定 none） |
-| align（第 1 段） | 決定的 | `merged/alignment.json`（key `merged/alignment`） | 2（単一系統でも動く一般形） |
-| integrate（第 2 段） | LLM（区間ごと。単一系統なら素通し） | `merged/merged.json`（key `merged/merged`。`merged/speaker_map.json` は便宜コピーで artifact ではない） | 2 |
-| generate | LLM or plain | `minutes/vN/`（key `minutes/vN`。入力・パラメータが同じなら新版を作らない） | 2 |
-| export | 決定的 | 出力先ごと | 2（markdown / html） |
+| diarize layer4 | 決定的 | `diarization/layer4-external.json`（key `diarization/layer4`。ext トランスクリプトの話者名。ext が無ければ artifact 無しでスキップ） | 3 |
+| slides | 決定的（ffmpeg フレーム抽出 + pHash） | `preprocess/slides.json` + `preprocess/slides/*.png`（key `preprocess/slides`。画面トラックが無ければ artifact 無しでスキップ） | 4 |
+| align（第 1 段） | 決定的 | `merged/alignment.json`（key `merged/alignment`。own / ext 全系統） | 2 |
+| diarize layer3 | LLM（vision） | `diarization/layer3-screen.json` + `layer3-names.json`（key `diarization/layer3`。vision 対応プロバイダが送信ポリシーで許可されたときだけ。違反は policy_violation、非対応は artifact 無しでスキップ） | 5 |
+| integrate（第 2 段） | LLM（区間ごと。単一系統なら素通し） | `merged/merged.json`（key `merged/merged`。`merged/speaker_map.json` は便宜コピー、`merged/integrate_cache.json` は区間キャッシュでどちらも artifact ではない） | 2 / 8 |
+| generate | LLM or plain | `minutes/vN/`（key `minutes/vN`。入力・パラメータが同じなら新版を作らない。キースライド画像を `minutes/vN/slides/` に複製して埋め込み、ブリーフをプロンプトに注入） | 2 / 4 / 6 |
+| export | 決定的 | 出力先ごと | 2（markdown / html）/ 6（notion / gaia-library） |
 
-オーケストレーターは `narumi.pipeline`（`process_meeting` / `regenerate_meeting` / `refresh_meeting` / `export_meeting`）。`process` は上表の順に全工程を実行し、`regenerate` は align → integrate → generate だけを呼ぶ（preprocess / transcribe / diarize は呼ばない。文字起こしの無い会議への `regenerate` は `not_found`）。MCP ツール `regenerate` が呼ぶ `refresh_meeting` は、決定的工程を冪等に通した上で（未実行・失敗済み・`set_meeting_config` で params が変わった工程だけが実際に走る。`force` でも強制しない）align 以降を再実行する。いずれも `manifest.status` を `processing` → `ready` / `failed` に更新し、`regenerate` / `refresh` は `manifest.regenerations` に記録を追記する。カタログ更新は pipeline の責務ではなく、server ハンドラ / dev CLI が完了後に行う。`diarization_engine` を `none` に戻したときは `diarization/layer2` の記録とファイルを取り除く（integrate の inputs が変わり再統合される）。
+オーケストレーターは `narumi.pipeline`（`process_meeting` / `regenerate_meeting` / `refresh_meeting` / `export_meeting`）。`process` は preprocess → brief → transcribe → diarize（layer1/2/4）→ slides → align → layer3 → integrate → generate の順に全工程を実行し、`regenerate` は align → integrate → generate だけを呼ぶ（それ以外は呼ばない。文字起こしの無い会議への `regenerate` は `not_found`）。MCP ツール `regenerate` が呼ぶ `refresh_meeting` は、上流工程を冪等に通した上で（未実行・失敗済み・`set_meeting_config` や `register_context` で inputs / params が変わった工程だけが実際に走る。`force` でも強制しない）align 以降を再実行する。いずれも `manifest.status` を `processing` → `ready` / `failed` に更新し、`regenerate` / `refresh` は `manifest.regenerations` に記録を追記する。カタログ更新は pipeline の責務ではなく、server ハンドラ / dev CLI が完了後に行う。`diarization_engine` を `none` に戻したときは `diarization/layer2` の記録とファイルを取り除く（integrate の inputs が変わり再統合される）。
 
 ## 5. エンジン / プロバイダ / エクスポーターの抽象
 
@@ -144,7 +149,7 @@ meetings/<meeting_id>/
   - `local_only` → data_destination == local のみ
   - `subscription_ok` → local ＋ cost_class == subscription
   - `api_ok` → すべて
-- `Exporter`: `name / describe() / export(bundle, minutes_version, options) -> ExportResult{destination, ref, at}`。レジストリ名: `markdown` / `html`（Notion / gaia-library は Step 6 以降）。ファイル系の `options` は `output_path`（絶対パス）と `overwrite`（既定 false: 既存ファイル・`<stem>-slides` は上書きしない。既定出力先 `<NARUMI_HOME>/exports/` は narumi 管理なので置き換える）。server は `options_schema` で検証してから呼ぶ
+- `Exporter`: `name / describe() / export(bundle, minutes_version, options) -> ExportResult{destination, ref, at}`。レジストリ名: `markdown` / `html` / `notion`（ページ作成＋Markdown→ブロック変換。スライド画像のアップロードは未対応でローカル参照の callout を置く）/ `gaia-library`（`propose_update` の提案キューのみ）。ファイル系の `options` は `output_path`（絶対パス）と `overwrite`（既定 false: 既存ファイル・`<stem>-slides` は上書きしない。既定出力先 `<NARUMI_HOME>/exports/` は narumi 管理なので置き換える）。server は `options_schema` で検証してから呼ぶ
 
 ## 6. 契約（`contracts/`）
 
@@ -195,9 +200,13 @@ segments_fts(meeting_id, source_id, segment_id, start, end, speaker, text)  -- F
 - サーバーテスト: `mcp` の in-memory クライアントで `list_tools / call_tool`。録画は Python 製 fake recorder（`tests/fake_recorder.py`）を `NARUMI_RECORDER` に指定
 - 実エンジン smoke（`-m real`）は opt-in
 
-## 11. 今回の範囲外（拡張点だけ確保）
+## 11. 範囲外として残っているもの（拡張点は確保済み）
 
-- 外部トランスクリプトのパーサ（Notion AI / Zoom / Meet）と多系統アライメント → `register_context` は原文を保存し `status: stored` に留める
-- キースライド抽出（pHash）・Vision 読解・第 3 層話者判定
-- Notion / gaia-library エクスポーター、会議ブリーフの照会（v1 のコンテキスト注入）
+Step 3〜8（外部トランスクリプト突合・キースライド・第 3/4 層話者判定・会議ブリーフ v1・Notion / gaia-library エクスポーター・影響区間だけの再統合）は実装済み。残りは:
+
+- `url` コンテキストの取得: `register_context` は URL を参照として保存するだけ（`status: stored`）。取得は送信ポリシーを通すフェッチ工程として別途設計する
+- gaia-library サーバー本体（別リポジトリ・未実装）: クライアント（`narumi.gaia`）・ブリーフ照会・エクスポーターは実装済みでフェイクサーバー検証のみ。実契約が固まったらツール名・キー名を突き合わせて締める
+- Notion エクスポートのスライド画像アップロード（多段の file upload フロー。現状はローカル画像の場所を callout で案内）
+- コンテキスト注入 v2（tool_use 可プロバイダ限定のエージェント型プル。v1 のブリーフに追記保存して冪等性を回復する形）
+- 実 vision プロバイダでの layer3 実機確認（テストはフェイク vision プロバイダ）
 - human / agent ロールの API キー

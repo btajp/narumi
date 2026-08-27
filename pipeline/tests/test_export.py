@@ -53,18 +53,19 @@ def bundle_with_minutes(tmp_path: Path, *, slides: bool = False) -> Bundle:
 
 
 def test_registry():
-    assert list(EXPORTERS) == ["markdown", "html"]
+    assert list(EXPORTERS) == ["markdown", "html", "notion", "gaia-library"]
     assert isinstance(get_exporter("markdown"), MarkdownExporter)
     assert isinstance(get_exporter("html"), HtmlExporter)
     assert all(isinstance(e, Exporter) for e in EXPORTERS.values())
     with pytest.raises(NotFoundError):
-        get_exporter("notion")
+        get_exporter("nope")
     listed = list_exporters()
-    assert [e["name"] for e in listed] == ["markdown", "html"]
+    assert [e["name"] for e in listed] == ["markdown", "html", "notion", "gaia-library"]
     for entry in listed:
         assert entry["description"]
         schema = entry["options_schema"]
-        assert set(schema["properties"]) == {"output_path", "overwrite"}
+        if entry["name"] in ("markdown", "html"):
+            assert set(schema["properties"]) == {"output_path", "overwrite"}
         assert schema["additionalProperties"] is False
         Draft202012Validator.check_schema(schema)
 

@@ -8,15 +8,24 @@ the source of truth (AGENTS.md 絶対原則 1) and callers (server handlers, dev
 Stage order and artifact keys (``Bundle.run_stage`` keys, one per deterministic output):
 
 1. ``preprocess`` → ``preprocess/audio/{mic,system}``
-2. ``transcribe`` → ``transcripts/own-{mic,system}``
-3. ``diarize``    → ``diarization/layer1`` (+ ``diarization/layer2`` unless ``none``)
-4. ``align``      → ``merged/alignment``
-5. ``integrate``  → ``merged/merged`` (``merged/speaker_map.json`` is a convenience copy)
-6. ``generate``   → ``minutes/v<N>`` (append-only; skipped when nothing changed)
+2. ``brief``      → ``context/brief`` (meeting brief; gaia-library only when ``NARUMI_GAIA_URL``
+   is set — its merged vocab_hints feed transcription and the LLM stages)
+3. ``transcribe`` → ``transcripts/own-{mic,system}``
+4. ``diarize``    → ``diarization/layer1`` (+ ``diarization/layer2`` unless ``none``,
+   + ``diarization/layer4`` when ``transcripts/ext-*`` exist)
+5. ``slides``     → ``preprocess/slides`` (screen track only; skipped without one)
+6. ``align``      → ``merged/alignment`` (all ``transcripts/*``, own and ext)
+7. ``layer3``     → ``diarization/layer3`` (screen vision; only a vision-capable provider the
+   send policy allows — a disallowed one raises, 絶対原則 4)
+8. ``integrate``  → ``merged/merged`` (``merged/speaker_map.json`` is a convenience copy;
+   incremental via ``merged/integrate_cache.json``, consumes layer-3/-4 names)
+9. ``generate``   → ``minutes/v<N>`` (append-only; embeds key slides + the brief)
 
-``regenerate_meeting`` runs steps 4-6 only and appends a :class:`RegenerationRecord`.
-``refresh_meeting`` (what the MCP ``regenerate`` tool runs) first brings steps 1-3 up to date
-idempotently — they only run when they never ran or their params changed — and then runs 4-6.
+``regenerate_meeting`` runs align → integrate → generate only and appends a
+:class:`RegenerationRecord`. ``refresh_meeting`` (what the MCP ``regenerate`` tool runs) first
+brings every other stage up to date idempotently — they only run when they never ran or their
+inputs / params changed (a newly registered external transcript re-runs layer 4 and alignment
+automatically) — and then runs align → integrate → generate.
 """
 
 from __future__ import annotations
@@ -26,37 +35,89 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from narumi.align import run_align, transcript_artifact_keys
+from narumi.brief import load_brief, run_brief
 from narumi.bundle import Bundle, ExportRecord, RegenerationRecord, StageResult, utc_now_iso
-from narumi.diarize import run_diarize
+from narumi.diarize import run_diarize, run_layer3, run_layer4
 from narumi.errors import CancelledError, NotFoundError
 from narumi.export import get_exporter
+from narumi.gaia import GaiaClient
 from narumi.generate import run_generate, run_integrate
 from narumi.models import MinutesMeta
 from narumi.preprocess import run_preprocess
+from narumi.slides import run_slides
 from narumi.transcribe import run_transcribe
 
 ProgressFn = Callable[[str, float], None]
 StepFn = Callable[[Bundle, bool], StageResult | Sequence[StageResult]]
 
 STAGE_PREPROCESS = "preprocess"
+STAGE_BRIEF = "brief"
 STAGE_TRANSCRIBE = "transcribe"
 STAGE_DIARIZE = "diarize"
+STAGE_SLIDES = "slides"
 STAGE_ALIGN = "align"
+STAGE_LAYER3 = "layer3"
 STAGE_INTEGRATE = "integrate"
 STAGE_GENERATE = "generate"
 
+
+def _step_brief(bundle: Bundle, force: bool) -> StageResult:
+    """Build the meeting brief; gaia-library is consulted only when ``NARUMI_GAIA_URL`` is set.
+
+    ``GaiaClient.from_env()`` returns ``None`` without the env var (任意依存: local-only brief);
+    with it set, an unreachable gaia-library raises instead of silently thinning the brief.
+    """
+    return run_brief(bundle, GaiaClient.from_env(), force=force)
+
+
+def _step_transcribe(bundle: Bundle, force: bool) -> Sequence[StageResult]:
+    """Transcribe with the brief's merged vocab hints (config + gaia glossary)."""
+    brief = load_brief(bundle)
+    hints = None if brief is None else list(brief.vocab_hints)
+    return run_transcribe(bundle, force=force, vocab_hints=hints)
+
+
+def _step_diarize(bundle: Bundle, force: bool) -> Sequence[StageResult]:
+    """Layers 1-2 from the own tracks, layer 4 from the parsed external transcripts."""
+    results = list(run_diarize(bundle, force=force))
+    layer4 = run_layer4(bundle, force=force)
+    if layer4 is not None:
+        results.append(layer4)
+    return results
+
+
+def _step_slides(bundle: Bundle, force: bool) -> Sequence[StageResult]:
+    result = run_slides(bundle, force=force)
+    return [] if result is None else [result]
+
+
+def _step_layer3(bundle: Bundle, force: bool) -> Sequence[StageResult]:
+    result = run_layer3(bundle, force=force)
+    return [] if result is None else [result]
+
+
 PROCESS_STEPS: tuple[tuple[str, StepFn], ...] = (
     (STAGE_PREPROCESS, lambda bundle, force: run_preprocess(bundle, force=force)),
-    (STAGE_TRANSCRIBE, lambda bundle, force: run_transcribe(bundle, force=force)),
-    (STAGE_DIARIZE, lambda bundle, force: run_diarize(bundle, force=force)),
+    (STAGE_BRIEF, _step_brief),
+    (STAGE_TRANSCRIBE, _step_transcribe),
+    (STAGE_DIARIZE, _step_diarize),
+    (STAGE_SLIDES, _step_slides),
     (STAGE_ALIGN, lambda bundle, force: run_align(bundle, force=force)),
+    (STAGE_LAYER3, _step_layer3),
     (STAGE_INTEGRATE, lambda bundle, force: run_integrate(bundle, force=force)),
     (STAGE_GENERATE, lambda bundle, force: run_generate(bundle, force=force)),
 )
-"""Full run in order. Every step is idempotent through ``Bundle.run_stage``."""
+"""Full run in order. Every step is idempotent through ``Bundle.run_stage``; ``slides`` and
+``layer3`` may also skip with no artifact (no screen track / no vision provider)."""
 
-REGENERATE_STEPS: tuple[tuple[str, StepFn], ...] = PROCESS_STEPS[3:]
-"""``align`` → ``integrate`` → ``generate``: never preprocess / transcribe / diarize again."""
+_REGENERATE_NAMES = (STAGE_ALIGN, STAGE_INTEGRATE, STAGE_GENERATE)
+
+REGENERATE_STEPS: tuple[tuple[str, StepFn], ...] = tuple(
+    step for step in PROCESS_STEPS if step[0] in _REGENERATE_NAMES
+)
+"""``align`` → ``integrate`` → ``generate``: never preprocess / brief / transcribe / diarize /
+slides / layer3 again (their outputs are reused as-is; ``refresh_meeting`` brings them up to
+date first when needed)."""
 
 STAGE_ORDER: tuple[str, ...] = tuple(name for name, _ in PROCESS_STEPS)
 
@@ -87,7 +148,8 @@ def process_meeting(
     force: bool = False,
     progress: ProgressFn | None = None,
 ) -> ProcessResult:
-    """Full run: preprocess → transcribe → diarize → align → integrate → generate.
+    """Full run: preprocess → brief → transcribe → diarize → slides → align → layer3 →
+    integrate → generate.
 
     Sets ``manifest.status`` to ``processing`` first, ``ready`` on success and ``failed`` when
     any stage raises (the exception is re-raised unchanged; nothing is swallowed).
@@ -128,12 +190,14 @@ def refresh_meeting(
 ) -> ProcessResult:
     """Bring the minutes up to date with the bundle and its config (the MCP ``regenerate`` tool).
 
-    The deterministic stages (preprocess / transcribe / diarize) run through the same idempotent
-    ``run_stage`` check as :func:`process_meeting`: they only do work when they never ran (a
-    meeting stopped with ``auto_process=false``, a process job that failed) or when their params
-    changed (``set_meeting_config``: transcription_engine / diarization_engine / language /
-    vocab_hints). They are never forced. Alignment → integrate → generate then run, forced when
-    ``force`` is true. A :class:`RegenerationRecord` is appended like in
+    The upstream stages (preprocess / brief / transcribe / diarize incl. layer 4 / slides /
+    layer 3) run through the same idempotent ``run_stage`` check as :func:`process_meeting`:
+    they only do work when they never ran (a meeting stopped with ``auto_process=false``, a
+    process job that failed), when their params changed (``set_meeting_config``:
+    transcription_engine / diarization_engine / language / vocab_hints) or when their inputs
+    changed (``register_context``: a newly parsed ``transcripts/ext-*`` re-runs layer 4 and
+    alignment picks it up). They are never forced. Alignment → integrate → generate then run,
+    forced when ``force`` is true. A :class:`RegenerationRecord` is appended like in
     :func:`regenerate_meeting`.
     """
     forced = {name for name, _ in REGENERATE_STEPS} if force else set()
