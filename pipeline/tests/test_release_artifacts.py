@@ -436,3 +436,273 @@ def test_json_metadata_is_a_dictionary_and_never_overwritten(tmp_path: Path) -> 
     path.write_text("[]")
     with pytest.raises(release.ReleaseError):
         release.load_json(path)
+
+
+class _IntegerSubclass(int):
+    pass
+
+
+def _sealed_assets(version: str, schema: int) -> dict:
+    names = [f"narumi-{version}.zip", "appcast.xml"]
+    if schema == 2:
+        names.append(f"narumi-{version}.dmg")
+    return {
+        name: {"sha256": hashlib.sha256(name.encode()).hexdigest(), "size": 1} for name in names
+    }
+
+
+@pytest.mark.parametrize(
+    ("version", "schema"),
+    [
+        ("0.0.0", 1),
+        ("0.0.99", 1),
+        ("0.1.0", 1),
+        ("0.1.3", 1),
+        ("0.1.4", 2),
+        ("0.1.10", 2),
+        ("0.2.0", 2),
+        ("1.0.0", 2),
+    ],
+)
+def test_release_schema_and_asset_names_follow_the_version_boundary(
+    version: str, schema: int
+) -> None:
+    expected = (f"narumi-{version}.zip", "appcast.xml")
+    assert release.release_schema(version) == schema
+    assert release.validate_release_schema(version, schema) is None
+    assert release.asset_names(version) == expected
+    assert release.installer_name(version) == f"narumi-{version}.dmg"
+    if schema == 2:
+        expected += (f"narumi-{version}.dmg",)
+    assert release.release_asset_names(version) == expected
+    assert release.validate_sealed_assets(version, schema, _sealed_assets(version, schema)) is None
+
+
+@pytest.mark.parametrize(("version", "schema"), [("0.1.3", 1), ("0.1.4", 2)])
+@pytest.mark.parametrize(
+    "invalid",
+    [True, False, None, "1", "2", 1.0, 2.0, -1, 0, 3, _IntegerSubclass(1), _IntegerSubclass(2)],
+)
+def test_release_schema_rejects_unknown_values_and_integer_impostors(
+    version: str, schema: int, invalid: object
+) -> None:
+    with pytest.raises(release.ReleaseError):
+        release.validate_release_schema(version, invalid)
+    with pytest.raises(release.ReleaseError):
+        release.validate_sealed_assets(version, invalid, _sealed_assets(version, schema))
+
+
+@pytest.mark.parametrize(
+    ("version", "schema"), [("0.1.3", 2), ("0.1.4", 1), ("0.1.10", 1), ("1.0.0", 1)]
+)
+def test_release_schema_cannot_be_upgraded_or_downgraded_independently(
+    version: str, schema: int
+) -> None:
+    with pytest.raises(release.ReleaseError):
+        release.validate_release_schema(version, schema)
+    with pytest.raises(release.ReleaseError):
+        release.validate_sealed_assets(version, schema, _sealed_assets(version, schema))
+
+
+@pytest.mark.parametrize(
+    "version", ["v0.1.4", "0.1", "0.1.04", "0.1.4-beta.1", "0.1.4+build", "0.1.4\n", "０.1.4"]
+)
+def test_new_release_helpers_preserve_strict_stable_version_validation(
+    tmp_path: Path, version: str
+) -> None:
+    calls = [
+        lambda: release.release_schema(version),
+        lambda: release.validate_release_schema(version, 2),
+        lambda: release.installer_name(version),
+        lambda: release.release_asset_names(version),
+        lambda: release.asset_path(tmp_path, version, "appcast.xml"),
+        lambda: release.validate_installer(tmp_path, version),
+        lambda: release.validate_sealed_assets(version, 2, {}),
+    ]
+    for call in calls:
+        with pytest.raises(release.ReleaseError, match="semver"):
+            call()
+
+
+@pytest.mark.parametrize(("version", "schema"), [("0.1.3", 1), ("0.1.4", 2)])
+def test_asset_paths_route_without_creating_files(
+    tmp_path: Path, version: str, schema: int
+) -> None:
+    directory = tmp_path / "not-created"
+    for name in _sealed_assets(version, schema):
+        folder = "installer" if name.endswith(".dmg") else "feed"
+        assert release.asset_path(directory, version, name) == directory / folder / name
+    assert not directory.exists()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "../appcast.xml",
+        "/tmp/appcast.xml",
+        "feed/appcast.xml",
+        "installer/narumi-0.1.4.dmg",
+        "..\\appcast.xml",
+        ".",
+        "",
+        "APPCAST.XML",
+        "narumi-0.1.5.zip",
+        "narumi-0.1.5.dmg",
+        "narumi-0.1.4.zip?download=1",
+        None,
+        1,
+    ],
+)
+def test_asset_paths_reject_names_outside_the_release(tmp_path: Path, name: object) -> None:
+    with pytest.raises(release.ReleaseError):
+        release.asset_path(tmp_path, "0.1.4", name)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_legacy_release_has_no_installer_path(tmp_path: Path) -> None:
+    with pytest.raises(release.ReleaseError):
+        release.asset_path(tmp_path, "0.1.3", "narumi-0.1.3.dmg")
+
+
+@pytest.fixture
+def installer(tmp_path: Path) -> Path:
+    directory = tmp_path / "installer"
+    directory.mkdir()
+    (directory / "narumi-0.1.4.dmg").write_bytes(b"synthetic DMG content")
+    return directory
+
+
+def test_installer_reports_exact_hash_and_size_without_modification(installer: Path) -> None:
+    path = installer / "narumi-0.1.4.dmg"
+    original = path.read_bytes()
+    assert release.validate_installer(installer, "0.1.4") == {
+        "sha256": hashlib.sha256(original).hexdigest(),
+        "size": len(original),
+    }
+    assert path.read_bytes() == original
+    assert list(installer.iterdir()) == [path]
+
+
+@pytest.mark.parametrize("version", ["0.0.99", "0.1.3"])
+def test_legacy_release_cannot_validate_an_installer(installer: Path, version: str) -> None:
+    (installer / "narumi-0.1.4.dmg").rename(installer / f"narumi-{version}.dmg")
+    with pytest.raises(release.ReleaseError):
+        release.validate_installer(installer, version)
+
+
+@pytest.mark.parametrize("kind", ["missing", "file", "symlink"])
+def test_installer_requires_a_real_directory(installer: Path, kind: str) -> None:
+    path = installer.parent / "invalid-installer"
+    if kind == "file":
+        path.write_bytes(b"not a directory")
+    elif kind == "symlink":
+        path.symlink_to(installer, target_is_directory=True)
+    with pytest.raises(release.ReleaseError):
+        release.validate_installer(path, "0.1.4")
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "missing",
+        "empty",
+        "directory",
+        "symlink",
+        "dangling-symlink",
+        "wrong-version",
+        "extra-file",
+        "extra-directory",
+    ],
+)
+def test_installer_requires_exactly_one_nonempty_regular_dmg(installer: Path, kind: str) -> None:
+    path = installer / "narumi-0.1.4.dmg"
+    if kind.startswith("extra-"):
+        extra = installer / "unexpected"
+        extra.mkdir() if kind == "extra-directory" else extra.write_bytes(b"extra")
+    elif kind == "wrong-version":
+        path.rename(installer / "narumi-0.1.5.dmg")
+    else:
+        original = installer.parent / "original.dmg"
+        path.rename(original)
+        if kind == "empty":
+            path.write_bytes(b"")
+        elif kind == "directory":
+            path.mkdir()
+        elif kind in ("symlink", "dangling-symlink"):
+            path.symlink_to(original if kind == "symlink" else installer.parent / "missing.dmg")
+    with pytest.raises(release.ReleaseError):
+        release.validate_installer(installer, "0.1.4")
+
+
+def test_dmg_remains_forbidden_in_the_two_file_update_feed(artifacts: Path) -> None:
+    (artifacts / f"narumi-{VERSION}.dmg").write_bytes(b"synthetic DMG content")
+    with pytest.raises(release.ReleaseError, match="ZIP と appcast"):
+        release.validate_artifacts(artifacts, VERSION, BUILD, KEY)
+
+
+@pytest.mark.parametrize(("version", "schema"), [("0.1.3", 1), ("0.1.4", 2)])
+@pytest.mark.parametrize(
+    "kind", ["missing-zip", "missing-feed", "dmg-schema", "extra", "wrong-version"]
+)
+def test_sealed_asset_keys_must_match_the_release_exactly(
+    version: str, schema: int, kind: str
+) -> None:
+    assets = _sealed_assets(version, schema)
+    if kind == "missing-zip":
+        del assets[f"narumi-{version}.zip"]
+    elif kind == "missing-feed":
+        del assets["appcast.xml"]
+    elif kind == "dmg-schema":
+        if schema == 1:
+            assets[f"narumi-{version}.dmg"] = assets["appcast.xml"].copy()
+        else:
+            del assets[f"narumi-{version}.dmg"]
+    elif kind == "extra":
+        assets["unexpected.json"] = assets["appcast.xml"].copy()
+    else:
+        assets["narumi-9.9.9.zip"] = assets.pop(f"narumi-{version}.zip")
+    with pytest.raises(release.ReleaseError):
+        release.validate_sealed_assets(version, schema, assets)
+
+
+@pytest.mark.parametrize("assets", [None, [], "assets", 1, {}])
+def test_sealed_assets_require_a_complete_dictionary(assets: object) -> None:
+    with pytest.raises(release.ReleaseError):
+        release.validate_sealed_assets("0.1.4", 2, assets)
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        None,
+        [],
+        {},
+        {"size": 1},
+        {"sha256": "a" * 64},
+        {"sha256": "a" * 64, "size": 1, "etag": "unexpected"},
+    ],
+)
+def test_sealed_metadata_requires_exactly_hash_and_size(metadata: object) -> None:
+    assets = _sealed_assets("0.1.4", 2)
+    assets["narumi-0.1.4.dmg"] = metadata
+    with pytest.raises(release.ReleaseError):
+        release.validate_sealed_assets("0.1.4", 2, assets)
+
+
+@pytest.mark.parametrize(
+    "digest",
+    [None, 1, b"a" * 64, "", "a" * 63, "a" * 65, "A" * 64, "g" * 64, "a" * 64 + "\n", "ａ" * 64],
+)
+def test_sealed_hash_requires_exact_lowercase_hex(digest: object) -> None:
+    assets = _sealed_assets("0.1.4", 2)
+    assets["appcast.xml"]["sha256"] = digest
+    with pytest.raises(release.ReleaseError):
+        release.validate_sealed_assets("0.1.4", 2, assets)
+
+
+@pytest.mark.parametrize("size", [None, True, False, 0, -1, 1.0, "1", _IntegerSubclass(1)])
+def test_sealed_size_requires_a_positive_builtin_integer(size: object) -> None:
+    assets = _sealed_assets("0.1.4", 2)
+    assets["narumi-0.1.4.zip"]["size"] = size
+    with pytest.raises(release.ReleaseError):
+        release.validate_sealed_assets("0.1.4", 2, assets)

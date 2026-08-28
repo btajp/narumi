@@ -106,6 +106,7 @@ def test_command_failure_is_redacted(verifier, monkeypatch):
 def remote(verifier, monkeypatch, tmp_path):
     payloads = {"narumi-0.1.1.zip": b"fake-zip-content", "appcast.xml": b"fake-appcast-content"}
     sealed = {
+        "schema_version": 1,
         "version": "0.1.1",
         "build": 25,
         "commit": "1" * 40,
@@ -463,3 +464,201 @@ def test_published_selection_uses_the_tag_endpoint(verifier, monkeypatch):
     monkeypatch.setattr(verifier, "api", fake_api)
     assert verifier.release_for_verification("0.1.1", published=True)["draft"] is False
     assert endpoints == ["releases/tags/v0.1.1"]
+
+
+@pytest.fixture
+def modern_remote(verifier, monkeypatch, remote, tmp_path):
+    release, sealed, downloaded, _ = remote
+    payloads = {
+        "narumi-0.1.4.zip": b"fake-modern-zip",
+        "appcast.xml": b"fake-modern-feed",
+        "narumi-0.1.4.dmg": b"fake-modern-installer",
+    }
+    sealed.update(
+        schema_version=2,
+        version="0.1.4",
+        assets={
+            name: {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+            for name, data in payloads.items()
+        },
+        installer={
+            "notarization": {"id": "1" * 8 + "-1111-1111-1111-" + "1" * 12, "status": "Accepted"},
+            "app_inventory_sha256": "a" * 64,
+        },
+    )
+    release.update(
+        tag_name="v0.1.4",
+        html_url=f"https://github.com/btajp/narumi/releases/tag/{DRAFT_TAG}",
+        assets=[
+            {
+                "id": index,
+                "name": name,
+                "size": len(data),
+                "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
+                "state": "uploaded",
+                "browser_download_url": (
+                    f"https://github.com/btajp/narumi/releases/download/{DRAFT_TAG}/{name}"
+                ),
+            }
+            for index, (name, data) in enumerate(payloads.items(), 1)
+        ],
+    )
+    checked = []
+
+    def fake_run(*command, output=None):
+        assert command[:2] == ("gh", "api") and output is not None
+        identifier = int(command[2].rsplit("/", 1)[-1])
+        assert command[2] == f"repos/btajp/narumi/releases/assets/{identifier}"
+        output.write_bytes(list(payloads.values())[identifier - 1])
+        downloaded.append(output.name)
+        return b""
+
+    def fake_installer(root, directory, artifacts, version, expected):
+        assert version == "0.1.4"
+        assert {p.name for p in (artifacts / "feed").iterdir()} == {
+            "narumi-0.1.4.zip",
+            "appcast.xml",
+        }
+        dmg = artifacts / "installer/narumi-0.1.4.dmg"
+        assert expected == sealed["assets"][dmg.name]
+        assert dmg.stat().st_size == expected["size"]
+        assert hashlib.sha256(dmg.read_bytes()).hexdigest() == expected["sha256"]
+        checked.append("installer")
+        return {**expected, "app_inventory_sha256": "a" * 64}
+
+    monkeypatch.setattr(verifier, "run", fake_run)
+    monkeypatch.setattr(verifier, "verify_installer", fake_installer)
+
+    def invoke():
+        return verifier.verify_remote(tmp_path, tmp_path, "0.1.4", tmp_path, "jp.btajp.narumi")
+
+    return release, sealed, downloaded, checked, invoke
+
+
+def test_modern_draft_downloads_separate_installer_after_exact_metadata_checks(modern_remote):
+    _, _, downloaded, checked, invoke = modern_remote
+    assert invoke()["verified"] is True
+    assert downloaded == ["narumi-0.1.4.zip", "appcast.xml", "narumi-0.1.4.dmg"]
+    assert checked == ["installer"]
+
+
+@pytest.mark.parametrize("change", ["missing", "duplicate", "renamed", "extra"])
+def test_modern_remote_requires_exact_three_asset_names(verifier, modern_remote, change):
+    release, _, downloaded, checked, invoke = modern_remote
+    if change == "missing":
+        release["assets"].pop()
+    elif change == "duplicate":
+        release["assets"][-1] = dict(release["assets"][0])
+    elif change == "renamed":
+        release["assets"][-1]["name"] = "other.dmg"
+    else:
+        release["assets"].append({"name": "private-log.txt"})
+    with pytest.raises(verifier.ReleaseError):
+        invoke()
+    assert downloaded == [] and checked == []
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("state", "starter"),
+        ("size", 1),
+        ("id", 0),
+        ("id", "3"),
+        ("id", 2),
+        ("digest", "sha256:" + "0" * 64),
+        ("browser_download_url", "https://github.com/other/narumi/releases/download/v0.1.4/a.dmg"),
+        (
+            "browser_download_url",
+            "https://github.com/btajp/narumi/releases/download/untagged-"
+            + "b2" * 10
+            + "/narumi-0.1.4.dmg",
+        ),
+        (
+            "browser_download_url",
+            f"https://github.com/btajp/narumi/releases/download/{DRAFT_TAG}/appcast.xml",
+        ),
+    ],
+)
+def test_modern_dmg_metadata_or_bytes_fail_before_mount(verifier, modern_remote, field, value):
+    release, _, _, checked, invoke = modern_remote
+    release["assets"][-1][field] = value
+    with pytest.raises(verifier.ReleaseError):
+        invoke()
+    assert checked == []
+
+
+@pytest.mark.parametrize("schema", [1, True, 2.0, "2", None, 3])
+def test_modern_draft_rejects_schema_downgrade_or_invalid_type(verifier, modern_remote, schema):
+    _, sealed, downloaded, checked, invoke = modern_remote
+    sealed["schema_version"] = schema
+    with pytest.raises(verifier.ReleaseError, match="schema"):
+        invoke()
+    assert downloaded == [] and checked == []
+
+
+def test_legacy_rejects_dmg_even_if_sealed_and_remote_agree(verifier, remote):
+    release, sealed, downloaded, invoke = remote
+    sealed["assets"]["narumi-0.1.1.dmg"] = {"sha256": "a" * 64, "size": 10}
+    release["assets"].append({"name": "narumi-0.1.1.dmg"})
+    with pytest.raises(verifier.ReleaseError, match="assets"):
+        invoke()
+    assert downloaded == []
+
+
+def test_downloaded_dmg_requires_same_inventory_fingerprint(verifier, monkeypatch, modern_remote):
+    _, sealed, downloaded, _, invoke = modern_remote
+    monkeypatch.setattr(
+        verifier,
+        "verify_installer",
+        lambda *args: {**sealed["assets"]["narumi-0.1.4.dmg"], "app_inventory_sha256": "b" * 64},
+    )
+    with pytest.raises(verifier.ReleaseError, match="inventory"):
+        invoke()
+    assert len(downloaded) == 3
+
+
+def test_only_installer_helper_has_no_outer_kill_deadline(verifier, monkeypatch, tmp_path):
+    expected = {"sha256": "a" * 64, "size": 10}
+    payload = json.dumps({**expected, "app_inventory_sha256": "b" * 64}).encode()
+    commands = []
+
+    def fake_process(command, **kwargs):
+        commands.append((command, kwargs["timeout"]))
+        return verifier.subprocess.CompletedProcess(command, 0, stdout=payload)
+
+    monkeypatch.setattr(verifier.subprocess, "run", fake_process)
+    verifier.run("gh", "api", "fixture")
+    verifier.run("gh", "api", "fixture", output=tmp_path / "download")
+    assert verifier.verify_installer(tmp_path, tmp_path, tmp_path, "0.1.4", expected)["size"] == 10
+    assert [timeout for _, timeout in commands] == [300, 300, None]
+    assert commands[-1][0][1] == str(tmp_path / "scripts/release_dmg.py")
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("sha256", "c" * 64), ("size", "10"), ("size", True), ("app_inventory_sha256", "invalid")],
+)
+def test_installer_helper_result_must_match_seal(verifier, monkeypatch, tmp_path, field, value):
+    expected = {"sha256": "a" * 64, "size": 10}
+    result = {**expected, "app_inventory_sha256": "b" * 64, field: value}
+    monkeypatch.setattr(verifier, "run", lambda *args, **kwargs: json.dumps(result).encode())
+    with pytest.raises(verifier.ReleaseError):
+        verifier.verify_installer(tmp_path, tmp_path, tmp_path, "0.1.4", expected)
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        None,
+        {},
+        {"status": "Accepted"},
+        {"status": "Accepted", "id": "invalid"},
+        {"status": "Accepted", "id": 1},
+        {"status": "Invalid", "id": "11111111-1111-1111-1111-111111111111"},
+        {"status": "Accepted", "id": "11111111-1111-1111-1111-111111111111", "extra": True},
+    ],
+)
+def test_dmg_notarization_receipt_requires_accepted_status_and_id(verifier, record):
+    with pytest.raises(verifier.ReleaseError):
+        verifier.validate_notarization(record)

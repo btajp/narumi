@@ -22,7 +22,8 @@ COMMIT = "1" * 40
 KEY = base64.b64encode(b"k" * 32).decode()
 SIGNATURE = base64.b64encode(b"s" * 64).decode()
 SPARKLE = "{http://www.andymatuschak.org/xml-namespaces/sparkle}"
-VERSION = "0.1.1"
+VERSION = os.environ.get("FAKE_RELEASE_VERSION", "0.1.1")
+HAS_INSTALLER = tuple(map(int, VERSION.split("."))) >= (0, 1, 4)
 BUILD = 25
 DRAFT_TAG = "untagged-" + "a1" * 10
 with (STATE / "calls.jsonl").open("a") as stream:
@@ -70,8 +71,11 @@ def make_release():
     assert "--draft" in ARGS
     assert ARGS[ARGS.index("--target") + 1] == COMMIT
     assert ARGS[ARGS.index("--repo") + 1] == "btajp/narumi"
-    paths = [Path(ARGS[-2]), Path(ARGS[-1])]
-    assert [p.name for p in paths] == [f"narumi-{VERSION}.zip", "appcast.xml"]
+    names = [f"narumi-{VERSION}.zip", "appcast.xml"]
+    if HAS_INSTALLER:
+        names.append(f"narumi-{VERSION}.dmg")
+    paths = list(map(Path, ARGS[-len(names) :]))
+    assert [p.name for p in paths] == names
     assets = []
     for identifier, source in enumerate(paths, 1):
         content = source.read_bytes()
@@ -101,6 +105,9 @@ def make_release():
     if MODE == "remote_mutation":
         original = (STATE / "asset-2").read_bytes()
         (STATE / "asset-2").write_bytes(original.replace(b"15.0", b"14.0"))
+    if MODE == "remote_dmg_mutation":
+        original = (STATE / "asset-3").read_bytes()
+        (STATE / "asset-3").write_bytes(bytes([original[0] ^ 1]) + original[1:])
 
 
 def gh_command():
@@ -166,13 +173,51 @@ def ditto_command():
     if "-c" in ARGS:
         assert "--norsrc" in ARGS and "--noextattr" in ARGS
         with zipfile.ZipFile(target, "x") as archive:
+            archive.write(source, source.name)
             for path in source.rglob("*"):
-                if path.is_file():
-                    archive.write(path, str(Path(source.name) / path.relative_to(source)))
+                archive.write(path, str(Path(source.name) / path.relative_to(source)))
     else:
         assert ARGS[:2] == ["-x", "-k"]
         with zipfile.ZipFile(source) as archive:
             archive.extractall(target)
+
+
+def dmg_command():
+    archive = Path(ARGS[ARGS.index("--zip") + 1])
+    work = Path(ARGS[ARGS.index("--work-dir") + 1])
+    tracked = Path(ARGS[ARGS.index("--tracked-sources") + 1])
+    assert archive.is_file() and archive.parent.name == "feed"
+    assert work.is_dir() and tracked.read_bytes().endswith(b"\0")
+    if ARGS[0] == "create":
+        if MODE == "dmg_create_failure":
+            print("fixture-secret create diagnostic", file=sys.stderr)
+            raise SystemExit(1)
+        target = Path(ARGS[ARGS.index("--output") + 1])
+        assert target.parent == work / "installer" and not target.exists()
+        with target.open("xb") as stream:
+            stream.write(b"fake-dmg:" + archive.read_bytes())
+    else:
+        assert ARGS[0] == "verify"
+        target = Path(ARGS[ARGS.index("--dmg") + 1])
+        assert target.parent.name == "installer"
+        assert (
+            hashlib.sha256(target.read_bytes()).hexdigest()
+            == ARGS[ARGS.index("--expected-sha256") + 1]
+        )
+        assert target.stat().st_size == int(ARGS[ARGS.index("--expected-size") + 1])
+        if MODE == "dmg_verification_failure":
+            print("fixture-secret retained-mount diagnostic", file=sys.stderr)
+            raise SystemExit(1)
+        assert target.read_bytes().endswith(b":signed:stapled")
+    emit(
+        {
+            "sha256": "0" * 64
+            if MODE == "dmg_helper_wrong_hash"
+            else hashlib.sha256(target.read_bytes()).hexdigest(),
+            "size": target.stat().st_size,
+            "app_inventory_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+        }
+    )
 
 
 def make_appcast():
@@ -212,13 +257,42 @@ elif PROGRAM == "build-app.sh":
     make_app()
 elif PROGRAM == "ditto":
     ditto_command()
+elif PROGRAM == "release_dmg.py":
+    dmg_command()
 elif PROGRAM == "xcrun":
     if ARGS[:2] == ["notarytool", "submit"]:
-        emit({"status": "Invalid" if MODE == "notary_rejected" else "Accepted"})
+        is_dmg = ARGS[2].endswith(".dmg")
+        if is_dmg and MODE == "dmg_notary_failure":
+            print("fixture-secret notary diagnostic", file=sys.stderr)
+            raise SystemExit(1)
+        rejected = MODE == "notary_rejected" or (is_dmg and MODE == "dmg_notary_rejected")
+        emit(
+            {
+                "id": "22222222-2222-2222-2222-222222222222"
+                if is_dmg
+                else "11111111-1111-1111-1111-111111111111",
+                "status": "Invalid" if rejected else "Accepted",
+            }
+        )
     else:
         assert ARGS[0] == "stapler"
         if MODE == "lost_ticket" and "verify-unpacked" in ARGS[-1]:
             raise SystemExit(1)
+        if ARGS[-1].endswith(".dmg"):
+            if MODE == "dmg_staple_failure":
+                raise SystemExit(1)
+            if ARGS[1] == "staple":
+                with Path(ARGS[-1]).open("ab") as stream:
+                    stream.write(b":stapled")
+elif PROGRAM == "codesign":
+    if ARGS[-1].endswith(".dmg"):
+        if MODE == "dmg_signing_failure":
+            raise SystemExit(1)
+        if "--sign" in ARGS:
+            assert ARGS[ARGS.index("--identifier") + 1] == "jp.btajp.narumi.dmg"
+            assert "--timestamp" in ARGS
+            with Path(ARGS[-1]).open("ab") as stream:
+                stream.write(b":signed")
 elif PROGRAM == "bundle_inventory.py":
     assert "--require-runtime" in ARGS and "--tracked-sources" in ARGS
     assert Path(ARGS[ARGS.index("--tracked-sources") + 1]).read_bytes().endswith(b"\0")
@@ -241,5 +315,5 @@ elif PROGRAM in ("generate_keys", "sign_update", "generate_appcast"):
     else:
         assert "-p" in ARGS
         print(SIGNATURE)
-elif PROGRAM not in ("codesign", "spctl", "uv", "check-version.sh"):
+elif PROGRAM not in ("spctl", "uv", "check-version.sh"):
     raise AssertionError(PROGRAM)

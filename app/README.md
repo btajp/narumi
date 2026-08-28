@@ -9,6 +9,13 @@
 | `NarumiMenuBarCore` | ライブラリ（Foundation のみ） | メニューバーアプリの純粋ロジック。サーバー設定の解決（`ServerConfig`。ランタイムモード判定を含む）、起動コマンドの組み立て（`ServerCommand`）、サーバー状態と表示文言（`ServerState` / `ServerStatusText`）、同梱ランタイムの manifest と同期手順（`RuntimeManifest` / `RuntimeSyncPlan`）、契約レスポンスのモデル（`ContractModels`）、表示整形（`Formatting`）、議事録 markdown のブロック分割（`MarkdownBlocks`）、ツール名の一覧（`ToolCatalog`）。AppKit にも Sparkle にも依存せず `swift test` で検証する |
 | `NarumiMenuBar` | メニューバーアプリ `narumi.app` | MCP クライアント。メニューバー（録画開始 / 停止）とメインウィンドウ（後述）から server の公開ツール（`ToolCatalog.allUsed` = 契約の全 28 ツール）を呼ぶだけで、ファイルや recorder には触れない（AGENTS.md 絶対原則 3）。加えて `narumi-server` の**プロセス**を起動・停止する（`ServerLauncher`。後述「起動フロー」） |
 
+## 利用者向けの導入・更新
+
+初回は既存版があれば先に [停止・退避](../README.md#初回導入と失敗時の復旧) を済ませ、[GitHub Releases](https://github.com/btajp/narumi/releases/latest) の DMG を開いて `narumi.app` を「Applications」へドラッグする。
+以後は公開済みの更新をメニューバーの「narumi」→「アップデートを確認…」から適用する。
+実環境確認は公開・更新後に行い、開発ビルドを毎回手動コピーしない。
+導入・復旧の詳細は [README の配布手順](../README.md#初回導入と失敗時の復旧) を参照する。
+
 ## ビルドとテスト
 
 ```sh
@@ -72,6 +79,10 @@ TCC は「責任プロセス」単位で許可を記録する。
 - **素の CLI（`app/.build/release/narumi-recorder`）**: Terminal から直接起動した場合は Terminal.app が責任プロセスになり、Terminal に対して画面収録・マイクの許可が求められる。server（`uv run narumi-server`）経由で起動した場合も、その server を起動した親アプリ（Terminal 等）が責任プロセスになる。初回の `record` で `SCShareableContent` の照会と `AVCaptureDevice.requestAccess` がプロンプトを出す。拒否されると `permission_denied` を返す（黙って続行しない）。launchd などプロンプトを出せない環境では、あらかじめ「システム設定 > プライバシーとセキュリティ」で許可しておく。
 - **`.app`（`dist/narumi.app`）**: `Info.plist` に `NSMicrophoneUsageDescription` / `NSScreenCaptureUsageDescription` を持ち、`jp.btajp.narumi` として許可が記録される。`narumi.app` は server を自分で起動し、server には同梱の `Contents/MacOS/narumi-recorder` を `--recorder` で渡す（後述「起動フロー」）。この構成では recorder の祖先プロセスが `.app` なので、TCC の責任プロセスは `narumi.app` になり許可が .app に紐づく想定（実機での確認は未了）。
 - ad-hoc 署名（`codesign --sign -`）はビルドのたびに署名が変わるため、TCC の許可が再度求められることがある。
+
+旧開発版から正式署名版へ移行した際、設定上は有効でも旧署名の許可が残り、権限の照合に失敗する場合がある。
+再起動で改善しない場合は、対象 app の署名と TCC の診断ログを確認する。許可の整理が必要なら、対象権限を明示して利用者の承認を得る。
+他アプリの許可やマイクを一括リセットせず、再許可の確定は利用者が行う。
 
 ## server から recorder を見つける方法
 

@@ -1,4 +1,4 @@
-"""Strict, local-only checks for the two assets shipped by a narumi release."""
+"""Strict local checks for Sparkle feed assets and versioned installer releases."""
 
 from __future__ import annotations
 
@@ -66,6 +66,66 @@ def sha256(path: Path) -> str:
 def asset_names(version: str) -> tuple[str, str]:
     version_tuple(version)
     return f"narumi-{version}.zip", "appcast.xml"
+
+
+def release_schema(version: str) -> int:
+    return 1 if version_tuple(version) < (0, 1, 4) else 2
+
+
+def validate_release_schema(version: str, schema: object) -> None:
+    require(
+        type(schema) is int and schema == release_schema(version),
+        "版に対応する release schema が不一致です",
+    )
+
+
+def installer_name(version: str) -> str:
+    version_tuple(version)
+    return f"narumi-{version}.dmg"
+
+
+def release_asset_names(version: str) -> tuple[str, ...]:
+    names = asset_names(version)
+    return names if release_schema(version) == 1 else (*names, installer_name(version))
+
+
+def asset_path(directory: Path, version: str, name: str) -> Path:
+    require(name in release_asset_names(version), "許可されていない release asset 名です")
+    folder = "feed" if name in asset_names(version) else "installer"
+    return directory / folder / name
+
+
+def validate_sealed_assets(version: str, schema: object, assets: object) -> None:
+    validate_release_schema(version, schema)
+    require(
+        isinstance(assets, dict) and set(assets) == set(release_asset_names(version)),
+        "封印した release assets が版に対応する配布物と一致しません",
+    )
+    for metadata in assets.values():
+        require(
+            isinstance(metadata, dict) and set(metadata) == {"sha256", "size"},
+            "封印した asset metadata が不正です",
+        )
+        digest, size = metadata["sha256"], metadata["size"]
+        require(
+            isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest),
+            "封印した asset SHA256 が不正です",
+        )
+        require(type(size) is int and size > 0, "封印した asset の長さが不正です")
+
+
+def validate_installer(directory: Path, version: str) -> dict:
+    require(release_schema(version) == 2, "この版では DMG を出荷しません")
+    require(directory.is_dir() and not directory.is_symlink(), "installer directory が不正です")
+    name = installer_name(version)
+    require(
+        {p.name for p in directory.iterdir()} == {name}, "installer の出荷対象は版付き DMG だけです"
+    )
+    path = directory / name
+    require(path.is_file() and not path.is_symlink(), "DMG は通常ファイルが必要です")
+    size = path.stat().st_size
+    require(size > 0, "DMG が空です")
+    return {"sha256": sha256(path), "size": size}
 
 
 def parse_feed(content: bytes) -> tuple[ET.Element, ET.Element]:

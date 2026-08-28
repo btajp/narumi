@@ -4,6 +4,13 @@ narumi（narumi.app / pipeline / server）の変更履歴。最新の版を先�
 `VERSION`・`pipeline/pyproject.toml`・`server/pyproject.toml` と最新見出しの版は常に一致させる
 （`scripts/check-version.sh` が検査し、`scripts/release-app.sh` がリリースノートとして抜粋する）。
 
+## 0.1.4 - 2026-08-28
+
+- 初回インストール用の Developer ID 署名・Apple 公証済み DMG を追加
+- DMG と自動更新用 ZIP のアプリ内容・版・署名・ファイル権限を照合
+- GitHub の DMG・ZIP・更新フィードを匿名取得して検証する配布手順を追加
+- 初回は公開 DMG、以後はリリース公開後の Sparkle 更新で実環境確認する運用に統一
+
 ## 0.1.3 - 2026-08-28
 
 - 診断画面にマイク・画面収録の状態、許可要求、macOS 設定を開く操作を追加

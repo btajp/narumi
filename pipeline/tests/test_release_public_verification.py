@@ -23,9 +23,13 @@ ARCHIVE_URL = "https://github.com/btajp/narumi/releases/download/v0.1.1/" + ARCH
 FEED_URL = "https://github.com/btajp/narumi/releases/latest/download/appcast.xml"
 KEY = base64.b64encode(b"k" * 32).decode()
 SIGNATURE = base64.b64encode(b"s" * 64).decode()
+DMG_VERSION = "0.1.4"
+DMG_NAME = "narumi-0.1.4.dmg"
+DMG_URL = "https://github.com/btajp/narumi/releases/download/v0.1.4/" + DMG_NAME
+INVENTORY_SHA256 = "a" * 64
 
 
-def make_zip(key=KEY):
+def make_zip(key=KEY, *, version=VERSION):
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, "w") as archive:
         archive.writestr(
@@ -33,7 +37,7 @@ def make_zip(key=KEY):
             plistlib.dumps(
                 {
                     "CFBundleIdentifier": "jp.btajp.narumi",
-                    "CFBundleShortVersionString": VERSION,
+                    "CFBundleShortVersionString": version,
                     "CFBundleVersion": "25",
                     "LSMinimumSystemVersion": "15.0",
                     "SUFeedURL": FEED_URL,
@@ -46,12 +50,12 @@ def make_zip(key=KEY):
     return stream.getvalue()
 
 
-def make_feed(size, url=ARCHIVE_URL):
+def make_feed(size, url=ARCHIVE_URL, *, version=VERSION):
     root = ET.Element("rss", version="2.0")
     item = ET.SubElement(ET.SubElement(root, "channel"), "item")
     for name, value in (
         ("version", "25"),
-        ("shortVersionString", VERSION),
+        ("shortVersionString", version),
         ("minimumSystemVersion", "15.0"),
         ("hardwareRequirements", "arm64"),
     ):
@@ -81,12 +85,12 @@ class FakeResponse(io.BytesIO):
         return "https://release-assets.githubusercontent.com/fixture"
 
 
-@pytest.fixture
-def public_release(monkeypatch, tmp_path):
+def make_public_release(monkeypatch, tmp_path, version, installer_checks):
     monkeypatch.syspath_prepend(str(ROOT / "scripts"))
     spec = importlib.util.spec_from_file_location(
         "public_verify_test", ROOT / "scripts/release_verify.py"
     )
+    assert spec is not None and spec.loader is not None
     verifier = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(verifier)
     public = importlib.import_module("release_public")
@@ -97,18 +101,35 @@ def public_release(monkeypatch, tmp_path):
     monkeypatch.setattr(verifier.subprocess, "run", forbidden)
     monkeypatch.setattr(public.urllib.request.OpenerDirector, "open", forbidden)
     monkeypatch.setattr(public.urllib.request, "urlopen", forbidden)
-    archive = make_zip()
-    payloads = {ARCHIVE_URL: archive, FEED_URL: make_feed(len(archive))}
+    monkeypatch.setattr(public.ssl, "create_default_context", lambda: object())
+    schema = {"0.1.1": 1, "0.1.3": 1, "0.1.4": 2}[version]
+    archive_name = f"narumi-{version}.zip"
+    archive_url = f"https://github.com/btajp/narumi/releases/download/v{version}/{archive_name}"
+    archive = make_zip(version=version)
+    payloads = {
+        archive_url: archive,
+        FEED_URL: make_feed(len(archive), archive_url, version=version),
+    }
     original = tmp_path / "feed"
     original.mkdir()
-    (original / ARCHIVE_NAME).write_bytes(archive)
+    (original / archive_name).write_bytes(archive)
     (original / "appcast.xml").write_bytes(payloads[FEED_URL])
     sealed = {
-        "version": VERSION,
+        "schema_version": schema,
+        "version": version,
         "build": 25,
         "public_key": KEY,
-        **verifier.validate_artifacts(original, VERSION, 25, KEY),
+        **verifier.validate_artifacts(original, version, 25, KEY),
     }
+    if schema == 2:
+        payloads[DMG_URL] = b"synthetic installer DMG"
+        (tmp_path / "installer").mkdir()
+        (tmp_path / "installer" / DMG_NAME).write_bytes(payloads[DMG_URL])
+        reseal_asset(sealed, DMG_NAME, payloads[DMG_URL])
+        sealed["installer"] = {
+            "notarization": {"id": "11111111-1111-1111-1111-111111111111", "status": "Accepted"},
+            "app_inventory_sha256": INVENTORY_SHA256,
+        }
     requests = []
     post_checks = []
 
@@ -128,10 +149,51 @@ def public_release(monkeypatch, tmp_path):
     monkeypatch.setattr(verifier, "inventory", lambda *args: post_checks.append("inventory"))
     monkeypatch.setattr(verifier, "verify_signature", lambda *args: post_checks.append("signature"))
 
+    def check_installer(root, directory, artifacts, actual_version, expected):
+        assert schema == 2
+        assert root == directory == tmp_path
+        assert actual_version == version == DMG_VERSION
+        assert requests == [FEED_URL, archive_url, DMG_URL]
+        assert post_checks == ["inventory", "signature"]
+        assert artifacts != directory
+        assert {path.name for path in artifacts.iterdir()} == {"feed", "installer"}
+        assert {path.name for path in (artifacts / "feed").iterdir()} == {
+            archive_name,
+            "appcast.xml",
+        }
+        assert {path.name for path in (artifacts / "installer").iterdir()} == {DMG_NAME}
+        assert expected == sealed["assets"][DMG_NAME]
+        for name, metadata in sealed["assets"].items():
+            folder = "installer" if name == DMG_NAME else "feed"
+            content = (artifacts / folder / name).read_bytes()
+            assert len(content) == metadata["size"]
+            assert hashlib.sha256(content).hexdigest() == metadata["sha256"]
+        installer_checks.append({"artifacts": artifacts, "expected": expected.copy()})
+        post_checks.append("installer")
+        return {**expected, "app_inventory_sha256": INVENTORY_SHA256}
+
+    monkeypatch.setattr(verifier, "verify_installer", check_installer)
+
     def invoke():
         verifier.verify_public(tmp_path, tmp_path, sealed, tmp_path, "jp.btajp.narumi")
 
     return verifier, payloads, sealed, requests, post_checks, invoke
+
+
+@pytest.fixture
+def installer_checks():
+    return []
+
+
+@pytest.fixture
+def public_release(monkeypatch, tmp_path, request, installer_checks):
+    version = getattr(request, "param", VERSION)
+    return make_public_release(monkeypatch, tmp_path, version, installer_checks)
+
+
+@pytest.fixture
+def dmg_release(monkeypatch, tmp_path, installer_checks):
+    return make_public_release(monkeypatch, tmp_path, DMG_VERSION, installer_checks)
 
 
 def reseal_asset(sealed, name, content):
@@ -193,3 +255,129 @@ def test_public_zip_still_requires_embedded_public_key(public_release):
     with pytest.raises(verifier.ReleaseError, match="SUPublicEDKey"):
         invoke()
     assert checks == []
+
+
+@pytest.mark.parametrize("public_release", ["0.1.3", "0.1.4"], indirect=True)
+def test_public_downloads_match_the_legacy_and_installer_release_schemas(
+    public_release, installer_checks
+):
+    _, _, sealed, requests, checks, invoke = public_release
+    version = sealed["version"]
+    zip_url = f"https://github.com/btajp/narumi/releases/download/v{version}/narumi-{version}.zip"
+    invoke()
+    if version == DMG_VERSION:
+        assert requests == [FEED_URL, zip_url, DMG_URL]
+        assert checks == ["inventory", "signature", "installer"]
+        assert len(installer_checks) == 1
+        assert installer_checks[0]["expected"] == sealed["assets"][DMG_NAME]
+        assert not installer_checks[0]["artifacts"].exists()
+    else:
+        assert requests == [FEED_URL, zip_url]
+        assert checks == ["inventory", "signature"]
+        assert installer_checks == []
+
+
+@pytest.mark.parametrize("failure", ["404", "hash", "truncated"])
+def test_public_dmg_download_failure_prevents_installer_verification(
+    dmg_release, installer_checks, failure
+):
+    verifier, payloads, _, requests, checks, invoke = dmg_release
+    if failure == "404":
+        payloads[DMG_URL] = urllib.error.HTTPError(DMG_URL, 404, "not public", {}, None)
+        message = "HTTP 404"
+    elif failure == "hash":
+        payload = payloads[DMG_URL]
+        payloads[DMG_URL] = bytes([payload[0] ^ 1]) + payload[1:]
+        message = "SHA256"
+    else:
+        payloads[DMG_URL] = payloads[DMG_URL][:-1]
+        message = "Content-Length"
+    with pytest.raises(verifier.ReleaseError, match=message):
+        invoke()
+    assert requests == [FEED_URL, DMG_URL.replace(".dmg", ".zip"), DMG_URL]
+    assert checks == []
+    assert installer_checks == []
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        DMG_URL,
+        "https://github.com/btajp/narumi/releases/latest/download/narumi-0.1.4.dmg",
+        "https://github.com/btajp/narumi/releases/download/v0.1.3/narumi-0.1.3.dmg",
+    ],
+)
+def test_dmg_cannot_replace_the_sparkle_zip_enclosure(dmg_release, installer_checks, url):
+    verifier, payloads, sealed, requests, checks, invoke = dmg_release
+    zip_url = DMG_URL.replace(".dmg", ".zip")
+    feed = make_feed(len(payloads[zip_url]), url, version=DMG_VERSION)
+    payloads[FEED_URL] = feed
+    reseal_asset(sealed, "appcast.xml", feed)
+    with pytest.raises(verifier.ReleaseError, match="URL"):
+        invoke()
+    assert requests == [FEED_URL]
+    assert checks == []
+    assert installer_checks == []
+
+
+@pytest.mark.parametrize(
+    "mutation", ["downgrade", "unknown-schema", "missing-dmg", "extra-asset", "wrong-dmg-name"]
+)
+def test_invalid_installer_release_shape_is_rejected_before_any_download(
+    dmg_release, installer_checks, mutation
+):
+    verifier, _, sealed, requests, checks, invoke = dmg_release
+    if mutation == "downgrade":
+        sealed["schema_version"] = 1
+        del sealed["assets"][DMG_NAME]
+        del sealed["installer"]
+    elif mutation == "unknown-schema":
+        sealed["schema_version"] = 3
+    elif mutation == "missing-dmg":
+        del sealed["assets"][DMG_NAME]
+    elif mutation == "extra-asset":
+        sealed["assets"]["narumi.delta"] = sealed["assets"][DMG_NAME].copy()
+    else:
+        sealed["assets"]["narumi-0.1.5.dmg"] = sealed["assets"].pop(DMG_NAME)
+    with pytest.raises(verifier.ReleaseError):
+        invoke()
+    assert requests == []
+    assert checks == []
+    assert installer_checks == []
+
+
+def test_installer_inventory_fingerprint_must_match_the_sealed_release(
+    dmg_release, installer_checks, monkeypatch
+):
+    verifier, _, _, requests, checks, invoke = dmg_release
+    original_check = verifier.verify_installer
+
+    def mismatched_fingerprint(*args):
+        result = original_check(*args)
+        return {**result, "app_inventory_sha256": "b" * 64}
+
+    monkeypatch.setattr(verifier, "verify_installer", mismatched_fingerprint)
+    with pytest.raises(verifier.ReleaseError, match="app inventory"):
+        invoke()
+    assert requests == [FEED_URL, DMG_URL.replace(".dmg", ".zip"), DMG_URL]
+    assert checks == ["inventory", "signature", "installer"]
+    assert len(installer_checks) == 1
+    assert not installer_checks[0]["artifacts"].exists()
+
+
+def test_installer_helper_failure_is_not_treated_as_a_success(
+    dmg_release, installer_checks, monkeypatch
+):
+    verifier, _, _, _, checks, invoke = dmg_release
+    original_check = verifier.verify_installer
+
+    def fail_verification(*args):
+        original_check(*args)
+        raise verifier.ReleaseError("synthetic installer verification failure")
+
+    monkeypatch.setattr(verifier, "verify_installer", fail_verification)
+    with pytest.raises(verifier.ReleaseError, match="synthetic installer verification failure"):
+        invoke()
+    assert checks == ["inventory", "signature", "installer"]
+    assert len(installer_checks) == 1
+    assert not installer_checks[0]["artifacts"].exists()

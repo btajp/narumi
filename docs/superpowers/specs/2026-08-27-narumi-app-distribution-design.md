@@ -7,6 +7,7 @@
 - 配布経路は GitHub Releases のみ（Mac App Store は使わない）。Developer ID Application 署名＋Apple 公証＋staple を完了してから公開する
 - 対象は Apple Silicon（arm64）・macOS 15 以降。mlx-whisper が Apple Silicon 専用のため x86_64 は配布しない
 - アプリと Python パッケージの更新は `.app` の差し替えを入口にする。依存は同梱した lock 情報から取得する。ffmpeg / ffprobe は別途必要
+- 0.1.4 以降の初回導入は署名・公証済み DMG、以後はリリース公開 → Sparkle 更新 → 実機確認。詳細は [初回 DMG・公開後確認の設計](2026-08-28-dmg-installer-release-design.md)
 
 ## 1. ランタイム同梱（チェックアウト不要化）
 
@@ -56,9 +57,11 @@ solo-eikaiwa の `scripts/release-desktop.sh` と同じ流儀。手順:
 5. 検証: `codesign --verify --deep --strict`、`spctl -a -t exec -vv`、`Info.plist` の版と `SUPublicEDKey` の再確認
 6. 公証: `ditto -c -k --sequesterRsrc --keepParent narumi.app narumi-<ver>.zip` → `xcrun notarytool submit --wait` → `xcrun stapler staple narumi.app` → zip を作り直す
 7. フィード: 最終 ZIP を固定して appcast を生成する。ZIP 内部の許可リスト、wheel 内の追跡済みソース、版/build、署名、length、当該 repo/tag の enclosure URL を検査し、ZIP と appcast の hash を確定する
-8. draft: ZIP と appcast だけを対象 commit の GitHub draft Release に添付し、tag・commit・asset 集合・取得後の hash を照合する。draft と同一 ZIP で Applications 起動・診断を確認してから公開する。公開後に匿名の latest feed/ZIP とアプリの更新確認を検証する
+8. DMG: 0.1.4 以降は最終 ZIP と同じ app から初回導入用 DMG を作成する。DMG 自体も署名・公証・staple し、read-only mount で app 内容・版・署名・ファイル権限を ZIP と照合する。DMG は feed 外の installer ディレクトリに置く
+9. draft: ZIP・appcast・DMG を対象 commit の GitHub draft Release に添付し、tag・commit・asset 集合・取得後の hash を照合する。0.1.3 以前は ZIP・appcast の 2 件を維持する。署名・公証・配布物照合を通過したら、実機 UI 確認を待たず同じ release ID・tag・commit のまま公開する
+10. 公開後: 匿名 latest feed / ZIP / DMG を検証する。初回は公開 DMG から導入し、以後は Sparkle 更新後に起動・同梱 server・診断を確認する。同版確認を実更新と区別し、前後の版・build・起動結果を記録する
 
-公開前の検証に失敗したら公開しない。GUI 起動に失敗した場合は保持した旧アプリと runtime へ戻す。公開後に再取得しても hash が不一致なら当該新規 Release を draft に戻して調査し、公開済み asset を上書きせず新しい版で修正する。
+署名・公証・配布内容の検証に失敗したら公開しない。実機 UI や OS 許可の確認待ちは公開を妨げない。起動失敗時の旧正式版復元は、利用者の承認と対象 app/server/port の停止確認後に行う。会議データは初期化せず、手動復元を Sparkle 更新成功とは扱わない。公開後に再取得しても hash が不一致なら当該新規 Release を draft に戻して調査し、公開済み asset を上書きせず新しい版で修正する。
 
 秘密情報（Apple API キー・Sparkle 秘密鍵・パスワード）はリポ・Issue・ログに書かない。Keychain とリリース環境の env だけで扱う。
 
