@@ -1,7 +1,7 @@
 {
   "name": "authenticate_provider_connection",
   "title": "Authenticate provider connection",
-  "description": "Start, cancel or log out a connection-scoped authentication operation using approved auth_methods only. PR1 supports API-key verification and local Ollama; it never offers Claude subscription login, reads ambient SDK sessions or accepts caller-supplied URLs, tokens or commands. All actions require request_id and expected_revision. cancel additionally requires operation_id; start and logout reject operation_id. start_request_id maps to the original start receipt and survives response loss. Query get_provider_auth_status rather than automatically starting again. Long-running work returns immediately with a public operation; cancel may remain pending until owned work exits. Logout clears only the chosen connection's credential/session and invalidates its checks. Only official, explicitly supported authentication or metadata requests may leave the machine; no meeting data or generation is sent. On failure returns an error_envelope (isError=true) with code: invalid_argument, not_found, configuration_conflict, busy, authentication_required, engine_unavailable, internal. All provider operations require the authenticated resident server; no implicit in-process or unauthenticated HTTP fallback is allowed.",
+  "description": "Start, cancel or log out a connection-scoped authentication operation using approved auth_methods only. Supports API-key verification, local Ollama and the official Codex App Server ChatGPT login. Codex uses only its connection-specific narumi runtime, never ambient Codex credentials or settings. It never offers Claude subscription login, reads ambient SDK sessions or accepts caller-supplied URLs, tokens or commands. The pending Codex login may return an allowlisted official authorization_url; completed, cancelled, failed and unknown operations return null. All actions require request_id and expected_revision. cancel additionally requires operation_id; start and logout reject operation_id. start_request_id maps to the original start receipt and survives response loss. Query get_provider_auth_status rather than automatically starting again. Long-running work returns immediately with a public operation; cancel may remain pending until owned work exits. Logout clears only the chosen connection's credential/session and invalidates its checks. Only official, explicitly supported authentication or metadata requests may leave the machine; no meeting data or generation is sent. On failure returns an error_envelope (isError=true) with code: invalid_argument, not_found, configuration_conflict, busy, authentication_required, engine_unavailable, internal. All provider operations require the authenticated resident server; no implicit in-process or unauthenticated HTTP fallback is allowed.",
   "annotations": {
     "readOnlyHint": false,
     "destructiveHint": false,
@@ -127,6 +127,21 @@
           "state": "unknown",
           "authorization_url": null,
           "reason": "authentication_operation_interrupted",
+          "created_at": "2026-08-28T09:00:00Z",
+          "updated_at": "2026-08-28T09:00:00Z"
+        }
+      },
+      {
+        "operation": {
+          "operation_id": "auth-0123456789ab",
+          "connection_id": "conn-0123456789ab",
+          "connection_revision": 2,
+          "server_instance_id": "00000000-0000-4000-8000-000000000001",
+          "start_request_id": "provider-request-20260828-001",
+          "action": "start",
+          "state": "pending",
+          "authorization_url": "https://auth.openai.com/oauth/authorize?response_type=code&client_id=contract-client&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&state=contract-state&code_challenge=contract-challenge&code_challenge_method=S256",
+          "reason": null,
           "created_at": "2026-08-28T09:00:00Z",
           "updated_at": "2026-08-28T09:00:00Z"
         }

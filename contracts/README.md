@@ -11,18 +11,19 @@ contracts/
 ├── defs/common.json     # 会議・ジョブ・エラーの共通型（$defs）
 ├── defs/providers.json  # プロバイダ・runtime・対応機能
 ├── defs/provider_connections.json # 接続・認証操作
-├── defs/provider_models.json      # モデル・能力・料金
+├── defs/provider_models.json      # モデル・能力・料金・議事録モデル選択
 └── tools/<name>.json    # 1 ツール 1 ファイル。ファイル名 = "name"
 ```
 
 - `manifest.json` の `tools` はツール名の配列。`tools/<name>.json` と **過不足なく一致** させる（一致しなければローダーが起動時に `contract_mismatch` を投げる）
 - `manifest.json` の `defs` は共通定義ファイルの相対パス配列。定義名は全ファイルを通して一意
 
-## v2 開発版ツール一覧（37）
+## v3 ツール一覧（37）
 
-契約 2.0.0 は未公開の次期版。既存の会議・プロファイル書込形はこの段階では維持する。
-工程別モデル選択・複数生成は後続段階で追加し、実装済みの範囲は
-`get_server_info.capabilities.workflow` で判定する。プロバイダ名の存在だけでは判定しない。
+契約 3.0.0 は Codex App Server の公式 ChatGPT 認証と、テキスト議事録のモデル選択を追加する。
+既存の `llm_provider` は維持し、文字起こし・発話統合・画像処理へ Codex を暗黙に適用しない。
+実装済みの範囲は `get_server_info.capabilities.workflow` と各モデルの能力で判定する。
+複数プロバイダの生成・統合はこの契約では未対応。プロバイダ名の存在だけでは生成可能と判断しない。
 
 | 分類 | ツール |
 |---|---|
@@ -49,18 +50,45 @@ contracts/
 
 `defs/common.json` の主な共通型: `meeting_id` `request_id` `job_id` `context_id` `scope_name` `scope` `timestamp` `external_send_policy` `job_status` `job_kind` `job` `error_code`（`cancelled` を含む）`error` `error_envelope` `meeting_config` `track_status` `meeting_summary`（任意の `active_job` 付き）`segment` `context_source_type` `export_destination` `profile`。
 
-プロバイダ型は別の defs に分ける。PR1 の接続対象は Anthropic API / Claude Agent SDK / Ollama。
-Claude SDK は API キー認証のみ。未承認のサブスク認証や未実装の Codex / OpenAI 接続は受け付けない。
+プロバイダ型は別の defs に分ける。接続対象は Anthropic API / Claude Agent SDK / Codex App Server / Ollama。
+Claude SDK は API キー認証のみ。Codex は公式 ChatGPT 認証のみで、接続先は `https://chatgpt.com` に固定する。
+Claude のサブスク認証と OpenAI API 接続は未対応。
 モデル一覧の取得成功と生成可能性は区別し、不明な能力・上限・単価を推測で補わない。
 
 ### 接続・秘密・状態の扱い
 
 - 新規接続は `provider_id / display_name / auth_method` を指定する。更新は `connection_id / expected_revision` を指定し、種別変更は受け付けない。
-- `api_key` は write-only。省略は保持、null は削除。新規のキー未設定接続は保存できるが、生成利用は不可。
+- API 接続の `api_key` は write-only。省略は保持、null は削除。新規のキー未設定接続は保存できるが、生成利用は不可。Codex 接続は null を含め `api_key` 自体を受け付けない。
 - CLI の秘密入力は非表示プロンプトか stdin を使う。通常の argv・文字列 `--json`・ログ・応答・要求キャッシュへ秘密を出さない。
 - 接続の無効化は資格情報を保持し、再有効化で認証済み状態へ自動復帰しない。メタデータの観測だけでは設定版を増やさない。
 - 認証操作は `start_request_id` でも照会できる。応答喪失・再起動時に不明な操作を成功扱いせず、自動でログインを再開始しない。
+- Codex の `authorization_url` は `start` が `pending` の間だけ返せる。固定 runtime の公式認可先 `https://auth.openai.com/oauth/authorize` と loopback callback を検証し、終了・取消・失敗・不明の状態では null にする。
+- Codex の認証情報は接続ごとの narumi 専用 runtime 内に保持し、API 応答へ返さない。既存の Codex セッション・設定・認証情報は流用しない。
 - runtime 準備はカタログの固定 ID だけを受け付ける。`provider_setup` job を返し、進行中・直近の受付は `list_providers` でも参照できる。
+
+### テキスト議事録のモデル選択
+
+`meeting_config.minutes_model` は nullable な選択オブジェクト。
+`set_meeting_config` では省略時に現在値を保持し、null で解除する。
+プロファイルの config、新しい会議の config、会議・プロファイルの応答にも同じ型を使う。
+既存保存データにこの項目がない場合は null と同じ扱いで、従来の `llm_provider` の動作を維持する。
+
+選択には `provider: "codex-app-server"`、`connection_id`、1 以上の `connection_revision`、
+モデル一覧から明示的に選んだ `model_id` を指定する。
+`parameters` は省略時 `{}` で、指定できるキーは `reasoning_effort` だけ。
+その値は選択モデルの公式一覧が返した能力と照合する。
+`cache_epoch` は省略時 0、指定時は 0 以上の整数。
+接続先・コマンド・認証情報・パスを生成パラメータに入れることはできない。
+
+選択した接続の有効状態・版・認証・モデル能力と、更新後の外部送信ポリシーを保存時・実行時に検証する。
+`local_only` では拒否し、別プロバイダや別モデルへのフォールバックはしない。
+同じ入力と選択では既存の議事録を再利用する。選択や `cache_epoch` だけを変更した場合は、
+文字起こしや発話統合をやり直さず議事録生成だけを更新する。
+
+Codex の選択がある会議の `regenerate` と、`auto_regenerate=true` の `register_context` は、
+送信確認時に取得した設定全体を `expected_config` として渡す。
+サーバーは会議のロック内で現設定と照合し、確認後に変更されていれば `configuration_conflict` で拒否する。
+旧来の生成と、生成しないコンテキスト登録では省略できる。指定した場合はどちらでも照合する。
 
 プロバイダ操作は認証済み常駐サーバーを使い、平文 HTTP や in-process へ降格しない。
 `secure_transport` は要件の説明であり、証明書 pin や client token の信頼元ではない。
@@ -120,9 +148,11 @@ semver。`get_server_info` が返す `contract_version` でクライアントが
 
 | 変更 | 上げる桁 |
 |---|---|
-| 必須入力の追加、出力キーの削除・型変更、enum 値の削除、ツールの削除・改名、エラーコードの削除 | major |
+| 必須入力の追加、出力キーの削除・型変更、enum 値の削除、閉じた出力 enum への値追加、ツールの削除・改名、エラーコードの削除 | major |
 | 任意入力の追加、出力キーの追加、ツールの追加、enum 値の追加、エラーコードの追加 | minor |
 | `description` / `title` / `examples` のみ | patch |
+
+v3 では旧クライアントが受け付けない provider / auth enum 値と、認可 URL の文字列応答を追加したため major を上げる。
 
 手順: `contracts/` を編集 → `manifest.json` の `contract_version` を更新 → `uv run pytest pipeline/tests/contracts` → 実装 → サーバーテスト。エラーコードを増やすときは `defs/common.json#/$defs/error_code` と `narumi.errors.ErrorCode` を同時に更新する（テストが一致を検査する）。
 

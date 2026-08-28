@@ -1,7 +1,7 @@
 {
   "name": "set_profile",
   "title": "Set profile",
-  "description": "Create or update a saved meeting profile (source of truth: <NARUMI_HOME>/profiles.json). Only the keys you pass change; omitted keys keep their current value (a new profile starts with an empty config, no scope / engagement and no export destinations). `scope` here is the default value stored in the profile — not a scope selector — and, like `engagement`, accepts null to clear it. `config` keys are merged into the stored config (a key set to its null-clearing value where the type allows, e.g. self_name=null, clears it). `export_destinations` replaces the stored list (registry names from list_export_destinations); they run automatically when a meeting using this profile finishes processing. make_default=true makes this the profile applied when start_recording / import_recording omit `profile` (exactly one profile is default at a time). Returns the full stored profile. `request_id` is the client-generated idempotency key: repeating the call returns the original result. On failure returns an error_envelope (isError=true) with code: invalid_argument (bad name or config, unknown export destination), policy_violation (the stored config would select engines / providers not allowed by its external_send_policy — validated at save time, nothing is silently downgraded), engine_unavailable (config names an engine / provider not registered on this server), internal.",
+  "description": "Create or update a saved meeting profile (source of truth: <NARUMI_HOME>/profiles.json). Only the keys you pass change; omitted keys keep their current value (a new profile starts with an empty config, no scope / engagement and no export destinations). `scope` here is the default value stored in the profile — not a scope selector — and, like `engagement`, accepts null to clear it. `config` keys are merged into the stored config (a key set to its null-clearing value where the type allows, e.g. self_name=null or minutes_model=null, clears it). minutes_model, when present, is a whole-object text minutes override validated against the enabled connection, pinned revision, official model catalog, authentication and resulting policy. Omitted minutes_model retains the saved value; old profiles without it retain legacy llm_provider behavior. It does not select models for other stages. `export_destinations` replaces the stored list (registry names from list_export_destinations); they run automatically when a meeting using this profile finishes processing. make_default=true makes this the profile applied when start_recording / import_recording omit `profile` (exactly one profile is default at a time). Returns the full stored profile. `request_id` is the client-generated idempotency key: repeating the call returns the original result. On failure returns an error_envelope (isError=true) with code: invalid_argument (bad name or config, unknown export destination), policy_violation (the stored config would select engines / providers not allowed by its external_send_policy — validated at save time, nothing is silently downgraded), engine_unavailable (config names an engine / provider not registered or its runtime is unavailable), configuration_conflict, authentication_required, model_unavailable, internal.",
   "annotations": {
     "readOnlyHint": false,
     "destructiveHint": false,
@@ -70,7 +70,9 @@
           "self_name": "岡村"
         },
         "scope": "cloudnative",
-        "export_destinations": ["markdown"],
+        "export_destinations": [
+          "markdown"
+        ],
         "request_id": "2c3d4e5f-6071-4890-8bcd-ef0123456789"
       },
       {
@@ -78,6 +80,24 @@
         "engagement": null,
         "make_default": true,
         "request_id": "3d4e5f60-7182-49a1-9cde-f01234567890"
+      },
+      {
+        "name": "codex-minutes",
+        "config": {
+          "llm_provider": "none",
+          "external_send_policy": "subscription_ok",
+          "minutes_model": {
+            "provider": "codex-app-server",
+            "connection_id": "conn-fedcba987654",
+            "connection_revision": 1,
+            "model_id": "fixture-text-model",
+            "parameters": {
+              "reasoning_effort": "high"
+            },
+            "cache_epoch": 0
+          }
+        },
+        "request_id": "profile-codex-request-20260829-001"
       }
     ],
     "output": [
@@ -94,7 +114,9 @@
           },
           "scope": "cloudnative",
           "engagement": null,
-          "export_destinations": ["markdown"],
+          "export_destinations": [
+            "markdown"
+          ],
           "is_default": false
         }
       }

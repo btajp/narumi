@@ -1,7 +1,7 @@
 {
   "name": "register_context",
   "title": "Register context",
-  "description": "Attach an external context source to a meeting: an external transcript with speaker names (Notion AI minutes, Zoom / Meet / Teams transcript), a chat log, a document, a URL or free text. Exactly one of `content` (inline text), `url` (http/https) or `file_path` (absolute local path of a regular, non-hidden file of at most 16 MiB; `~` is not expanded) must be given. The raw payload is stored verbatim in the bundle (context/sources/<context_id>.json) as the source of truth. For a transcript source_type (notion_ai_minutes, zoom_transcript, meet_transcript, teams_transcript) with a text payload, the deterministic parsers (WebVTT with `Speaker: text` prefixes and `<v Name>` voice tags, SRT, Zoom `HH:MM:SS speaker: text` txt, plain text with optional `[hh:mm:ss]` prefixes) then run immediately: on success the transcript is written as bundle artifact `transcripts/ext-<context_id>` (usable by get_transcript and alignment; speaker names feed layer-4 diarization) and `status` reports `parsed`. An unrecognised payload is not an error — `status` stays `stored`. `url` payloads are stored as references and never fetched at registration, so they always report `stored`. With auto_regenerate=true a `regenerate` job is enqueued so the new context takes part in alignment and minutes generation; its job_id is returned. `scope` is the scope selector (default deny: a scoped meeting needs its scope in the request). `request_id` is the client-generated idempotency key: repeating the call returns the same context_id. On failure returns an error_envelope (isError=true) with code: not_found (unknown meeting, or file_path does not exist), scope_denied (the request does not cover the meeting's scope), invalid_argument (none or more than one of content / url / file_path, a file_path that is relative, hidden, not a regular file or too large, or a payload that does not fit source_type), busy (a job is queued / running for the meeting — nothing is stored in that case — or auto_regenerate while the meeting is still recording), policy_violation (auto_regenerate with a provider not allowed by external_send_policy), internal.",
+  "description": "Attach an external context source to a meeting: an external transcript with speaker names (Notion AI minutes, Zoom / Meet / Teams transcript), a chat log, a document, a URL or free text. Exactly one of `content` (inline text), `url` (http/https) or `file_path` (absolute local path of a regular, non-hidden file of at most 16 MiB; `~` is not expanded) must be given. The raw payload is stored verbatim in the bundle (context/sources/<context_id>.json) as the source of truth. For a transcript source_type (notion_ai_minutes, zoom_transcript, meet_transcript, teams_transcript) with a text payload, the deterministic parsers (WebVTT with `Speaker: text` prefixes and `<v Name>` voice tags, SRT, Zoom `HH:MM:SS speaker: text` txt, plain text with optional `[hh:mm:ss]` prefixes) then run immediately: on success the transcript is written as bundle artifact `transcripts/ext-<context_id>` (usable by get_transcript and alignment; speaker names feed layer-4 diarization) and `status` reports `parsed`. An unrecognised payload is not an error — `status` stays `stored`. `url` payloads are stored as references and never fetched at registration, so they always report `stored`. With auto_regenerate=true a `regenerate` job is enqueued so the new context takes part in alignment and minutes generation; its job_id is returned. `scope` is the scope selector (default deny: a scoped meeting needs its scope in the request). When auto_regenerate=true and the saved minutes_model is non-null, expected_config is required and must be the full effective config confirmed by the caller; without generation it is optional. Any supplied expected_config is compared with the current config under the meeting lock before changes or job creation; a mismatch returns configuration_conflict without sending or generating. `request_id` is the client-generated idempotency key: repeating the call returns the same context_id. On failure returns an error_envelope (isError=true) with code: not_found (unknown meeting, or file_path does not exist), scope_denied (the request does not cover the meeting's scope), invalid_argument (none or more than one of content / url / file_path, a file_path that is relative, hidden, not a regular file or too large, or a payload that does not fit source_type), busy (a job is queued / running for the meeting — nothing is stored in that case — or auto_regenerate while the meeting is still recording), policy_violation (auto_regenerate with a provider not allowed by external_send_policy), configuration_conflict, authentication_required, engine_unavailable, model_unavailable, internal.",
   "annotations": {
     "readOnlyHint": false,
     "destructiveHint": false,
@@ -39,6 +39,10 @@
         "maxLength": 200
       },
       "request_id": { "$ref": "../defs/common.json#/$defs/request_id" },
+      "expected_config": {
+        "$ref": "../defs/common.json#/$defs/meeting_config",
+        "description": "Full effective config confirmed by the caller, as returned by get_meeting. Required by the server when auto_regenerate=true and the saved minutes_model is non-null. Optional without generation. If supplied, it must match the current config under the meeting lock before storing or enqueueing; mismatch returns configuration_conflict."
+      },
       "auto_regenerate": {
         "type": "boolean",
         "description": "Enqueue a regenerate job after storing (default false).",
@@ -92,6 +96,32 @@
         "source_type": "url",
         "url": "https://www.notion.so/example/meeting-notes",
         "request_id": "0a1b2c3d-4e5f-4607-8899-aabbccddeeff"
+      },
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "request_id": "register_context-codex-request-20260829-001",
+        "expected_config": {
+          "transcription_engine": "auto",
+          "diarization_engine": "none",
+          "llm_provider": "none",
+          "minutes_model": {
+            "provider": "codex-app-server",
+            "connection_id": "conn-fedcba987654",
+            "connection_revision": 1,
+            "model_id": "fixture-text-model",
+            "parameters": {
+              "reasoning_effort": "high"
+            },
+            "cache_epoch": 0
+          },
+          "external_send_policy": "subscription_ok",
+          "language": "ja",
+          "self_name": null,
+          "vocab_hints": []
+        },
+        "source_type": "text",
+        "content": "Contract fixture context.",
+        "auto_regenerate": true
       }
     ],
     "output": [

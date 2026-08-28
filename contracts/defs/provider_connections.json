@@ -123,8 +123,10 @@
           "$ref": "#/$defs/provider_auth_operation_state"
         },
         "authorization_url": {
-          "type": "null",
-          "description": "PR1 supports API keys and unauthenticated local Ollama only; no browser login URL is issued."
+          "type": ["string", "null"],
+          "maxLength": 8192,
+          "pattern": "^https://auth\\.openai\\.com/oauth/authorize\\?[^#\\s]+(?![\\s\\S])",
+          "description": "Official Codex ChatGPT authorization URL only while start is pending; otherwise null. The server also validates the parsed host/path, absence of userinfo and fragment, expected OAuth fields and the runtime's loopback callback. Tokens and runtime credential files are never returned."
         },
         "reason": {
           "$ref": "#/$defs/provider_reason"
@@ -137,7 +139,16 @@
         }
       },
       "additionalProperties": false,
-      "description": "Persisted public authentication operation. Starting again is never an implicit recovery action; query by the original start_request_id."
+      "description": "Persisted public authentication operation. Starting again is never an implicit recovery action; query by the original start_request_id.",
+      "allOf": [
+        {
+          "if": {
+            "properties": { "action": { "const": "start" }, "state": { "const": "pending" } },
+            "required": ["action", "state"]
+          },
+          "else": { "properties": { "authorization_url": { "type": "null" } } }
+        }
+      ]
     },
     "provider_connection": {
       "type": "object",
@@ -181,14 +192,14 @@
           ],
           "minLength": 1,
           "maxLength": 2048,
-          "description": "Non-secret, validated destination. Official Anthropic endpoints are fixed; Ollama is restricted to loopback."
+          "description": "Non-secret, validated destination. Official Anthropic and Codex destinations are fixed; Ollama is restricted to loopback."
         },
         "auth_method": {
           "$ref": "#/$defs/provider_auth_method"
         },
         "credential_present": {
           "type": "boolean",
-          "description": "Presence only; no key, token, digest or internal SecretStore identifier is exposed."
+          "description": "Presence only; no key, token, digest, internal SecretStore identifier or Codex runtime credential is exposed."
         },
         "auth_state": {
           "$ref": "#/$defs/provider_auth_state"
@@ -252,10 +263,18 @@
             }
           },
           "else": {
-            "properties": {
-              "auth_method": {
-                "const": "api_key"
+            "if": {
+              "properties": { "provider_id": { "const": "codex-app-server" } },
+              "required": ["provider_id"]
+            },
+            "then": {
+              "properties": {
+                "auth_method": { "const": "chatgpt" },
+                "endpoint": { "const": "https://chatgpt.com" }
               }
+            },
+            "else": {
+              "properties": { "auth_method": { "const": "api_key" } }
             }
           }
         }

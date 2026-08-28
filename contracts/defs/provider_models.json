@@ -3,6 +3,53 @@
   "$id": "narumi:defs/provider_models.json",
   "title": "narumi provider_models contract definitions",
   "$defs": {
+    "minutes_model_parameters": {
+      "type": "object",
+      "properties": {
+        "reasoning_effort": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+          "description": "Must be supported by the selected model's official runtime parameter_schema. Omission uses that model's default."
+        }
+      },
+      "additionalProperties": false,
+      "default": {},
+      "description": "Closed, non-secret minutes generation options. Paths, endpoints, credentials, commands and arbitrary runtime overrides are not accepted."
+    },
+    "minutes_model_selection": {
+      "type": "object",
+      "required": ["provider", "connection_id", "connection_revision", "model_id"],
+      "properties": {
+        "provider": { "const": "codex-app-server" },
+        "connection_id": { "$ref": "#/$defs/provider_connection_id" },
+        "connection_revision": { "$ref": "#/$defs/provider_connection_revision" },
+        "model_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "Exact, explicitly selected ID from this connection's model catalog. The server validates availability and supported parameters; it never substitutes another model."
+        },
+        "parameters": { "$ref": "#/$defs/minutes_model_parameters" },
+        "cache_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Non-secret generation cache discriminator. Unchanged inputs and selection reuse the existing minutes version; incrementing this value requests a new minutes generation only."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Explicit text-only minutes selection. It does not change llm_provider, transcript integration, vision, transcription or other stages. Requires an enabled, matching-revision Codex connection with official ChatGPT authentication and subscription_ok or api_ok policy."
+    },
+    "minutes_model": {
+      "oneOf": [
+        { "$ref": "#/$defs/minutes_model_selection" },
+        { "type": "null" }
+      ],
+      "default": null,
+      "description": "A minutes-only model override. Omitted updates retain the saved selection; null clears it. Missing in an existing saved config has the same meaning as null and preserves legacy llm_provider behavior."
+    },
     "provider_model_parameter": {
       "type": "object",
       "required": [

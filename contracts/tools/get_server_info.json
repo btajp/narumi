@@ -183,7 +183,7 @@
         "name": "narumi",
         "server_version": "0.1.4",
         "server_instance_id": "00000000-0000-4000-8000-000000000001",
-        "contract_version": "2.0.0",
+        "contract_version": "3.0.0",
         "secure_transport": { "mode": "pinned_tls", "tls_required": true, "client_auth_required": true },
         "capabilities": {
           "workflow": { "provider_connections": true, "provider_models": true, "stage_model_selection": false, "ensemble_generation": false },
@@ -210,7 +210,7 @@
         "name": "narumi",
         "server_version": "0.1.4",
         "server_instance_id": "00000000-0000-4000-8000-000000000002",
-        "contract_version": "2.0.0",
+        "contract_version": "3.0.0",
         "secure_transport": { "mode": "stdio", "tls_required": true, "client_auth_required": true },
         "capabilities": {
           "workflow": { "provider_connections": true, "provider_models": true, "stage_model_selection": false, "ensemble_generation": false },

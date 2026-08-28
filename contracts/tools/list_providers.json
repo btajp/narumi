@@ -107,6 +107,26 @@
               "active_setup": null,
               "last_setup": null
             }
+          },
+          {
+            "provider_id": "codex-app-server",
+            "display_name": "Codex App Server",
+            "roles": [
+              "llm"
+            ],
+            "auth_methods": [
+              "chatgpt"
+            ],
+            "availability": "not_prepared",
+            "reason": "runtime_preparation_required",
+            "runtime": {
+              "state": "not_prepared",
+              "version": null,
+              "catalog_revision": null,
+              "resources": [],
+              "active_setup": null,
+              "last_setup": null
+            }
           }
         ]
       }
