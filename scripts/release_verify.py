@@ -134,6 +134,26 @@ def release_for_verification(version: str, *, published: bool) -> dict:
     return matches[0]
 
 
+def release_download_base(release: dict, version: str, *, published: bool) -> str:
+    tag = f"v{version}"
+    if not published:
+        # Unpublished releases can use a release-specific GitHub placeholder. Bind
+        # every asset to this release's canonical URL, not an arbitrary placeholder.
+        prefix = f"https://github.com/{REPOSITORY}/releases/tag/"
+        html_url = release.get("html_url")
+        require(
+            isinstance(html_url, str) and html_url.startswith(prefix),
+            "GitHub draft Release URL が不正です",
+        )
+        draft_tag = html_url[len(prefix) :]
+        require(
+            draft_tag == tag or re.fullmatch(r"untagged-[0-9a-f]{20}", draft_tag),
+            "GitHub draft Release URL の tag が不一致です",
+        )
+        tag = draft_tag
+    return f"{DOWNLOAD_BASE}/{tag}"
+
+
 def check_history(version: str, build: int, *, allow_current: bool = False) -> None:
     """Network errors and incomplete older feeds fail closed, rather than disabling monotonicity."""
     for release in list_releases():
@@ -298,6 +318,7 @@ def verify_remote(
     require(
         release.get("target_commitish") == sealed["commit"], "Release の対象 commit が不一致です"
     )
+    download_base = release_download_base(release, version, published=published)
     tags = remote_tags(root, version)
     if tags:
         mapping = dict(row.split("\t")[::-1] for row in tags.splitlines())
@@ -320,7 +341,7 @@ def verify_remote(
             expected = sealed["assets"][name]
             require(asset.get("state") == "uploaded", "GitHub asset がアップロード未完了です")
             require(asset.get("size") == expected["size"], "GitHub asset の長さが不一致です")
-            expected_url = f"{DOWNLOAD_BASE}/v{version}/{name}"
+            expected_url = f"{download_base}/{name}"
             require(
                 asset.get("browser_download_url") == expected_url, "GitHub asset URL が不一致です"
             )

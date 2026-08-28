@@ -24,6 +24,7 @@ SIGNATURE = base64.b64encode(b"s" * 64).decode()
 SPARKLE = "{http://www.andymatuschak.org/xml-namespaces/sparkle}"
 VERSION = "0.1.1"
 BUILD = 25
+DRAFT_TAG = "untagged-" + "a1" * 10
 with (STATE / "calls.jsonl").open("a") as stream:
     stream.write(json.dumps([PROGRAM, ARGS]) + "\n")
 
@@ -82,13 +83,14 @@ def make_release():
                 "state": "uploaded",
                 "size": len(content),
                 "digest": "sha256:" + hashlib.sha256(content).hexdigest(),
-                "browser_download_url": f"https://github.com/btajp/narumi/releases/download/v{VERSION}/{source.name}",
+                "browser_download_url": f"https://github.com/btajp/narumi/releases/download/{DRAFT_TAG}/{source.name}",
             }
         )
     (STATE / "release.json").write_text(
         json.dumps(
             {
                 "tag_name": f"v{VERSION}",
+                "html_url": f"https://github.com/btajp/narumi/releases/tag/{DRAFT_TAG}",
                 "target_commitish": COMMIT,
                 "draft": True,
                 "prerelease": False,

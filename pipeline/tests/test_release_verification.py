@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+DRAFT_TAG = "untagged-" + "a1" * 10
 
 
 @pytest.fixture
@@ -129,6 +130,7 @@ def remote(verifier, monkeypatch, tmp_path):
     ]
     release = {
         "tag_name": "v0.1.1",
+        "html_url": "https://github.com/btajp/narumi/releases/tag/v0.1.1",
         "draft": True,
         "prerelease": False,
         "target_commitish": sealed["commit"],
@@ -152,6 +154,13 @@ def remote(verifier, monkeypatch, tmp_path):
     def fake_run(*command, output=None):
         assert command[:2] == ("gh", "api") and output is not None
         identifier = int(command[2].rsplit("/", 1)[-1])
+        assert command == (
+            "gh",
+            "api",
+            f"repos/btajp/narumi/releases/assets/{identifier}",
+            "-H",
+            "Accept: application/octet-stream",
+        )
         data = list(payloads.values())[identifier - 1]
         output.write_bytes(data)
         downloaded.append(output.name)
@@ -167,10 +176,87 @@ def remote(verifier, monkeypatch, tmp_path):
     return release, sealed, downloaded, invoke
 
 
-def test_draft_downloads_and_hashes_both_assets(remote):
-    _, _, downloaded, invoke = remote
+def set_draft_url(release, tag=DRAFT_TAG):
+    release["html_url"] = f"https://github.com/btajp/narumi/releases/tag/{tag}"
+    for asset in release["assets"]:
+        asset["browser_download_url"] = (
+            f"https://github.com/btajp/narumi/releases/download/{tag}/{asset['name']}"
+        )
+
+
+@pytest.mark.parametrize("tag", ["v0.1.1", DRAFT_TAG])
+def test_draft_downloads_and_hashes_both_assets(remote, tag):
+    release, _, downloaded, invoke = remote
+    set_draft_url(release, tag)
     assert invoke()["verified"] is True
     assert downloaded == ["narumi-0.1.1.zip", "appcast.xml"]
+
+
+@pytest.mark.parametrize(
+    "html_url",
+    [
+        None,
+        1,
+        f"https://github.com/other/narumi/releases/tag/{DRAFT_TAG}",
+        f"https://github.com.example/narumi/releases/tag/{DRAFT_TAG}",
+        f"http://github.com/btajp/narumi/releases/tag/{DRAFT_TAG}",
+        "https://github.com/btajp/narumi/releases/tag/v0.1.0",
+        "https://github.com/btajp/narumi/releases/tag/untagged-arbitrary",
+        f"https://github.com/btajp/narumi/releases/tag/{DRAFT_TAG}?extra=1",
+        f"https://github.com/btajp/narumi/releases/tag/{DRAFT_TAG}#fragment",
+        f"https://github.com/btajp/narumi/releases/tag/{DRAFT_TAG}/../v0.1.1",
+    ],
+)
+def test_draft_placeholder_requires_own_canonical_release_url(verifier, remote, html_url):
+    release, _, downloaded, invoke = remote
+    set_draft_url(release)
+    release["html_url"] = html_url
+    with pytest.raises(verifier.ReleaseError, match="Release URL"):
+        invoke()
+    assert downloaded == []
+
+
+@pytest.mark.parametrize(
+    "asset_url",
+    [
+        f"https://github.com/other/narumi/releases/download/{DRAFT_TAG}/narumi-0.1.1.zip",
+        "https://github.com/btajp/narumi/releases/download/untagged-"
+        + "b2" * 10
+        + "/narumi-0.1.1.zip",
+        f"https://github.com/btajp/narumi/releases/download/{DRAFT_TAG}/other.zip",
+        f"https://github.com/btajp/narumi/releases/download/{DRAFT_TAG}/appcast.xml",
+        "https://github.com/btajp/narumi/releases/download/v0.1.1/narumi-0.1.1.zip",
+        f"http://github.com/btajp/narumi/releases/download/{DRAFT_TAG}/narumi-0.1.1.zip",
+    ],
+)
+def test_draft_placeholder_asset_url_must_match_release_and_filename(verifier, remote, asset_url):
+    release, _, downloaded, invoke = remote
+    set_draft_url(release)
+    release["assets"][0]["browser_download_url"] = asset_url
+    with pytest.raises(verifier.ReleaseError, match="asset URL"):
+        invoke()
+    assert downloaded == []
+
+
+def test_draft_placeholder_asset_id_still_requires_sealed_bytes(verifier, remote):
+    release, _, downloaded, invoke = remote
+    set_draft_url(release)
+    release["assets"][0]["id"] = 2
+    with pytest.raises(verifier.ReleaseError, match="SHA256 / 長さ"):
+        invoke()
+    assert downloaded == ["narumi-0.1.1.zip"]
+
+
+def test_published_rejects_draft_placeholder_asset_url(verifier, monkeypatch, remote):
+    release, sealed, downloaded, invoke = remote
+    set_draft_url(release)
+    release["draft"] = False
+    monkeypatch.setattr(
+        verifier, "remote_tags", lambda *args: sealed["commit"] + "\trefs/tags/v0.1.1"
+    )
+    with pytest.raises(verifier.ReleaseError, match="asset URL"):
+        invoke(published=True)
+    assert downloaded == []
 
 
 @pytest.mark.parametrize(
