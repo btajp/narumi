@@ -7,10 +7,12 @@ public final class MCPHTTPTransport: Sendable {
     public static let confidentialErrorMessage = "Gaia 接続設定を保存できませんでした。接続先と入力内容を確認してください。"
 
     private let ordinarySession: URLSession
+    private let permissionSession: URLSession
     private let confidentialSession: URLSession
 
     public init() {
         ordinarySession = URLSession(configuration: Self.ordinaryConfiguration())
+        permissionSession = URLSession(configuration: Self.permissionConfiguration())
         confidentialSession = URLSession(
             configuration: Self.confidentialConfiguration(),
             delegate: RejectRedirects(), delegateQueue: nil)
@@ -18,6 +20,7 @@ public final class MCPHTTPTransport: Sendable {
 
     deinit {
         ordinarySession.invalidateAndCancel()
+        permissionSession.invalidateAndCancel()
         confidentialSession.invalidateAndCancel()
     }
 
@@ -27,14 +30,35 @@ public final class MCPHTTPTransport: Sendable {
 
     /// The body check is mandatory even if a caller forgets to protect session initialization.
     public func data(for request: URLRequest, protectingSecrets: Bool = false) async throws -> (Data, URLResponse) {
-        guard protectingSecrets || Self.hasConfidentialBody(request) else {
-            return try await ordinarySession.data(for: request)
+        let plan = try Self.requestPlan(for: request, protectingSecrets: protectingSecrets)
+        switch plan.route {
+        case .ordinary: return try await ordinarySession.data(for: plan.request)
+        case .permissionSetup: return try await permissionSession.data(for: plan.request)
+        case .confidential: return try await confidentialSession.data(for: plan.request)
         }
-        var protected = request
-        protected.url = try Self.confidentialEndpoint(request.url)
-        protected.httpShouldHandleCookies = false
-        protected.cachePolicy = .reloadIgnoringLocalCacheData
-        return try await confidentialSession.data(for: protected)
+    }
+
+    enum RequestRoute: Equatable {
+        case ordinary, permissionSetup, confidential
+    }
+
+    /// A pure send plan keeps the selected session and its per-request safeguards together.
+    static func requestPlan(
+        for request: URLRequest, protectingSecrets: Bool = false
+    ) throws -> (route: RequestRoute, request: URLRequest) {
+        var prepared = request
+        if protectingSecrets || hasConfidentialBody(request) {
+            prepared.url = try confidentialEndpoint(request.url)
+            prepared.httpShouldHandleCookies = false
+            prepared.cachePolicy = .reloadIgnoringLocalCacheData
+            return (.confidential, prepared)
+        }
+        if calledTool(request) == ToolCatalog.configureRecordingPermission {
+            // A caller's shorter URLRequest timeout otherwise overrides the session setting.
+            prepared.timeoutInterval = 150
+            return (.permissionSetup, prepared)
+        }
+        return (.ordinary, prepared)
     }
 
     /// Never resolve a hostname while sending a secret. Even localhost is pinned numerically.
@@ -77,19 +101,31 @@ public final class MCPHTTPTransport: Sendable {
     }
 
     static func hasConfidentialBody(_ request: URLRequest) -> Bool {
+        guard let name = calledTool(request) else { return false }
+        return isConfidentialTool(name)
+    }
+
+    private static func calledTool(_ request: URLRequest) -> String? {
         guard let body = request.httpBody,
             let rpc = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
             rpc["method"] as? String == "tools/call",
             let params = rpc["params"] as? [String: Any],
             let name = params["name"] as? String
-        else { return false }
-        return isConfidentialTool(name)
+        else { return nil }
+        return name
     }
 
-    private static func ordinaryConfiguration() -> URLSessionConfiguration {
+    static func ordinaryConfiguration() -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 30
         configuration.timeoutIntervalForResource = 120
+        return configuration
+    }
+
+    static func permissionConfiguration() -> URLSessionConfiguration {
+        let configuration = ordinaryConfiguration()
+        configuration.timeoutIntervalForRequest = 150
+        configuration.timeoutIntervalForResource = 180
         return configuration
     }
 

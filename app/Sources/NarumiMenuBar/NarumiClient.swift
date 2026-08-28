@@ -55,10 +55,13 @@ struct NarumiClient: Sendable {
 
     // MARK: Plumbing
 
-    private func call<T: Decodable>(_ name: String, _ arguments: [String: JSONNode] = [:]) async throws -> T {
+    private func call<T: Decodable>(
+        _ name: String, _ arguments: [String: JSONNode] = [:], expectedSessionGeneration: UInt64? = nil
+    ) async throws -> T {
         let result: ToolCallResult
         do {
-            result = try await mcp.callTool(name, arguments: arguments)
+            result = try await mcp.callTool(
+                name, arguments: arguments, expectedSessionGeneration: expectedSessionGeneration)
         } catch let error as MCPClientError {
             throw ToolFailure(from: error)
         }
@@ -396,8 +399,30 @@ struct NarumiClient: Sendable {
 
     // MARK: Diagnostics
 
-    func serverInfo() async throws -> ServerInfo {
-        try await call(ToolCatalog.getServerInfo)
+    func serverInfo(
+        refreshPermissions: Bool = false, contractVersion: String? = nil, serverInstanceID: String? = nil
+    ) async throws -> ServerInfo {
+        let arguments = RecordingPermissionContract.serverInfoArguments(
+            contractVersion: contractVersion, serverInstanceID: serverInstanceID,
+            refreshPermissions: refreshPermissions).mapValues(JSONNode.bool)
+        return try await call(ToolCatalog.getServerInfo, arguments)
+    }
+
+    func configureRecordingPermission(
+        _ permission: RecordingPermission, action: RecordingPermissionAction,
+        requestID: String, contractVersion: String?, serverInstanceID: String?, sessionGeneration: UInt64
+    ) async throws -> ConfigureRecordingPermissionResponse {
+        guard RecordingPermissionContract.supportsSetup(contractVersion, serverInstanceID: serverInstanceID) else {
+            throw ToolFailure(code: "unsupported", message: "権限設定には起動個体を確認できる対応サーバーが必要です。")
+        }
+        let response: ConfigureRecordingPermissionResponse = try await call(
+            ToolCatalog.configureRecordingPermission,
+            ["permission": .string(permission.rawValue), "action": .string(action.rawValue),
+                "request_id": .string(requestID)], expectedSessionGeneration: sessionGeneration)
+        guard response.permission == permission, response.action == action else {
+            throw ToolFailure(code: "protocol", message: "権限設定の応答が要求と一致しません。状態を再確認してください。")
+        }
+        return response
     }
 
     func rebuildCatalog() async throws -> RebuildCatalogResponse {

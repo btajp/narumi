@@ -16,6 +16,7 @@ from narumi.transcribe import available_engines as transcription_engines
 
 from narumi_server import __version__
 from narumi_server.handlers.common import jsonable
+from narumi_server.recording import CHECK_CACHE_SECONDS
 
 if TYPE_CHECKING:
     from narumi_server.context import ServerContext
@@ -41,9 +42,13 @@ def capability_names() -> dict[str, list[str]]:
 
 
 def get_server_info(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
-    permissions = ctx.recorder.permissions()  # runs `narumi-recorder check` (cached briefly)
+    permission_snapshot = ctx.recorder.permission_snapshot(
+        max_age=0.0 if args.get("refresh_permissions", False) else CHECK_CACHE_SECONDS
+    )
+    permissions = permission_snapshot.permissions
     capabilities: dict[str, Any] = {
-        "recording": ctx.recorder.available(),
+        "recording": permissions is not None and permissions["microphone"] != "denied",
+        "permission_setup_in_progress": permission_snapshot.in_progress,
         "transports": list(ctx.transports),
         **capability_names(),
     }
@@ -52,6 +57,7 @@ def get_server_info(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
     return {
         "name": SERVER_NAME,
         "server_version": __version__,
+        "server_instance_id": ctx.server_instance_id,
         "contract_version": ctx.contracts.contract_version,
         "capabilities": capabilities,
         "diagnostics": diagnostics(ctx),

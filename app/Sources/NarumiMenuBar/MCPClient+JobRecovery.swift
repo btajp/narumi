@@ -81,16 +81,9 @@ extension MCPClient {
     }
 
     private static func createsJob(_ name: String, _ arguments: [String: JSONNode]) -> Bool {
-        switch name {
-        case ToolCatalog.regenerate, ToolCatalog.exportMinutes:
-            return true
-        case ToolCatalog.importRecording, ToolCatalog.stopRecording:
-            return arguments["auto_process"]?.boolValue != false
-        case ToolCatalog.registerContext:
-            return arguments["auto_regenerate"]?.boolValue == true
-        default:
-            return false
-        }
+        MCPToolReplayPolicy.createsJob(
+            tool: name, autoProcess: arguments["auto_process"]?.boolValue,
+            autoRegenerate: arguments["auto_regenerate"]?.boolValue)
     }
 
     private static func toolErrorCode(_ error: any Error) -> String? {

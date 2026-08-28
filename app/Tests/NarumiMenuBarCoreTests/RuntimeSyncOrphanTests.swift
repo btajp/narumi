@@ -133,8 +133,10 @@ final class RuntimeSyncOrphanTests: XCTestCase {
             .appendingPathComponent("Sources/NarumiMenuBarCore")
         let compiler = Process()
         compiler.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        compiler.currentDirectoryURL = root
         // Compile the real launcher unchanged with its Foundation-only dependencies. The
-        // module name makes its Core import a no-op; no GUI entry point or Sparkle is linked.
+        // module name makes its Core import a no-op; sources below must track new launcher
+        // dependencies. No SwiftPM .build module, GUI entry point or Sparkle is used.
         compiler.arguments = [
             "swiftc", "-swift-version", "6", "-parse-as-library", "-module-name", "NarumiMenuBarCore",
             "-o", executable.path, source.path,
@@ -142,7 +144,8 @@ final class RuntimeSyncOrphanTests: XCTestCase {
         ]
             + [
                 "RuntimeSyncOwnership.swift", "RuntimeGuards.swift", "RuntimeInstallation.swift", "RuntimeSyncPlan.swift", "RuntimeManifest.swift",
-                "ServerCommand.swift", "ServerConfig.swift", "ServerReadiness.swift", "ServerState.swift", "ContractModels.swift", "ToolCatalog.swift",
+                "ServerCommand.swift", "ServerConfig.swift", "ServerReadiness.swift", "ServerState.swift", "OwnedServerRecovery.swift",
+                "ContractModels.swift", "RecordingPermissionModels.swift", "ToolCatalog.swift",
             ]
                 .map { core.appendingPathComponent($0).path }
         let output = Pipe()

@@ -1,7 +1,7 @@
 {
   "name": "get_server_info",
   "title": "Get server info",
-  "description": "Return the narumi server identity, version, capabilities and diagnostics. `capabilities` reports whether recording can be attempted on this machine (narumi-recorder binary present and no permission known to be denied; `permissions` gives the per-permission state from `narumi-recorder check`), the active transports, and the registry names of the installed transcription engines, diarization engines, LLM providers and export destinations. `diagnostics` reports the local environment for a diagnostics screen: resolved ffmpeg / ffprobe binaries (null when not found), the data root (<NARUMI_HOME>), the meetings root, the catalog database path, the narumi-recorder binary path (null when not found) and the contracts directory the server loaded. Call this first to learn which names are valid for set_meeting_config / export_minutes and to detect a contract_version mismatch with your client. Read-only, takes no arguments. On failure returns an error_envelope (isError=true) with code: internal.",
+  "description": "Return the narumi server identity, version, capabilities and diagnostics. `capabilities` reports whether recording can be attempted on this machine (narumi-recorder binary present and microphone permission not known to be denied; `permissions` gives the state from `narumi-recorder check`), permission_setup_in_progress, the active transports, and registry names of installed engines, providers and exporters. `recording` and `permissions` use the same permission snapshot. Set refresh_permissions=true to bypass the short permission cache after returning from macOS settings; while a permission action is in progress, the current cached report may be returned instead and permission_setup_in_progress remains true. This read-only tool never triggers a permission prompt. `diagnostics` reports resolved ffmpeg / ffprobe binaries, data and meetings roots, catalog path, recorder path and loaded contracts directory. Call with empty arguments first to detect the contract version; refresh_permissions and configure_recording_permission require contract 1.1.0 or later in major 1. On failure returns an error_envelope (isError=true) with code: internal.",
   "annotations": {
     "readOnlyHint": true,
     "destructiveHint": false,
@@ -10,8 +10,14 @@
   },
   "inputSchema": {
     "type": "object",
-    "description": "No arguments.",
-    "properties": {},
+    "description": "Optional permission cache refresh; empty arguments preserve the existing read-only probe.",
+    "properties": {
+      "refresh_permissions": {
+        "type": "boolean",
+        "default": false,
+        "description": "Recheck OS permission state instead of using the short cache, unless a permission action is still running. Never requests permission."
+      }
+    },
     "required": [],
     "additionalProperties": false
   },
@@ -27,6 +33,11 @@
       "server_version": {
         "type": "string",
         "description": "Version of the narumi_server package."
+      },
+      "server_instance_id": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        "description": "Random UUID fixed for the lifetime of this running server context; changes after a restart. Permission setup clients must bind unresolved actions to this identity and accept idle reconciliation only from the same instance. Missing in older servers; absence or a different instance is not proof that an earlier helper exited. This is an identity marker, not a secret or authentication credential."
       },
       "contract_version": {
         "type": "string",
@@ -46,17 +57,14 @@
         "properties": {
           "recording": {
             "type": "boolean",
-            "description": "True when start_recording can be attempted: narumi-recorder found, its permission check succeeded and microphone access is not denied. Screen recording is not part of this flag because macOS reports it as denied until it was granted once (the first start_recording triggers the prompt); see permissions for the raw state."
+            "description": "True when start_recording can be attempted: narumi-recorder found, its permission check succeeded and microphone access is not denied. Screen recording is not part of this flag because its denied status also covers never requested; see permissions for the raw state. configure_recording_permission lets clients request access explicitly before starting a recording."
           },
           "permissions": {
-            "type": "object",
-            "description": "Permission state reported by `narumi-recorder check`. Present when the recorder binary is found and the check succeeded. `unknown` = not asked yet.",
-            "required": ["screen_recording", "microphone"],
-            "properties": {
-              "screen_recording": { "type": "string", "enum": ["granted", "denied", "unknown"] },
-              "microphone": { "type": "string", "enum": ["granted", "denied", "unknown"] }
-            },
-            "additionalProperties": false
+            "$ref": "../defs/common.json#/$defs/recording_permission_report"
+          },
+          "permission_setup_in_progress": {
+            "type": "boolean",
+            "description": "True while an explicit permission action or its owned-child cleanup is running. Do not start recording or restart/update the app until it becomes false. Omitted by older servers."
           },
           "transports": {
             "type": "array",
@@ -160,14 +168,16 @@
     "additionalProperties": false
   },
   "examples": {
-    "input": [{}, {}],
+    "input": [{}, { "refresh_permissions": true }],
     "output": [
       {
         "name": "narumi",
-        "server_version": "0.1.0",
-        "contract_version": "1.0.0",
+        "server_version": "0.1.3",
+        "server_instance_id": "00000000-0000-4000-8000-000000000001",
+        "contract_version": "1.1.0",
         "capabilities": {
           "recording": true,
+          "permission_setup_in_progress": false,
           "permissions": { "screen_recording": "granted", "microphone": "unknown" },
           "transports": ["streamable-http"],
           "transcription_engines": ["auto", "fake", "mlx-whisper", "faster-whisper"],
@@ -187,10 +197,12 @@
       },
       {
         "name": "narumi",
-        "server_version": "0.1.0",
-        "contract_version": "1.0.0",
+        "server_version": "0.1.3",
+        "server_instance_id": "00000000-0000-4000-8000-000000000002",
+        "contract_version": "1.1.0",
         "capabilities": {
           "recording": false,
+          "permission_setup_in_progress": false,
           "transports": ["stdio"],
           "transcription_engines": ["auto", "fake"],
           "diarization_engines": ["none", "fake"],

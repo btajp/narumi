@@ -53,7 +53,8 @@ struct MainWindowView: View {
                 } label: {
                     Label("診断", systemImage: "stethoscope")
                 }
-                .help("サーバー診断・カタログ再構築")
+                .labelStyle(.titleAndIcon)
+                .help("録画の権限・サーバー診断・カタログ再構築")
             }
         }
         .sheet(isPresented: $model.showImportSheet) {

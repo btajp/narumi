@@ -3,6 +3,26 @@
   "$id": "narumi:defs/common.json",
   "title": "narumi common contract definitions",
   "$defs": {
+    "recording_permission": {
+      "type": "string",
+      "enum": ["microphone", "screen_recording"],
+      "description": "The local macOS permission to configure. No recording is started."
+    },
+    "recording_permission_action": {
+      "type": "string",
+      "enum": ["request", "open_settings"],
+      "description": "Request OS permission or open its fixed macOS privacy settings pane. Permission is never granted automatically."
+    },
+    "recording_permission_report": {
+      "type": "object",
+      "description": "Read-only recorder permission report. Screen recording denied also covers never requested. Microphone unknown normally means not requested yet.",
+      "required": ["screen_recording", "microphone"],
+      "properties": {
+        "screen_recording": { "type": "string", "enum": ["granted", "denied", "unknown"] },
+        "microphone": { "type": "string", "enum": ["granted", "denied", "unknown"] }
+      },
+      "additionalProperties": false
+    },
     "gaia_connection": {
       "type": "object",
       "description": "Public Gaia connection settings. Credentials are write-only and are never returned.",

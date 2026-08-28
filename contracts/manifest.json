@@ -1,11 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "name": "narumi",
-  "contract_version": "1.0.0",
+  "contract_version": "1.1.0",
   "description": "narumi MCP tool contracts v1. Each tool is defined in tools/<name>.json; shared types live in defs/common.json.",
   "defs": ["defs/common.json"],
   "tools": [
     "get_server_info",
+    "configure_recording_permission",
     "start_recording",
     "stop_recording",
     "get_recording_status",

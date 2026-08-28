@@ -22,17 +22,6 @@ final class MainWindowModel: ObservableObject {
         var id: String { rawValue }
     }
 
-    /// Host actions plus the shared recording entry points. Recording still uses the same
-    /// public MCP calls; its state and start dialog are owned by the AppDelegate.
-    struct HostActions {
-        var restartServer: () -> Void = {}
-        var openServerLog: () -> Void = {}
-        var checkForUpdates: () -> Void = {}
-        var startRecording: () -> Void = {}
-        var stopRecording: () -> Void = {}
-        var jobActivityChanged: (Bool) -> Void = { _ in }
-    }
-
     let client: NarumiClient
     var hostActions = HostActions()
 
@@ -50,6 +39,9 @@ final class MainWindowModel: ObservableObject {
     // MARK: Recording banner
 
     @Published private(set) var desktopSession = DesktopSessionState()
+    @Published var permissionSetup = RecordingPermissionSetupState()
+    @Published var permissionFeedback: String?
+    @Published var refreshingPermissions = false
     var recordingStatus: RecordingStatus { desktopSession.recording }
 
     // MARK: Detail

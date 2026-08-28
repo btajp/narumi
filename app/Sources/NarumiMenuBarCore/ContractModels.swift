@@ -588,6 +588,11 @@ public struct RecorderPermissions: Codable, Equatable, Sendable {
         case screenRecording = "screen_recording"
         case microphone
     }
+
+    public init(screenRecording: String, microphone: String) {
+        self.screenRecording = screenRecording
+        self.microphone = microphone
+    }
 }
 
 public struct ServerCapabilities: Codable, Equatable, Sendable {
@@ -598,6 +603,7 @@ public struct ServerCapabilities: Codable, Equatable, Sendable {
     public var diarizationEngines: [String]
     public var llmProviders: [String]
     public var exportDestinations: [String]
+    public var permissionSetupInProgress: Bool
 
     enum CodingKeys: String, CodingKey {
         case recording
@@ -607,6 +613,38 @@ public struct ServerCapabilities: Codable, Equatable, Sendable {
         case diarizationEngines = "diarization_engines"
         case llmProviders = "llm_providers"
         case exportDestinations = "export_destinations"
+        case permissionSetupInProgress = "permission_setup_in_progress"
+    }
+
+    public init(
+        recording: Bool, permissions: RecorderPermissions? = nil, transports: [String],
+        transcriptionEngines: [String], diarizationEngines: [String], llmProviders: [String],
+        exportDestinations: [String], permissionSetupInProgress: Bool = false
+    ) {
+        self.recording = recording
+        self.permissions = permissions
+        self.transports = transports
+        self.transcriptionEngines = transcriptionEngines
+        self.diarizationEngines = diarizationEngines
+        self.llmProviders = llmProviders
+        self.exportDestinations = exportDestinations
+        self.permissionSetupInProgress = permissionSetupInProgress
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        recording = try container.decode(Bool.self, forKey: .recording)
+        permissions = try container.decodeIfPresent(RecorderPermissions.self, forKey: .permissions)
+        transports = try container.decode([String].self, forKey: .transports)
+        transcriptionEngines = try container.decode([String].self, forKey: .transcriptionEngines)
+        diarizationEngines = try container.decode([String].self, forKey: .diarizationEngines)
+        llmProviders = try container.decode([String].self, forKey: .llmProviders)
+        exportDestinations = try container.decode([String].self, forKey: .exportDestinations)
+        if container.contains(.permissionSetupInProgress) {
+            permissionSetupInProgress = try container.decode(Bool.self, forKey: .permissionSetupInProgress)
+        } else {
+            permissionSetupInProgress = false
+        }
     }
 }
 
@@ -634,6 +672,7 @@ public struct ServerDiagnostics: Codable, Equatable, Sendable {
 public struct ServerInfo: Codable, Equatable, Sendable {
     public var name: String
     public var serverVersion: String
+    public var serverInstanceID: String?
     public var contractVersion: String
     public var capabilities: ServerCapabilities
     public var diagnostics: ServerDiagnostics
@@ -641,9 +680,42 @@ public struct ServerInfo: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case name
         case serverVersion = "server_version"
+        case serverInstanceID = "server_instance_id"
         case contractVersion = "contract_version"
         case capabilities
         case diagnostics
+    }
+
+    public init(
+        name: String, serverVersion: String, contractVersion: String,
+        capabilities: ServerCapabilities, diagnostics: ServerDiagnostics, serverInstanceID: String? = nil
+    ) {
+        self.name = name
+        self.serverVersion = serverVersion
+        self.serverInstanceID = serverInstanceID
+        self.contractVersion = contractVersion
+        self.capabilities = capabilities
+        self.diagnostics = diagnostics
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        serverVersion = try container.decode(String.self, forKey: .serverVersion)
+        contractVersion = try container.decode(String.self, forKey: .contractVersion)
+        capabilities = try container.decode(ServerCapabilities.self, forKey: .capabilities)
+        diagnostics = try container.decode(ServerDiagnostics.self, forKey: .diagnostics)
+        if container.contains(.serverInstanceID) {
+            let instanceID = try container.decode(String.self, forKey: .serverInstanceID)
+            guard RecordingPermissionContract.isValidServerInstanceID(instanceID) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .serverInstanceID, in: container,
+                    debugDescription: "server_instance_id must be a lowercase UUIDv4")
+            }
+            serverInstanceID = instanceID
+        } else {
+            serverInstanceID = nil
+        }
     }
 }
 

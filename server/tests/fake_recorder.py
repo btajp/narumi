@@ -16,6 +16,11 @@ event with byte sizes and exits 0. Environment knobs for failure paths:
 * ``FAKE_RECORDER_ERROR_AFTER_STOP=<code>`` emit ``stopped`` (tracks finalized) followed by an
   ``error`` event and exit 1 — a capture failure mid-meeting whose audio survived
 * ``FAKE_RECORDER_CHECK=<json>``     what ``check`` prints instead of the all-granted report
+* ``FAKE_RECORDER_PERMISSION_DELAY=<s>`` delay a recording-free permission operation
+* ``FAKE_RECORDER_PERMISSION_RESULT=<json>`` override its JSON response
+* ``FAKE_RECORDER_PERMISSION_EXIT=<n>`` override its exit status
+* ``FAKE_RECORDER_PERMISSION_IGNORE_TERM=1`` ignore SIGTERM to test kill fallback
+* ``FAKE_RECORDER_PERMISSION_MARKER=<path>`` append PID/argv for fake-only synchronization
 """
 
 from __future__ import annotations
@@ -149,12 +154,45 @@ def main(argv: list[str] | None = None) -> int:
     rec.add_argument("--no-video", action="store_true")
     rec.add_argument("--mic", default=None)
     sub.add_parser("check")
+    for command in ("request-permission", "open-permission-settings"):
+        permissions = sub.add_parser(command)
+        permissions.add_argument("permission", choices=("microphone", "screen_recording"))
     args = parser.parse_args(argv)
     if args.command == "check":
         report = os.environ.get("FAKE_RECORDER_CHECK")
         print(report or json.dumps({"screen_recording": "granted", "microphone": "granted"}))
         return 0
+    if args.command in {"request-permission", "open-permission-settings"}:
+        return configure_permission(args)
     return record(args)
+
+
+def configure_permission(args: argparse.Namespace) -> int:
+    """Only report a fake permission result; do not write any recording tracks."""
+    if os.environ.get("FAKE_RECORDER_PERMISSION_IGNORE_TERM"):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    marker = os.environ.get("FAKE_RECORDER_PERMISSION_MARKER")
+    if marker:
+        with Path(marker).open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"pid": os.getpid(), "command": args.command}) + "\n")
+    time.sleep(_env_float("FAKE_RECORDER_PERMISSION_DELAY"))
+    action = "request" if args.command == "request-permission" else "open_settings"
+    raw = os.environ.get("FAKE_RECORDER_PERMISSION_RESULT")
+    if raw is not None:
+        print(raw, flush=True)
+    else:
+        emit(
+            {
+                "permission": args.permission,
+                "action": action,
+                "permissions": json.loads(
+                    os.environ.get("FAKE_RECORDER_CHECK")
+                    or '{"screen_recording":"granted","microphone":"granted"}'
+                ),
+                "settings_opened": action == "open_settings",
+            }
+        )
+    return int(os.environ.get("FAKE_RECORDER_PERMISSION_EXIT") or 0)
 
 
 if __name__ == "__main__":

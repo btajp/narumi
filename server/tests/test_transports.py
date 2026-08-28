@@ -94,7 +94,11 @@ async def test_streamable_http(server: Server[Any]):
         assert http_server.started, "uvicorn did not start"
         async with Client(f"http://127.0.0.1:{port}/mcp") as client:
             listed = await client.list_tools()
-            assert [t.name for t in listed.tools][:2] == ["get_server_info", "start_recording"]
+            assert {
+                "get_server_info",
+                "configure_recording_permission",
+                "start_recording",
+            }.issubset({tool.name for tool in listed.tools})
             info = await client.call_tool("get_server_info", {})
             assert not info.is_error and info.structured_content["name"] == "narumi"
             bad = await client.call_tool("get_job_status", {"job_id": "job-000000000000"})

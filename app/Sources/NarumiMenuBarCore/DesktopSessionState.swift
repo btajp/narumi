@@ -24,6 +24,8 @@ public struct DesktopSessionState: Equatable, Sendable {
     public private(set) var installingUpdate = false
     public private(set) var hasPendingJobRequests = false
     public private(set) var hasPendingStopRequest = false
+    public private(set) var permissionSetupBlocked = false
+    public private(set) var needsPermissionSetup = false
 
     private var revision: UInt64 = 0
     private var pendingPoll: Token?
@@ -35,6 +37,7 @@ public struct DesktopSessionState: Equatable, Sendable {
         serverState.pollsServerInfo && serverReachable && recordingCapable == true
             && recordingIsConfirmed && !recording.active && operation == nil
             && !terminating && !installingUpdate && !hasPendingJobRequests
+            && !permissionSetupBlocked && !needsPermissionSetup
     }
 
     public var canStop: Bool {
@@ -54,6 +57,7 @@ public struct DesktopSessionState: Equatable, Sendable {
         if recording.active {
             return recordingIsConfirmed ? "録画中" : "録画中（接続・状態を再確認中）"
         }
+        if permissionSetupBlocked { return "録画の権限設定が完了するまで待機しています" }
         if hasPendingJobRequests { return "操作結果を確認中です。確認まで更新・新規録画を待機します" }
         switch serverState {
         case .preparing(let step): return "環境を準備中…（\(step)）"
@@ -63,6 +67,7 @@ public struct DesktopSessionState: Equatable, Sendable {
         case .stopped: return "サーバーが停止しています"
         case .running, .external:
             if !serverReachable || !recordingIsConfirmed { return "接続・録画状態を確認中…" }
+            if needsPermissionSetup { return "録画の権限を設定してください。診断から確認できます" }
             if recordingCapable != true { return "録画の準備が必要です。診断で権限・環境を確認してください" }
             return "録画を開始できます"
         }
@@ -175,6 +180,11 @@ public struct DesktopSessionState: Equatable, Sendable {
         hasPendingStopRequest = pendingStop
     }
 
+    public mutating func setPermissionSetupState(blocked: Bool, needsSetup: Bool) {
+        permissionSetupBlocked = blocked
+        needsPermissionSetup = needsSetup
+    }
+
     public mutating func beginTermination() {
         terminating = true
         invalidateRequests()
@@ -192,6 +202,7 @@ public struct DesktopSessionState: Equatable, Sendable {
         if terminating { return "終了処理中のため更新を延期します" }
         if operation != nil { return "録画の開始・停止操作中のため更新を延期します" }
         if recording.active { return "録画中のため更新を延期します" }
+        if permissionSetupBlocked { return "録画の権限設定が完了するまで更新を延期します" }
         if hasPendingJobRequests { return "操作結果を確認できるまで更新を延期します" }
         if launcherBusy { return "環境を準備中のため更新を延期します" }
         switch serverState {

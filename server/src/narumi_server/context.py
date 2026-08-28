@@ -7,6 +7,7 @@ import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from uuid import uuid4
 
 from narumi.catalog import Catalog
 from narumi.config import catalog_path, data_root, meetings_root
@@ -43,6 +44,8 @@ class ServerContext:
     validate_output: bool = False
     handlers: Mapping[str, Handler] = field(default_factory=lambda: dict(HANDLERS))
     actor: str = DEFAULT_ACTOR
+    server_instance_id: str = field(default_factory=lambda: str(uuid4()), init=False)
+    """Opaque lifetime identity; never persisted or reused after a context restart."""
     idempotency: IdempotencyStore = field(init=False, repr=False)
     locks: MeetingLocks = field(default_factory=MeetingLocks, repr=False)
     """Per-meeting write locks shared by jobs and tool handlers (see ``narumi_server.locks``)."""

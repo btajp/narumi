@@ -40,6 +40,13 @@ SCREEN_TRACK = "screen"
 
 
 def start_recording(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
+    # Reserve before preflight or bundle creation. The controller's start() re-enters this
+    # thread-owned gate, while a competing request fails immediately rather than queuing.
+    with ctx.recorder.recording_operation():
+        return _start_recording(ctx, args)
+
+
+def _start_recording(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
     if ctx.recorder.is_active:
         raise BusyError(
             "a recording is already running",
@@ -95,6 +102,10 @@ def start_recording(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
         "bundle_path": str(bundle.path),
         "tracks": {name: record.path for name, record in recording.tracks.items()},
     }
+
+
+def configure_recording_permission(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
+    return ctx.recorder.configure_permission(args["permission"], args["action"])
 
 
 def stop_recording(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:

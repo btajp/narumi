@@ -14,6 +14,7 @@ struct DiagnosticsSheetView: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
+                    RecordingPermissionsSection(model: model)
                     serverSection
                     diagnosticsSection
                     catalogSection
@@ -31,8 +32,9 @@ struct DiagnosticsSheetView: View {
             }
             .padding(12)
         }
-        .frame(width: 620, height: 560)
+        .frame(width: 660, height: 680)
         .task {
+            await model.refreshRecordingPermissions()
             await model.refreshServerWideData()
         }
     }
@@ -46,8 +48,6 @@ struct DiagnosticsSheetView: View {
                     ("サーバー版", info.serverVersion),
                     ("契約版", info.contractVersion),
                     ("録画", info.capabilities.recording ? "可能" : "不可"),
-                    ("画面収録権限", info.capabilities.permissions?.screenRecording ?? "—"),
-                    ("マイク権限", info.capabilities.permissions?.microphone ?? "—"),
                     ("文字起こしエンジン", info.capabilities.transcriptionEngines.joined(separator: ", ")),
                     ("話者分離エンジン", info.capabilities.diarizationEngines.joined(separator: ", ")),
                     ("LLM プロバイダ", info.capabilities.llmProviders.joined(separator: ", ")),
@@ -117,12 +117,14 @@ struct DiagnosticsSheetView: View {
                 Button("サーバーを再起動") {
                     model.hostActions.restartServer()
                 }
+                .disabled(model.permissionProcessControlsBlocked || !model.desktopSession.serverState.canRestart)
                 Button("サーバーログを開く") {
                     model.hostActions.openServerLog()
                 }
                 Button("アップデートを確認…") {
                     model.hostActions.checkForUpdates()
                 }
+                .disabled(model.permissionProcessControlsBlocked || model.desktopSession.recording.active)
                 Spacer()
             }
         }

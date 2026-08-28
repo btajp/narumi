@@ -239,6 +239,38 @@ def test_recording_tools_are_refused_in_process(cli: click.Group, home: Path, to
     assert "narumi-server" in envelope["error"]["message"]
 
 
+@pytest.mark.parametrize("generic", [False, True])
+@pytest.mark.parametrize("mode", ["in-process", "auto"])
+def test_permission_setup_never_falls_back_in_process(
+    cli: click.Group, home: Path, monkeypatch: pytest.MonkeyPatch, generic: bool, mode: str
+):
+    def unexpected_context(*_args, **_kwargs):
+        pytest.fail("permission setup must not construct an in-process controller")
+
+    monkeypatch.setattr(cli_tools, "build_context", unexpected_context)
+    prefix = ["--in-process"] if mode == "in-process" else ["--server-url", unreachable_url()]
+    if generic:
+        command = [
+            "tool",
+            "configure_recording_permission",
+            "--json",
+            json.dumps({"permission": "microphone", "action": "request"}),
+        ]
+    else:
+        command = [
+            "configure-recording-permission",
+            "--permission",
+            "microphone",
+            "--action",
+            "request",
+        ]
+    result = invoke(cli, [*prefix, *command])
+    assert result.exit_code == 2 and not result.stdout
+    envelope = json.loads(result.stderr)
+    assert envelope["error"]["code"] == "invalid_argument"
+    assert "resident narumi-server" in envelope["error"]["message"]
+
+
 def test_in_process_error_envelope_on_stderr(cli: click.Group, home: Path):
     result = invoke(cli, ["--in-process", "get-meeting", "--meeting-id", "nope"])
     assert result.exit_code == 2
@@ -345,6 +377,30 @@ def test_http_roundtrip(cli: click.Group, http_url: str):
     payload = json.loads(result.stdout)
     assert payload["name"] == "narumi"
     assert payload["capabilities"]["transports"] == ["streamable-http"]
+
+
+def test_http_permission_setup_and_fresh_diagnostics(cli: click.Group, http_url: str):
+    result = invoke(
+        cli,
+        [
+            "--require-server",
+            "--server-url",
+            http_url,
+            "configure-recording-permission",
+            "--permission",
+            "screen_recording",
+            "--action",
+            "open_settings",
+        ],
+    )
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(result.stdout)["settings_opened"] is True
+    info = invoke(
+        cli,
+        ["--require-server", "--server-url", http_url, "get-server-info", "--refresh-permissions"],
+    )
+    assert info.exit_code == 0, info.stderr
+    assert json.loads(info.stdout)["capabilities"]["permission_setup_in_progress"] is False
 
 
 def test_http_error_envelope(cli: click.Group, http_url: str):

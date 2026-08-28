@@ -72,7 +72,7 @@ final class ToolCatalogTests: XCTestCase {
 
     func testEveryContractToolHasAnAppSurface() throws {
         let manifest = try loadManifest()
-        XCTAssertEqual(ToolCatalog.allUsed.count, 27)
+        XCTAssertEqual(ToolCatalog.allUsed.count, 28)
         XCTAssertEqual(Set(ToolCatalog.allUsed), Set(manifest.tools))
     }
 
@@ -81,6 +81,7 @@ final class ToolCatalogTests: XCTestCase {
         // registered in `allUsed`, or the parity check silently skips it.
         for name in [
             ToolCatalog.startRecording, ToolCatalog.stopRecording, ToolCatalog.getServerInfo,
+            ToolCatalog.configureRecordingPermission,
             ToolCatalog.getGaiaConnection, ToolCatalog.setGaiaConnection, ToolCatalog.testGaiaConnection,
         ] {
             XCTAssertTrue(ToolCatalog.allUsed.contains(name), "\(name) missing from ToolCatalog.allUsed")

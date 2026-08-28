@@ -22,11 +22,15 @@
 | 録画トラック破棄（文字起こし後に動画・音声を消す）/ 会議削除 | `discard_tracks` / `delete_meeting`（新規） | 実装済み |
 | ジョブ取消 | `cancel_job`（新規） | 実装済み |
 | 診断（ffmpeg / 権限 / エンジン / データルート）/ カタログ再構築 | `get_server_info`（`diagnostics` 追加）/ `rebuild_catalog`（新規） | 実装済み（診断シート） |
+| 診断: マイク・画面収録の許可要求 / macOS 設定を開く / 状態再確認 | `configure_recording_permission` / `get_server_info`（`refresh_permissions`） | 契約 v1.1。録画を伴わない権限設定 |
 | サーバー起動・停止・再起動 / ログ / アップデート確認 | アプリ固有（プロセス管理・Sparkle。データ操作ではない） | 実装済み（メニューバー + 診断シート） |
 
 ## 契約 v1 への追加（初回リリース前なので contract_version は 1.0.0 のまま）
 
 共通: 既存規約どおり（書き込みは `request_id`、読み取りは `readOnlyHint`、scope セレクタ、error_envelope）。
+
+以下は初期 v1.0 の設計。権限設定の追加で契約は v1.1・28 ツールとなる。
+追加仕様は [録画権限のセットアップ導線](2026-08-28-recording-permission-setup-design.md) を参照。
 
 - `get_recording_status` {} → `{active, meeting_id?, meeting_name?, started_at?, elapsed_sec?, tracks?: {name: relpath}}`。readOnly
 - `get_minutes` {meeting_id, version?（既定 latest）, scope?} → `{meeting_id, version, markdown, generated_at, provider, unresolved_speakers: [str], available_versions: [int]}`。readOnly
@@ -47,6 +51,7 @@
 - 接続: `--server-url`（既定 `NARUMI_SERVER_URL` → `http://127.0.0.1:8765/mcp`）に `get_server_info` が応答すればそこへ MCP（Streamable HTTP）で送る。応答が無ければ in-process（`narumi_server.app.dispatch`）で実行。`--in-process` / `--require-server` で強制。録画系（`start_recording` / `stop_recording` / `get_recording_status`）は in-process では `busy`/`invalid_argument` 相当のエラーで拒否（プロセスが終わると録画が止まるため）
 - 出力は JSON（`--pretty` 既定、`--raw` で 1 行）。エラーは error_envelope をそのまま stderr に出し exit 2
 - テスト: 契約の全ツールにサブコマンドがあること、オプション生成がスキーマと一致すること、in-process 実行の代表ケース、HTTP 経由の代表ケース（テスト内で起動したサーバーに接続）
+- v1.1 の `configure_recording_permission` も常駐サーバー必須。in-process の別 controller から許可要求しない。
 
 ## パリティ検査
 - 契約 ↔ CLI: 自動生成なので構造的に一致。テストで確認

@@ -37,7 +37,8 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any
@@ -51,6 +52,12 @@ from narumi.errors import (
     NarumiError,
     NotFoundError,
     RecorderUnavailableError,
+)
+
+from narumi_server.permission_setup import (
+    PERMISSION_ACTION_TIMEOUT,
+    PermissionSetup,
+    validate_action,
 )
 
 logger = logging.getLogger(__name__)
@@ -200,6 +207,15 @@ def recorder_command(path: Path) -> list[str]:
 
 
 # ---------------------------------------------------------------------------- controller
+@dataclass(frozen=True)
+class PermissionSnapshot:
+    """One permission/cache revision, including whether its report was read while busy."""
+
+    permissions: dict[str, str] | None
+    in_progress: bool
+    revision: int
+
+
 class RecordingController:
     """Owns at most one ``narumi-recorder`` process (同時録画は 1 本)."""
 
@@ -209,6 +225,7 @@ class RecordingController:
         *,
         start_timeout: float = DEFAULT_START_TIMEOUT,
         stop_timeout: float = DEFAULT_STOP_TIMEOUT,
+        permission_timeout: float = PERMISSION_ACTION_TIMEOUT,
         extra_args: Sequence[str] = (),
     ) -> None:
         self._explicit_path = Path(recorder_path) if recorder_path is not None else None
@@ -216,6 +233,11 @@ class RecordingController:
         self._stop_timeout = stop_timeout
         self._extra_args = tuple(extra_args)
         self._lock = threading.RLock()
+        self._operation_gate = threading.RLock()
+        self._permission_setup = PermissionSetup(timeout=permission_timeout)
+        self._permissions_guard = threading.Lock()
+        self._permissions_revision = 0
+        self._permission_action_running = False
         self._proc: subprocess.Popen[bytes] | None = None
         self._events: queue.Queue[dict[str, Any] | None] = queue.Queue()
         self._reader: threading.Thread | None = None
@@ -257,16 +279,79 @@ class RecordingController:
 
     def permissions(self, *, max_age: float = CHECK_CACHE_SECONDS) -> dict[str, str] | None:
         """Permission report of ``<recorder> check`` (``None`` when unavailable or malformed)."""
+        return self.permission_snapshot(max_age=max_age).permissions
+
+    def permission_snapshot(self, *, max_age: float = CHECK_CACHE_SECONDS) -> PermissionSnapshot:
+        """Read the permission report and busy flag atomically within one cache revision."""
         path = self.recorder_path
-        if path is None:
-            return None
-        cached = self._permissions_cache
-        now = time.monotonic()
-        if cached is not None and cached[1] == path and now - cached[0] <= max_age:
-            return None if cached[2] is None else dict(cached[2])
-        report = _run_check(path)
-        self._permissions_cache = (now, path, report)
-        return None if report is None else dict(report)
+        # A pre-action check must not overwrite a newer post-action cache. Retry once if
+        # its revision changed; under repeated changes prefer unknown to a stale grant.
+        for _ in range(2):
+            with self._permissions_guard:
+                busy = self.permission_setup_in_progress
+                if path is None:
+                    return self._permission_snapshot(None, busy)
+                cached = self._permissions_cache
+                matching = cached is not None and cached[1] == path
+                if busy or (matching and max_age > 0 and time.monotonic() - cached[0] <= max_age):
+                    return self._permission_snapshot(cached[2] if matching else None, busy)
+                revision = self._permissions_revision
+            report = _run_check(path)
+            with self._permissions_guard:
+                if revision != self._permissions_revision:
+                    continue
+                self._permissions_cache = (time.monotonic(), path, report)
+                return self._permission_snapshot(report, self.permission_setup_in_progress)
+        with self._permissions_guard:
+            return self._permission_snapshot(None, self.permission_setup_in_progress)
+
+    def _permission_snapshot(self, report: dict[str, str] | None, busy: bool) -> PermissionSnapshot:
+        """Caller holds ``_permissions_guard`` so result, busy and revision stay together."""
+        return PermissionSnapshot(
+            None if report is None else dict(report), busy, self._permissions_revision
+        )
+
+    def _invalidate_permissions(self) -> None:
+        with self._permissions_guard:
+            self._permissions_revision += 1
+            self._permissions_cache = None
+
+    @property
+    def permission_setup_in_progress(self) -> bool:
+        return self._permission_action_running or self._permission_setup.in_progress
+
+    @contextmanager
+    def recording_operation(self) -> Iterator[None]:
+        """Reserve before bundle creation; competing starts/actions fail without queuing."""
+        if not self._operation_gate.acquire(blocking=False):
+            raise BusyError("a recording start or permission action is already running")
+        try:
+            if self.is_active:
+                raise BusyError(
+                    "a recording is already running",
+                    details={"meeting_id": self.active_meeting_id},
+                )
+            if self.permission_setup_in_progress:
+                raise BusyError("a recording permission action is already running")
+            yield
+        finally:
+            self._operation_gate.release()
+
+    def configure_permission(self, permission: str, action: str) -> dict[str, Any]:
+        """Request/open settings only; never create a bundle or invoke ``record``."""
+        validate_action(permission, action)
+        with self.recording_operation():
+            with self._permissions_guard:
+                self._permission_action_running = True
+                self._permissions_revision += 1
+            try:
+                path = self.require_available()
+                return self._permission_setup.run(recorder_command(path), permission, action)
+            finally:
+                with self._permissions_guard:
+                    self._permissions_cache = None
+                    self._permissions_revision += 1
+                    self._permission_action_running = False
 
     def require_available(self) -> Path:
         path = self.recorder_path
@@ -299,7 +384,7 @@ class RecordingController:
     # ------------------------------------------------------------------ start / stop
     def start(self, bundle: Bundle, *, no_video: bool = False) -> StartedEvent:
         """Launch the recorder for ``bundle`` and wait for its ``started`` event."""
-        with self._lock:
+        with self.recording_operation(), self._lock:
             if self._active_meeting_id is not None:
                 raise BusyError(
                     "a recording is already running",
@@ -346,7 +431,7 @@ class RecordingController:
                 self._terminate(proc)
                 self._cleanup()
                 raise
-            self._permissions_cache = None  # a granted prompt changes the report
+            self._invalidate_permissions()  # a granted prompt changes the report
             self._active_meeting_id = bundle.meeting_id
             self._active_bundle_path = bundle.path
             return started
@@ -402,6 +487,8 @@ class RecordingController:
         stop timeout to exit on its own; only then is it killed. Killing first would leave
         ``screen.mp4`` / ``mic.m4a`` / ``system.m4a`` without their container index.
         """
+        self._permission_setup.abort()
+        self._invalidate_permissions()
         with self._lock:
             proc = self._proc
             if proc is not None and proc.poll() is None:
@@ -545,7 +632,8 @@ def _run_check(path: Path) -> dict[str, str] | None:
     except json.JSONDecodeError:
         report = None
     if not isinstance(report, dict) or not all(
-        report.get(key) in PERMISSION_STATUSES for key in PERMISSION_KEYS
+        isinstance(report.get(key), str) and report[key] in PERMISSION_STATUSES
+        for key in PERMISSION_KEYS
     ):
         logger.warning("recorder check printed an unexpected report: %s", text[:200])
         return None

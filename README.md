@@ -10,8 +10,9 @@ narumi は、macOS 上でローカルに会議を録画し、終了後に議事�
 
 1. [GitHub Releases](https://github.com/btajp/narumi/releases/latest) の ZIP を展開し、`narumi.app` を「アプリケーション」へ移します。
 2. `narumi.app` を開きます。初回は同梱ランタイムの準備が終わるまで待ちます。Python や uv、ソースコードの別途導入は不要ですが、初回の依存・モデル取得にはネットワークが必要です。
-3. メイン画面の「録画開始」を押し、会議名を入力します。プロファイルと scope は空欄なら既定設定を使います。macOS が画面収録・マイクの許可を求めた場合は設定します。
-4. 録画中は同じ画面に経過時間と「録画停止」が表示されます。終了後は会議一覧から結果を開けます。
+3. 上部の「診断」を開き、「録画の権限」でマイク・画面収録の「許可を求める」を押します。拒否済みの場合は「macOS の設定を開く」から許可します。設定から戻ると再確認され、「状態を再確認」でも更新できます。許可設定だけでは録画は始まりません。
+4. 両方が許可済みになったら「録画開始」を押し、会議名を入力します。プロファイルと scope は空欄なら既定設定を使います。macOS がアプリの再起動を求めた場合は、その案内に従ってから再試行します。
+5. 録画中は同じ画面に経過時間と「録画停止」が表示されます。終了後は会議一覧から結果を開けます。
 
 ffmpeg / ffprobe は別途必要です。アプリの「診断」で検出状態を確認できます。更新は GitHub Releases を自動確認し、利用者の操作で適用します。録画中やアプリが把握している処理の実行中は更新を延期します。別の CLI / MCP クライアントから処理している間は更新しないでください。会議データはアプリ本体とは別の Application Support 配下に保存するため、通常の更新で削除されません。
 
@@ -74,7 +75,7 @@ open dist/narumi.app     # メイン画面と、名前付きのメニューバ�
 | 項目 | 状態 |
 |---|---|
 | セッションバンドル / manifest / 冪等ステージ実行 | 実装済み |
-| 契約（`contracts/`）と MCP サーバー（v1 の 27 ツール、stdio / Streamable HTTP） | 実装済み |
+| 契約（`contracts/`）と MCP サーバー（v1.1 の 28 ツール、stdio / Streamable HTTP） | 実装済み |
 | 操作面パリティ拡張（録画状態・議事録取得・全文検索・既存録画の取り込み・プロファイル＋自動エクスポート・トラック破棄・会議削除・ジョブ取消・カタログ再構築） | 実装済み（MCP ツール＋CLI＋アプリ本体ウィンドウ） |
 | 製品 CLI `narumi`（契約から自動生成の 1:1 写像。サーバー自動検出、無ければ in-process） | 実装済み |
 | 録画アプリ / `narumi-recorder` | 実装済み（メイン画面とメニューバーから同じ MCP 録画操作を利用） |
@@ -126,6 +127,8 @@ nullable な項目は `--clear-<項目>` で JSON `null` を明示できます�
 
 ```sh
 uv run narumi list-meetings --scope cloudnative --limit 10
+uv run narumi configure-recording-permission --permission microphone --action request
+uv run narumi get-server-info --refresh-permissions
 uv run narumi search-transcripts --query "オンボーディング"
 uv run narumi get-minutes --meeting-id <meeting_id> [--version N]
 uv run narumi import-recording --meeting-name "定例" --mic-path /abs/mic.m4a --system-path /abs/system.m4a
@@ -133,7 +136,9 @@ uv run narumi delete-meeting --meeting-id <meeting_id> --confirm
 uv run narumi tool <tool_name> --json '{"...": "..."}'   # 汎用エスケープハッチ（任意のツールを生 JSON で）
 ```
 
-接続先は `--server-url`（既定 `NARUMI_SERVER_URL` → `http://127.0.0.1:8765/mcp`）です。サーバーが応答すればそこへ MCP（Streamable HTTP）で送り、応答が無ければ同じディスパッチ経路を in-process で実行します（`--require-server` / `--in-process` で強制。録画系ツールは in-process では拒否）。出力は結果 JSON（`--pretty` 既定、`--raw` で 1 行）で、エラーは契約の `error_envelope` を stderr に出し終了コード 2 で終わります。`--data-root PATH`（または `NARUMI_HOME`）は in-process 実行のデータルートを切り替えます。
+接続先は `--server-url`（既定 `NARUMI_SERVER_URL` → `http://127.0.0.1:8765/mcp`）です。サーバーが応答すればそこへ MCP（Streamable HTTP）で送り、応答が無ければ同じディスパッチ経路を in-process で実行します（`--require-server` / `--in-process` で強制。録画系と権限設定ツールは常駐サーバーが必須で、in-process では拒否）。出力は結果 JSON（`--pretty` 既定、`--raw` で 1 行）で、エラーは契約の `error_envelope` を stderr に出し終了コード 2 で終わります。`--data-root PATH`（または `NARUMI_HOME`）は in-process 実行のデータルートを切り替えます。
+
+権限設定はサーバーが動く Mac 上の操作です。`--action open_settings` は対象のプライバシー設定を開くだけで、許可を自動付与しません。応答が不明になった場合は要求を自動再送せず、`get-server-info --refresh-permissions` で、操作前と同じ `server_instance_id` の `permission_setup_in_progress` と権限の状態を確認します。別サーバーの未処理表示は、元の操作の終了証明にはなりません。この機能は契約版 1.1.0 以降が必要です。
 
 Gaia のキー保存など、契約に `writeOnly` 入力を持つツールの HTTP 通信は同じ Mac 上の loopback HTTP に限定します。`localhost` は数値アドレスへ固定し、接続確認・初期化から終了まで環境プロキシとリダイレクトを使いません。それ以外のツールの接続方法は変わりません。
 

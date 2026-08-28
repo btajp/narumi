@@ -6,7 +6,7 @@ import Foundation
 /// listening on HTTP (including a server that has not bound its port yet).
 /// An orphan is never adopted or signalled here; live or uncertain ownership blocks writes.
 public final class RuntimeSyncOwnership {
-    struct Identity: Codable, Equatable {
+    struct Identity: Codable, Equatable, Sendable {
         var pid: Int32
         var startedSeconds: UInt64
         var startedMicroseconds: UInt64
@@ -18,12 +18,25 @@ public final class RuntimeSyncOwnership {
         }
     }
 
-    struct Record: Codable {
+    struct Record: Codable, Equatable, Sendable {
         var formatVersion = 1
         var token: String
         var bootSession: String
         var app: Identity
         var child: Identity?
+    }
+
+    /// A snapshot issued only for a child started by this owner instance. It cannot be
+    /// reconstructed from a stale ownership file by a different launcher.
+    public struct OwnedProcessToken: Equatable, Sendable {
+        public let processID: Int32
+        fileprivate let ownerIdentity: ObjectIdentifier
+        fileprivate let runtimeRoot: URL
+        fileprivate let record: Record
+
+        func matches(ownerIdentity: ObjectIdentifier?, runtimeRoot: URL) -> Bool {
+            self.ownerIdentity == ownerIdentity && self.runtimeRoot == runtimeRoot
+        }
     }
 
     struct Inspection {
@@ -61,17 +74,30 @@ public final class RuntimeSyncOwnership {
         self.init(paths: paths, inspection: .system)
     }
 
-    init(paths: RuntimePaths, inspection: Inspection) {
+    init(paths: RuntimePaths, inspection: Inspection, currentToken: String? = nil) {
         self.paths = paths
         self.inspection = inspection
+        self.currentToken = currentToken
     }
 
     /// Call while holding RuntimeLease and before recovery or any uv command. Unknown
     /// pre-PID intents fail closed for the current boot. A new boot proves all old children
     /// are gone, including the intent/run boundary, and permits removal of the stale record.
     public func requireIdle() throws {
-        guard FileManager.default.fileExists(atPath: recordURL.path) else { return }
+        try requireIdle(matching: nil)
+    }
+
+    private func requireIdle(matching expected: Record?) throws {
+        guard FileManager.default.fileExists(atPath: recordURL.path) else {
+            guard expected == nil else {
+                throw Failure(message: "対象プロセスの所有記録がありません")
+            }
+            return
+        }
         let record = try read()
+        guard expected == nil || record == expected else {
+            throw Failure(message: "対象プロセスの所有記録が変更されています")
+        }
         if record.bootSession == (try inspection.bootSession()) {
             guard let child = record.child else {
                 throw Failure(message: "前回の準備プロセスの識別情報が未確定です。安全のため再同期を停止しました。Mac再起動後に再試行できます")
@@ -83,7 +109,33 @@ public final class RuntimeSyncOwnership {
                 throw Failure(message: "前回のランタイムの子プロセスが残っています。終了後に再試行してください（自動停止はしません）")
             }
         }
-        try remove(token: record.token)
+        try remove(token: record.token, matching: expected)
+    }
+
+    /// Capturing a durable record alone does not confer ownership: currentToken is set
+    /// only by this instance's start(). Sync callers must not expose this as a server token.
+    public func captureOwnedProcessToken(expectedPID: Int32) -> OwnedProcessToken? {
+        guard let currentToken, let record = try? read(), record.token == currentToken,
+            let child = record.child, child.pid == expectedPID
+        else { return nil }
+        return OwnedProcessToken(
+            processID: child.pid, ownerIdentity: ObjectIdentifier(self), runtimeRoot: paths.root, record: record)
+    }
+
+    /// Unlike requireIdle()/finish(), missing ownership is not evidence of this tree's
+    /// exit. The exact captured record must survive until identity and group checks pass.
+    /// No process is signalled; only the now-proven-dead ownership record is removed.
+    public func confirmOwnedProcessTreeExited(_ token: OwnedProcessToken) -> Bool {
+        guard let currentToken, currentToken == token.record.token,
+            token.matches(ownerIdentity: ObjectIdentifier(self), runtimeRoot: paths.root)
+        else { return false }
+        do {
+            try requireIdle(matching: token.record)
+            self.currentToken = nil
+            return true
+        } catch {
+            return false
+        }
     }
 
     /// Configures and starts the supplied Process with a short stdin gate. The caller still
@@ -162,8 +214,9 @@ public final class RuntimeSyncOwnership {
         try JSONEncoder().encode(record).write(to: recordURL, options: .atomic)
     }
 
-    private func remove(token: String) throws {
-        guard try read().token == token else {
+    private func remove(token: String, matching expected: Record? = nil) throws {
+        let record = try read()
+        guard record.token == token, expected == nil || record == expected else {
             throw Failure(message: "準備プロセスの所有記録が変更されています")
         }
         try FileManager.default.removeItem(at: recordURL)

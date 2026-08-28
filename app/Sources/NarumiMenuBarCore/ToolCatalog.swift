@@ -11,6 +11,7 @@ public enum ToolCatalog {
     public static let startRecording = "start_recording"
     public static let stopRecording = "stop_recording"
     public static let getRecordingStatus = "get_recording_status"
+    public static let configureRecordingPermission = "configure_recording_permission"
 
     // Meetings list / search
     public static let listMeetings = "list_meetings"
@@ -57,6 +58,7 @@ public enum ToolCatalog {
         startRecording,
         stopRecording,
         getRecordingStatus,
+        configureRecordingPermission,
         listMeetings,
         searchTranscripts,
         getMeeting,

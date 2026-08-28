@@ -113,6 +113,20 @@ final class ContractModelsTests: XCTestCase {
 
     // MARK: Recording
 
+    func testConfigureRecordingPermission() throws {
+        let responses = try decodeAll(
+            ConfigureRecordingPermissionResponse.self, tool: ToolCatalog.configureRecordingPermission)
+        XCTAssertEqual(responses.count, 3)
+        XCTAssertEqual(responses[0].permission, .microphone)
+        XCTAssertEqual(responses[0].action, .request)
+        XCTAssertEqual(responses[0].permissions.microphone, "granted")
+        XCTAssertFalse(responses[0].settingsOpened)
+        XCTAssertEqual(responses[1].permission, .screenRecording)
+        XCTAssertEqual(responses[1].action, .openSettings)
+        XCTAssertTrue(responses[1].settingsOpened)
+        XCTAssertEqual(responses[2].permissions.microphone, "denied")
+    }
+
     func testRecordingStatus() throws {
         let statuses = try decodeAll(RecordingStatus.self, tool: "get_recording_status")
         XCTAssertEqual(statuses.count, 2)
@@ -273,15 +287,49 @@ final class ContractModelsTests: XCTestCase {
         let infos = try decodeAll(ServerInfo.self, tool: "get_server_info")
         XCTAssertEqual(infos.count, 2)
         let http = infos[0]
+        XCTAssertEqual(http.serverInstanceID, "00000000-0000-4000-8000-000000000001")
         XCTAssertTrue(http.capabilities.recording)
+        XCTAssertFalse(http.capabilities.permissionSetupInProgress)
         XCTAssertEqual(http.capabilities.permissions?.screenRecording, "granted")
         XCTAssertEqual(http.diagnostics.ffmpeg?.version, "7.1.1")
         XCTAssertEqual(http.diagnostics.recorderPath, "/Applications/narumi.app/Contents/MacOS/narumi-recorder")
         let stdio = infos[1]
+        XCTAssertEqual(stdio.serverInstanceID, "00000000-0000-4000-8000-000000000002")
         XCTAssertFalse(stdio.capabilities.recording)
+        XCTAssertFalse(stdio.capabilities.permissionSetupInProgress)
         XCTAssertNil(stdio.capabilities.permissions)
         XCTAssertNil(stdio.diagnostics.ffmpeg)  // JSON null
         XCTAssertNil(stdio.diagnostics.recorderPath)
+    }
+
+    func testServerInfoKeepsMissingInstanceIDCompatibleWithOlderServersAndInitializers() throws {
+        let example = try XCTUnwrap(try exampleOutputs("get_server_info").first)
+        var object = try XCTUnwrap(try JSONSerialization.jsonObject(with: example) as? [String: Any])
+        object.removeValue(forKey: "server_instance_id")
+        let legacy = try JSONDecoder().decode(ServerInfo.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertNil(legacy.serverInstanceID)
+        let initialized = ServerInfo(
+            name: legacy.name, serverVersion: legacy.serverVersion, contractVersion: legacy.contractVersion,
+            capabilities: legacy.capabilities, diagnostics: legacy.diagnostics)
+        XCTAssertEqual(initialized, legacy)
+        let roundTrip = try JSONDecoder().decode(ServerInfo.self, from: JSONEncoder().encode(initialized))
+        XCTAssertEqual(roundTrip, legacy)
+    }
+
+    func testServerInfoRejectsPresentNullWrongTypeOrInvalidInstanceIDs() throws {
+        let example = try XCTUnwrap(try exampleOutputs("get_server_info").first)
+        let base = try XCTUnwrap(try JSONSerialization.jsonObject(with: example) as? [String: Any])
+        let invalidIDs: [Any] = [
+            NSNull(), 1, true, [String](), [String: String](), "", "invalid",
+            "12345678-9ABC-4DEF-8ABC-123456789ABC", "12345678-9abc-1def-8abc-123456789abc",
+            "12345678-9abc-4def-cabc-123456789abc", "12345678-9abc-4def-8abc-123456789abc\n",
+        ]
+        for value in invalidIDs {
+            var object = base
+            object["server_instance_id"] = value
+            let data = try JSONSerialization.data(withJSONObject: object)
+            XCTAssertThrowsError(try JSONDecoder().decode(ServerInfo.self, from: data))
+        }
     }
 
     func testRebuildCatalog() throws {
