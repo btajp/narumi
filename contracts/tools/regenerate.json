@@ -1,7 +1,7 @@
 {
   "name": "regenerate",
   "title": "Regenerate minutes",
-  "description": "Bring a meeting's minutes up to date as a background job (kind `regenerate`). The deterministic stages (ffmpeg preprocessing, transcription, diarization) run idempotently first: each is skipped when its recorded input hashes and parameters are unchanged and only runs when it never ran (a meeting stopped with auto_process=false, a process job that failed) or when set_meeting_config changed its parameters (transcription_engine, diarization_engine, language, vocab_hints). Then alignment → LLM integration → minutes generation run with the same idempotency: a new minutes version is appended only when something changed — existing versions are never overwritten. Use it after set_meeting_config or register_context, to process a meeting stopped with auto_process=false, or to retry a failed process job. `force=true` re-runs alignment, integration and generation even when their inputs are unchanged (still appending a new version); preprocessing and transcription are never forced. `reason` is recorded in manifest.regenerations. `scope` is the scope selector (default deny: a scoped meeting needs its scope in the request). `request_id` is the client-generated idempotency key: repeating the call returns the same job_id. On failure returns an error_envelope (isError=true) with code: not_found (unknown meeting), scope_denied (the request does not cover the meeting's scope), busy (the meeting is still recording, or a job is already queued / running for it), policy_violation (the configured llm_provider or engines are not allowed by external_send_policy — nothing is silently downgraded), engine_unavailable (configured engine / provider not installed), invalid_argument, internal. Failures inside the job are reported by get_job_status.",
+  "description": "Bring a meeting's minutes up to date as a background job (kind `regenerate`). The deterministic stages (ffmpeg preprocessing, transcription, diarization) run idempotently first: each is skipped when its recorded input hashes and parameters are unchanged and only runs when it never ran (a meeting stopped with auto_process=false, a process job that failed) or when set_meeting_config changed its parameters (transcription_engine, diarization_engine, language, vocab_hints). Then alignment → LLM integration → minutes generation run with the same idempotency: a new minutes version is appended only when something changed — existing versions are never overwritten. An explicit minutes_model applies only to text minutes and is part of the generation cache key, including its provider, connection ID/revision, model ID, parameters and cache_epoch. Unchanged inputs and selection reuse the existing version. Changing only this selection does not rerun transcription or LLM integration and never silently substitutes a provider or model. Use it after set_meeting_config or register_context, to process a meeting stopped with auto_process=false, or to retry a failed process job. When minutes_model is null, `force=true` re-runs alignment, integration and generation even when their inputs are unchanged (still appending a new version); preprocessing and transcription are never forced. When a Codex minutes_model is selected, `force=true` is rejected with invalid_argument. To explicitly start a new Codex attempt, confirm retransmission with the user, save an incremented minutes_model.cache_epoch through set_meeting_config, and call regenerate with the returned config as expected_config, a new request_id and force=false. A previous unknown Codex generation outcome is never automatically resent; ordinary regeneration with the same selection cannot bypass its receipt. `reason` is recorded in manifest.regenerations. `scope` is the scope selector (default deny: a scoped meeting needs its scope in the request). When the saved minutes_model is non-null, expected_config is required and must be the full effective config confirmed by the caller. Any supplied expected_config is compared with the current config under the meeting lock before changes or job creation; a mismatch returns configuration_conflict without sending or generating. `request_id` is the client-generated idempotency key: repeating the call returns the same job_id. On failure returns an error_envelope (isError=true) with code: not_found (unknown meeting), scope_denied (the request does not cover the meeting's scope), busy (the meeting is still recording, or a job is already queued / running for it), policy_violation (the configured minutes_model, llm_provider or engines are not allowed by external_send_policy — nothing is silently downgraded), engine_unavailable (configured engine / provider not installed), configuration_conflict, authentication_required, model_unavailable, invalid_argument, internal. Failures inside the job are reported by get_job_status.",
   "annotations": {
     "readOnlyHint": false,
     "destructiveHint": false,
@@ -14,9 +14,13 @@
       "meeting_id": { "$ref": "../defs/common.json#/$defs/meeting_id" },
       "scope": { "$ref": "../defs/common.json#/$defs/scope" },
       "request_id": { "$ref": "../defs/common.json#/$defs/request_id" },
+      "expected_config": {
+        "$ref": "../defs/common.json#/$defs/meeting_config",
+        "description": "Full effective config confirmed by the caller, as returned by get_meeting. Required by the server when the saved minutes_model is non-null; otherwise optional. If supplied, it must match the current config under the meeting lock before enqueueing, or configuration_conflict is returned without generating."
+      },
       "force": {
         "type": "boolean",
-        "description": "Re-run all stages from alignment even if inputs/params are unchanged (default false).",
+        "description": "Default false. With minutes_model=null, re-run all stages from alignment even if inputs/params are unchanged. A selected Codex minutes_model rejects true; explicitly increment its cache_epoch to request a new attempt after confirming retransmission. Unknown outcomes are never automatically resent.",
         "default": false
       },
       "reason": {
@@ -53,6 +57,29 @@
         "request_id": "7d8e9f0a-1b2c-4d3e-9f4a-5b6c7d8e9f0a",
         "force": true,
         "reason": "switched llm_provider to claude-agent-sdk"
+      },
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "request_id": "regenerate-codex-request-20260829-001",
+        "expected_config": {
+          "transcription_engine": "auto",
+          "diarization_engine": "none",
+          "llm_provider": "none",
+          "minutes_model": {
+            "provider": "codex-app-server",
+            "connection_id": "conn-fedcba987654",
+            "connection_revision": 1,
+            "model_id": "fixture-text-model",
+            "parameters": {
+              "reasoning_effort": "high"
+            },
+            "cache_epoch": 0
+          },
+          "external_send_policy": "subscription_ok",
+          "language": "ja",
+          "self_name": null,
+          "vocab_hints": []
+        }
       }
     ],
     "output": [

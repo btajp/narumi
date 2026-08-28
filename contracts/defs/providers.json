@@ -8,9 +8,10 @@
       "enum": [
         "anthropic-api",
         "claude-agent-sdk",
+        "codex-app-server",
         "ollama"
       ],
-      "description": "Provider adapters supported in this development contract. Codex and OpenAI adapters are not available yet."
+      "description": "Supported provider adapters. Codex App Server supports explicit text minutes generation; the OpenAI API adapter is not available yet."
     },
     "provider_role": {
       "type": "string",
@@ -24,9 +25,10 @@
       "type": "string",
       "enum": [
         "api_key",
+        "chatgpt",
         "none"
       ],
-      "description": "Only approved authentication methods. Claude subscription login is not supported."
+      "description": "Only approved authentication methods. chatgpt is the official Codex App Server login; Claude subscription login is not supported."
     },
     "provider_availability": {
       "type": "string",
@@ -297,12 +299,15 @@
             }
           },
           "else": {
-            "properties": {
-              "auth_methods": {
-                "const": [
-                  "api_key"
-                ]
-              }
+            "if": {
+              "properties": { "provider_id": { "const": "codex-app-server" } },
+              "required": ["provider_id"]
+            },
+            "then": {
+              "properties": { "auth_methods": { "const": ["chatgpt"] }, "roles": { "const": ["llm"] } }
+            },
+            "else": {
+              "properties": { "auth_methods": { "const": ["api_key"] } }
             }
           }
         }
@@ -327,7 +332,7 @@
         },
         "stage_model_selection": {
           "type": "boolean",
-          "description": "Per-stage model selection and execution are implemented."
+          "description": "Explicit model selection and execution are implemented for at least one stage. Currently minutes_model selects one Codex App Server model for text minutes only; other stages keep llm_provider."
         },
         "ensemble_generation": {
           "type": "boolean",

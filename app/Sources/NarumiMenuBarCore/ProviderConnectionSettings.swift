@@ -5,6 +5,7 @@ import Foundation
 public struct ProviderConnectionSettings: Sendable {
     public static let anthropicEndpoint = "https://api.anthropic.com"
     public static let ollamaEndpoint = "http://127.0.0.1:11434"
+    public static let codexEndpoint = "https://chatgpt.com"
 
     public private(set) var connection: ProviderConnection?
     public private(set) var providerID: ProviderID
@@ -30,10 +31,11 @@ public struct ProviderConnectionSettings: Sendable {
     }
 
     public var isCreating: Bool { connection == nil }
-    public var usesAPIKey: Bool { providerID != .ollama }
+    public var usesAPIKey: Bool { providerID.supportedAuthMethod == .apiKey }
     public var normalizedName: String { displayName.trimmingCharacters(in: .whitespacesAndNewlines) }
     public var normalizedEndpoint: String {
-        usesAPIKey ? Self.anthropicEndpoint : endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        providerID == .ollama
+            ? endpoint.trimmingCharacters(in: .whitespacesAndNewlines) : Self.defaultEndpoint(for: providerID)
     }
 
     public var hasUnsavedChanges: Bool {
@@ -50,7 +52,7 @@ public struct ProviderConnectionSettings: Sendable {
     }
 
     public var isEndpointValid: Bool {
-        if usesAPIKey { return true }
+        if providerID != .ollama { return true }
         let pattern = #"\Ahttps?://(127(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|\[::1\])(:[0-9]{1,5})?/?\z"#
         guard normalizedEndpoint.range(of: pattern, options: .regularExpression) != nil,
             let url = URLComponents(string: normalizedEndpoint) else { return false }
@@ -97,7 +99,7 @@ public struct ProviderConnectionSettings: Sendable {
         }
         return SetProviderConnectionRequest(
             providerID: providerID, displayName: normalizedName,
-            authMethod: usesAPIKey ? .apiKey : .none, enabled: enabled,
+            authMethod: providerID.supportedAuthMethod, enabled: enabled,
             endpoint: normalizedEndpoint, apiKey: credential, requestID: requestID)
     }
 
@@ -117,6 +119,10 @@ public struct ProviderConnectionSettings: Sendable {
     }
 
     private static func defaultEndpoint(for providerID: ProviderID) -> String {
-        providerID == .ollama ? ollamaEndpoint : anthropicEndpoint
+        switch providerID {
+        case .anthropicAPI, .claudeAgentSDK: return anthropicEndpoint
+        case .ollama: return ollamaEndpoint
+        case .codexAppServer: return codexEndpoint
+        }
     }
 }

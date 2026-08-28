@@ -40,7 +40,7 @@ public enum ProviderSettingsErrorCode: String, Sendable {
         case .configurationConflict:
             return "別の操作で設定が変更されました。一覧を更新してから編集してください。"
         case .authenticationRequired:
-            return "認証が必要です。安全なサーバー接続と、対象の API キー設定を確認してください。"
+            return "認証が必要です。安全なサーバー接続と、対象のログインまたは API キー設定を確認してください。"
         case .engineUnavailable:
             return "実行環境または接続先を利用できません。準備状況と接続設定を確認してください。"
         case .modelUnavailable:

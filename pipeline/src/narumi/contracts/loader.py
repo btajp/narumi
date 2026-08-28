@@ -42,6 +42,7 @@ _SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$")
 _RFC3339_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$")
 # Keys whose values are *data*, not subschemas: a "$ref" string inside them must be left alone.
 _DATA_KEYS = frozenset({"const", "enum", "default", "examples"})
+_DEVICE_AUTH_TOOLS = frozenset({"authenticate_provider_connection", "get_provider_auth_status"})
 
 JsonDict = dict[str, Any]
 
@@ -88,8 +89,13 @@ class ToolContract:
 
     @property
     def has_write_only_input(self) -> bool:
-        """Whether input validation must avoid exposing any instance values."""
+        """Whether inputs contain write-only fields for transport and CLI secret handling."""
         return _contains_write_only(self.input_schema)
+
+    @property
+    def redact_validation_errors(self) -> bool:
+        """Never reflect API keys or transient device-login data from malformed input/output."""
+        return self.has_write_only_input or self.name in _DEVICE_AUTH_TOOLS
 
     @property
     def input_examples(self) -> list[JsonDict]:
@@ -186,16 +192,20 @@ class ContractSet:
                     "errors": [{"path": "$", "message": f"unknown tool: {tool}", "validator": ""}],
                 },
             )
+        redact = self.tools[tool].redact_validation_errors
         summary, errors = _collect_errors(
             validator,
             {} if args is None else args,
-            redact=self.tools[tool].has_write_only_input,
+            redact=redact,
         )
         if errors:
-            raise InvalidArgumentError(
+            error = InvalidArgumentError(
                 f"invalid arguments for {tool}: {summary}",
                 details={"tool": tool, "errors": errors},
             )
+            if redact:
+                raise error from None
+            raise error
 
     def validate_output(self, tool: str, result: Mapping[str, Any]) -> None:
         """Raise :class:`ContractMismatchError` when a handler result violates ``outputSchema``."""
@@ -204,14 +214,16 @@ class ContractSet:
         validator = self._output_validators.get(tool)
         if validator is None:
             return
-        summary, errors = _collect_errors(
-            validator, result, redact=self.tools[tool].has_write_only_input
-        )
+        redact = self.tools[tool].redact_validation_errors
+        summary, errors = _collect_errors(validator, result, redact=redact)
         if errors:
-            raise ContractMismatchError(
+            error = ContractMismatchError(
                 f"output of {tool} violates contract: {summary}",
                 details={"tool": tool, "errors": errors},
             )
+            if redact:
+                raise error from None
+            raise error
 
     def validate_error_envelope(self, payload: Mapping[str, Any]) -> None:
         """Raise :class:`ContractMismatchError` unless ``payload`` is a valid error envelope."""
@@ -568,7 +580,7 @@ def _collect_errors(
         return "", []
     top = best_match(found)
     if redact:
-        # A malformed write-only value may be an object or may have appeared under an
+        # A malformed secret or device code may be an object or may have appeared under an
         # unknown key. Never interpolate jsonschema's message, instance, or untrusted path.
         properties = validator.schema.get("properties", {})
         items = sorted(

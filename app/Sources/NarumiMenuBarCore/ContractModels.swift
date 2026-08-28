@@ -156,6 +156,7 @@ public struct MeetingConfig: Codable, Equatable, Sendable {
     public var transcriptionEngine: String?
     public var diarizationEngine: String?
     public var llmProvider: String?
+    public var minutesModel: CodexMinutesSelection?
     public var externalSendPolicy: String?
     public var language: String?
     public var selfName: String?
@@ -165,6 +166,7 @@ public struct MeetingConfig: Codable, Equatable, Sendable {
         case transcriptionEngine = "transcription_engine"
         case diarizationEngine = "diarization_engine"
         case llmProvider = "llm_provider"
+        case minutesModel = "minutes_model"
         case externalSendPolicy = "external_send_policy"
         case language
         case selfName = "self_name"
@@ -174,11 +176,13 @@ public struct MeetingConfig: Codable, Equatable, Sendable {
     public init(
         transcriptionEngine: String? = nil, diarizationEngine: String? = nil,
         llmProvider: String? = nil, externalSendPolicy: String? = nil, language: String? = nil,
-        selfName: String? = nil, vocabHints: [String]? = nil
+        selfName: String? = nil, vocabHints: [String]? = nil,
+        minutesModel: CodexMinutesSelection? = nil
     ) {
         self.transcriptionEngine = transcriptionEngine
         self.diarizationEngine = diarizationEngine
         self.llmProvider = llmProvider
+        self.minutesModel = minutesModel
         self.externalSendPolicy = externalSendPolicy
         self.language = language
         self.selfName = selfName

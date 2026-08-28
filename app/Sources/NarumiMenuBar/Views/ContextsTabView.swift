@@ -106,23 +106,39 @@ struct ContextsTabView: View {
 
             Toggle("登録後に議事録を再生成する", isOn: $form.autoRegenerate)
                 .toggleStyle(.checkbox)
+            if form.autoRegenerate, let config = model.detail?.config {
+                MinutesGenerationDisclosure(
+                    config: config, catalog: model.minutesModelCatalog, includesNewContext: true)
+            }
 
             HStack {
                 Button("登録") {
+                    let draft = form
+                    let expectedConfig = draft.autoRegenerate ? model.detail?.config : nil
+                    let expectedMeetingID = model.detail?.meeting.meetingID
                     submitting = true
                     Task {
-                        if await model.registerContext(form) {
+                        if await model.registerContext(
+                            draft, expectedConfig: expectedConfig, expectedMeetingID: expectedMeetingID) {
                             form = MainWindowModel.ContextForm()
                         }
                         submitting = false
                     }
                 }
-                .disabled(submitting)
+                .disabled(submitting || regenerationBlocked)
                 if submitting {
                     ProgressView().controlSize(.small)
                 }
             }
         }
+    }
+
+    private var regenerationBlocked: Bool {
+        guard form.autoRegenerate else { return false }
+        guard let detail = model.detail, detail.meeting.meetingID == model.selectedMeetingID else { return true }
+        guard detail.config.minutesModel != nil else { return false }
+        return model.minutesModelCatalog.isLoading
+            || model.minutesModelCatalog.validationMessage(for: ProcessingConfigurationForm(config: detail.config)) != nil
     }
 
     private func chooseFile() {

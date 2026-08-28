@@ -20,20 +20,22 @@ from narumi import pipeline as narumi_pipeline
 from narumi.bundle import Bundle
 from narumi.errors import (
     CancelledError,
+    ConfigurationConflictError,
     ErrorCode,
     InvalidArgumentError,
     NarumiError,
     NotFoundError,
 )
 from narumi.export import get_exporter
+from narumi.models import MeetingConfig
 
 from narumi_server.handlers.common import (
-    check_config_policy,
-    check_scope,
+    check_expected_config,
     ensure_not_busy,
     find_bundle,
     locked_bundle,
     sync_catalog,
+    validated_config,
 )
 from narumi_server.jobs import JobProgress
 
@@ -169,12 +171,18 @@ def _set_status(ctx: ServerContext, bundle: Bundle, status: str) -> None:
 
 
 def enqueue_process(ctx: ServerContext, meeting_id: str, *, force: bool = False) -> str:
+    expected_config = find_bundle(ctx, meeting_id).manifest.config.model_copy(deep=True)
+
     def run(progress: JobProgress) -> dict[str, Any]:
         return run_pipeline_job(
             ctx,
             meeting_id,
             lambda bundle: narumi_pipeline.process_meeting(
-                bundle, force=force, progress=progress, gaia_client_factory=ctx.gaia.client
+                bundle,
+                force=force,
+                progress=progress,
+                gaia_client_factory=ctx.gaia.client,
+                **_minutes_kwargs(ctx, bundle, progress, expected_config),
             ),
         )
 
@@ -188,6 +196,7 @@ def enqueue_regenerate(ctx: ServerContext, meeting_id: str, *, force: bool, reas
     a meeting stopped with ``auto_process=false``, a failed process job, an engine / language /
     vocab_hints change), then alignment → integrate → generate (forced when ``force``).
     """
+    expected_config = find_bundle(ctx, meeting_id).manifest.config.model_copy(deep=True)
 
     def run(progress: JobProgress) -> dict[str, Any]:
         return run_pipeline_job(
@@ -200,10 +209,36 @@ def enqueue_regenerate(ctx: ServerContext, meeting_id: str, *, force: bool, reas
                 reason=reason,
                 job_id=progress.job_id,
                 gaia_client_factory=ctx.gaia.client,
+                **_minutes_kwargs(ctx, bundle, progress, expected_config),
             ),
         )
 
     return ctx.jobs.submit("regenerate", meeting_id, run)
+
+
+def _minutes_kwargs(
+    ctx: ServerContext, bundle: Bundle, progress: JobProgress, expected_config: MeetingConfig
+) -> dict[str, Any]:
+    """Bind explicit selections to this server and its cooperative cancellation flag.
+
+    Legacy calls retain their original keyword arguments. Validation is repeated at job
+    start, because a queued job can outlive a connection edit or authentication change.
+    """
+    config = bundle.manifest.config
+    if (
+        config.minutes_model is not None or expected_config.minutes_model is not None
+    ) and config != expected_config:
+        raise ConfigurationConflictError("The meeting configuration changed after job acceptance")
+    if config.minutes_model is None:
+        return {}
+    with validated_config(ctx, config):
+        pass
+    from narumi.providers.generation import MinutesResolver
+
+    return {
+        "minutes_resolver": MinutesResolver(ctx.providers),
+        "should_cancel": lambda: progress.cancelled,
+    }
 
 
 def perform_export(
@@ -269,17 +304,22 @@ def validate_export_options(exporter: Any, options: Any) -> dict[str, Any]:
 
 # ---------------------------------------------------------------------------- tools
 def regenerate(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
-    bundle = find_bundle(ctx, args["meeting_id"])
-    check_scope(ctx, bundle, args.get("scope"))
-    ensure_not_busy(ctx, bundle)
-    check_config_policy(bundle.manifest.config)  # fail fast instead of inside the job
-    job_id = enqueue_regenerate(
-        ctx,
-        bundle.meeting_id,
-        force=bool(args.get("force", False)),
-        reason=args.get("reason") or "regenerate",
-    )
-    return {"job_id": job_id, "meeting_id": bundle.meeting_id}
+    with locked_bundle(
+        ctx, args["meeting_id"], scope=args.get("scope"), purpose="regenerate"
+    ) as bundle:
+        if bundle.manifest.config.minutes_model is not None and args.get("force", False):
+            raise InvalidArgumentError(
+                "Force regeneration is unavailable for connected minutes; start a new cache epoch"
+            )
+        check_expected_config(bundle.manifest.config, args)
+        with validated_config(ctx, bundle.manifest.config):
+            job_id = enqueue_regenerate(
+                ctx,
+                bundle.meeting_id,
+                force=bool(args.get("force", False)),
+                reason=args.get("reason") or "regenerate",
+            )
+        return {"job_id": job_id, "meeting_id": bundle.meeting_id}
 
 
 def export_minutes(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:

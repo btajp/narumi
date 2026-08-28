@@ -7,6 +7,7 @@ job worker; only the recorder is faked (``NARUMI_RECORDER=server/tests/fake_reco
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from pathlib import Path
 
@@ -255,13 +256,24 @@ async def test_policy_violation_inside_the_job_fails_it(client: PerCallClient, c
     early = await call(client, "regenerate", {"meeting_id": meeting_id, "request_id": rid()})
     assert early["error"]["code"] == "policy_violation"
     # … and a violation introduced between enqueue and run is reported by the job itself: the
-    # job re-reads the manifest once it owns the meeting lock, which the test holds meanwhile
+    # job re-reads the manifest once the worker becomes free. The acceptance itself now
+    # holds the meeting lock, so occupy the job worker instead of blocking that lock.
     bundle.manifest.config.llm_provider = "none"
     bundle.save()
-    with ctx.locks.hold(meeting_id, purpose="test"):
+    release = threading.Event()
+
+    def occupy_worker(_progress):
+        assert release.wait(10)
+        return {}
+
+    blocker = ctx.jobs.submit("process", None, occupy_worker)
+    try:
         regen = await call(client, "regenerate", {"meeting_id": meeting_id, "request_id": rid()})
         bundle.manifest.config.llm_provider = "anthropic-api"
         bundle.save()
+    finally:
+        release.set()
+    assert (await wait_job(ctx, blocker))["status"] == "succeeded"
     job = await wait_job(ctx, regen["job_id"], timeout=120.0)
     assert job["status"] == "failed"
     assert job["error"]["code"] == "policy_violation"

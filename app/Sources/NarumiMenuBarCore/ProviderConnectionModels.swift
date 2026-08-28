@@ -112,8 +112,9 @@ public struct ProviderConnection: Decodable, Equatable, Sendable {
         checkedAt = try container.decode(String?.self, forKey: .checkedAt)
         activeAuth = try container.decode(ProviderActiveAuth?.self, forKey: .activeAuth)
         lastGenerationState = try container.decode(ProviderGenerationState.self, forKey: .lastGenerationState)
-        guard revision > 0, authMethod == (providerID == .ollama ? .none : .apiKey),
-            providerID != .ollama || !credentialPresent
+        guard revision > 0, authMethod == providerID.supportedAuthMethod,
+            providerID != .ollama || !credentialPresent,
+            providerID != .codexAppServer || endpoint == ProviderConnectionSettings.codexEndpoint
         else {
             throw DecodingError.dataCorruptedError(
                 forKey: .authMethod, in: container,
@@ -122,7 +123,9 @@ public struct ProviderConnection: Decodable, Equatable, Sendable {
     }
 }
 
-public struct ProviderAuthOperation: Decodable, Equatable, Sendable {
+public struct ProviderAuthOperation: Decodable, Equatable, Sendable,
+    CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable
+{
     public let operationID: String
     public let connectionID: String
     public let connectionRevision: Int
@@ -130,7 +133,8 @@ public struct ProviderAuthOperation: Decodable, Equatable, Sendable {
     public let startRequestID: String
     public let action: ProviderAuthAction
     public let state: ProviderAuthOperationState
-    public let authorizationURL: String?
+    public let authorizationURL: ProviderAuthorizationURL?
+    public let userCode: ProviderUserCode?
     public let reason: String?
     public let createdAt: String
     public let updatedAt: String
@@ -143,6 +147,7 @@ public struct ProviderAuthOperation: Decodable, Equatable, Sendable {
         case startRequestID = "start_request_id"
         case action, state
         case authorizationURL = "authorization_url"
+        case userCode = "user_code"
         case reason
         case createdAt = "created_at"
         case updatedAt = "updated_at"
@@ -151,7 +156,8 @@ public struct ProviderAuthOperation: Decodable, Equatable, Sendable {
     public init(
         operationID: String, connectionID: String, connectionRevision: Int,
         serverInstanceID: String, startRequestID: String, action: ProviderAuthAction,
-        state: ProviderAuthOperationState, authorizationURL: String? = nil, reason: String?,
+        state: ProviderAuthOperationState, authorizationURL: ProviderAuthorizationURL? = nil,
+        userCode: ProviderUserCode? = nil, reason: String?,
         createdAt: String, updatedAt: String
     ) {
         self.operationID = operationID
@@ -162,6 +168,7 @@ public struct ProviderAuthOperation: Decodable, Equatable, Sendable {
         self.action = action
         self.state = state
         self.authorizationURL = authorizationURL
+        self.userCode = userCode
         self.reason = reason
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -176,14 +183,22 @@ public struct ProviderAuthOperation: Decodable, Equatable, Sendable {
         startRequestID = try container.decode(String.self, forKey: .startRequestID)
         action = try container.decode(ProviderAuthAction.self, forKey: .action)
         state = try container.decode(ProviderAuthOperationState.self, forKey: .state)
-        guard try container.decodeNil(forKey: .authorizationURL), connectionRevision > 0 else {
+        authorizationURL = try container.decode(ProviderAuthorizationURL?.self, forKey: .authorizationURL)
+        userCode = try container.decode(ProviderUserCode?.self, forKey: .userCode)
+        guard connectionRevision > 0, (authorizationURL == nil) == (userCode == nil),
+            authorizationURL == nil || (action == .start && state == .pending) else {
             throw DecodingError.dataCorruptedError(
                 forKey: .authorizationURL, in: container,
-                debugDescription: "This provider contract does not support browser authentication")
+                debugDescription: "Device authorization requires a URL and user code for a pending start operation")
         }
-        authorizationURL = nil
         reason = try container.decode(String?.self, forKey: .reason)
         createdAt = try container.decode(String.self, forKey: .createdAt)
         updatedAt = try container.decode(String.self, forKey: .updatedAt)
+    }
+
+    public var description: String { "ProviderAuthOperation(<redacted>)" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: ["operationID": operationID, "state": state.rawValue, "authorization": "<redacted>"])
     }
 }

@@ -29,6 +29,8 @@ class ProviderService:
     Construction and list operations never load ambient credentials or start SDKs. An
     executor submitted through ``submit_job`` must schedule asynchronously, not invoke the
     function inline: preparation waits until its public job receipt is durable.
+    Only the resident data-root lease owner may use ``recover=True``. Temporary contexts
+    must disable recovery so construction and shutdown cannot reconcile another owner.
     """
 
     def __init__(
@@ -43,6 +45,8 @@ class ProviderService:
         auth_executor: Executor | None = None,
         runtime_inspector: RuntimeInspector | None = None,
         connection_referenced: Callable[[str], bool] | None = None,
+        codex_backend: Any | None = None,
+        recover: bool = True,
     ) -> None:
         self.root = Path(root).expanduser()
         self.store = ProviderStore(self.root)
@@ -53,6 +57,9 @@ class ProviderService:
         self.requests = RequestLedger(self.secrets, self.namespace, self.server_instance_id)
         self.contracts = contracts if contracts is not None else load_contracts()
         self.closed = threading.Event()
+        self._can_recover = recover
+        self._codex_backend = codex_backend
+        self._codex_lock = threading.Lock()
         self.auth_executor = auth_executor or ThreadPoolExecutor(
             max_workers=3,
             thread_name_prefix="narumi-provider-auth",
@@ -68,6 +75,18 @@ class ProviderService:
             inspector=runtime_inspector or RuntimeInspector(),
         )
         self._recover()
+
+    @property
+    def codex_backend(self) -> Any:
+        """Construct the isolated adapter lazily, without launching its subprocess."""
+        with self._codex_lock:
+            if self.closed.is_set():
+                raise NarumiError("Provider service is closed")
+            if self._codex_backend is None:
+                from narumi.providers.codex import CodexBackend
+
+                self._codex_backend = CodexBackend(self.root)
+            return self._codex_backend
 
     def validate(self, tool: str, args: Mapping[str, Any] | None) -> dict[str, Any]:
         if self.closed.is_set():
@@ -114,20 +133,26 @@ class ProviderService:
 
     def observe_job(self, job_id: str, status: str) -> None:
         """Reconcile cancellations of queued jobs whose callable never got to run."""
-        self.runtime.observe_job(job_id, status)
+        if self._can_recover:
+            self.runtime.observe_job(job_id, status)
 
     def _recover(self) -> None:
+        if not self._can_recover:
+            return
         document = self.store.read()
-        if not document["requests"] and not document["checks"]:
+        if not document["requests"] and not document["checks"] and not document["auth_operations"]:
             return
         with self.store.transaction() as document:
             for operation in document["auth_operations"].values():
+                operation.update(authorization_url=None, user_code=None)
                 if operation["state"] != "pending" or (
                     operation["server_instance_id"] == self.server_instance_id
                 ):
                     continue
                 operation.update(
                     state="unknown",
+                    authorization_url=None,
+                    user_code=None,
                     reason="authentication_operation_interrupted",
                     updated_at=timestamp(),
                 )
@@ -157,13 +182,10 @@ class ProviderService:
                 if check["server_instance_id"] != self.server_instance_id:
                     del document["checks"][provider_id]
 
-    def close(self) -> None:
-        if self.closed.is_set():
+    def _interrupt_owned_operations(self) -> None:
+        if not self._can_recover:
             return
-        self.closed.set()
         self.runtime.close()
-        if self._owns_executor:
-            self.auth_executor.shutdown(wait=False, cancel_futures=True)
         with self.store.transaction() as document:
             for operation in document["auth_operations"].values():
                 if operation["state"] == "pending" and (
@@ -171,10 +193,32 @@ class ProviderService:
                 ):
                     operation.update(
                         state="unknown",
+                        authorization_url=None,
+                        user_code=None,
                         reason="authentication_operation_interrupted",
                         updated_at=timestamp(),
                     )
                     record = document["connections"].get(operation["connection_id"])
-                    if record is not None and record["active_auth"] is not None:
-                        record["active_auth"]["state"] = "unknown"
+                    active = None if record is None else record["active_auth"]
+                    if active is not None and active["operation_id"] == operation["operation_id"]:
+                        active["state"] = "unknown"
                         record["auth_state"] = "unknown"
+
+    def close(self) -> None:
+        if self.closed.is_set():
+            return
+        self.closed.set()
+        self.auth.codex.forget()
+        try:
+            self._interrupt_owned_operations()
+        finally:
+            try:
+                with self._codex_lock:
+                    backend = self._codex_backend
+                if backend is not None:
+                    backend.close()
+            except Exception:
+                raise NarumiError("Provider runtime shutdown could not be confirmed") from None
+            finally:
+                if self._owns_executor:
+                    self.auth_executor.shutdown(wait=False, cancel_futures=True)

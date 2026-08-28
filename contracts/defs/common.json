@@ -151,6 +151,7 @@
         "transcription_engine": { "type": "string", "description": "Registry name: auto | fake | mlx-whisper | faster-whisper" },
         "diarization_engine": { "type": "string", "description": "Registry name: none | fake | pyannote" },
         "llm_provider": { "type": "string", "description": "Registry name: none | fake | claude-agent-sdk | anthropic-api | ollama" },
+        "minutes_model": { "$ref": "#/$defs/minutes_model" },
         "external_send_policy": { "$ref": "#/$defs/external_send_policy" },
         "language": { "type": "string", "description": "BCP-47-ish language code for transcription, e.g. ja" },
         "self_name": { "type": ["string", "null"], "description": "Display name for the microphone track speaker (me)." },

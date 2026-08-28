@@ -13,7 +13,9 @@ from typing import TYPE_CHECKING, Any
 from narumi import diarize, llm, transcribe
 from narumi.bundle import Bundle, Manifest
 from narumi.errors import (
+    AuthenticationRequiredError,
     BusyError,
+    ConfigurationConflictError,
     EngineUnavailableError,
     InvalidArgumentError,
     NarumiError,
@@ -98,7 +100,12 @@ def locked_bundle(
     check_scope(ctx, bundle, scope)
     ensure_not_busy(ctx, bundle, allow_recording=allow_recording)
     with ctx.locks.hold(meeting_id, purpose=purpose, timeout=HANDLER_WAIT_SECONDS):
-        yield find_bundle(ctx, meeting_id)
+        fresh = find_bundle(ctx, meeting_id)
+        # A preceding writer can change scope or enqueue a job while this caller waits.
+        # Its pre-lock checks must not authorize a later write over the accepted job config.
+        check_scope(ctx, fresh, scope)
+        ensure_not_busy(ctx, fresh, allow_recording=allow_recording)
+        yield fresh
 
 
 def meeting_summary(manifest: Manifest) -> dict[str, Any]:
@@ -167,6 +174,41 @@ def config_from_mapping(base: MeetingConfig, updates: Mapping[str, Any] | None) 
             "invalid meeting config",
             details={"errors": json.loads(exc.json(include_url=False))},
         ) from exc
+
+
+@contextmanager
+def validated_config(ctx: ServerContext, config: MeetingConfig) -> Iterator[None]:
+    """Validate a config and protect its model reference until the caller saves it.
+
+    Meeting writers take their meeting lock before entering this scope. The provider
+    deletion callback only reads atomically replaced files and never acquires a meeting
+    or profile lock, so the provider transaction cannot invert that lock order.
+    """
+    check_config_policy(config)
+    if config.minutes_model is None:
+        yield
+        return
+    if "streamable-http" not in ctx.transports or ctx.providers is None:
+        raise AuthenticationRequiredError(
+            "Model selections require the authenticated resident server"
+        )
+    from narumi.providers.generation import MinutesResolver
+
+    with MinutesResolver(ctx.providers).validated(config):
+        yield
+
+
+def check_expected_config(
+    config: MeetingConfig, args: Mapping[str, Any], *, generation: bool = True
+) -> None:
+    """Reject a generation request made for a stale displayed meeting configuration."""
+    if "expected_config" not in args:
+        if generation and config.minutes_model is not None:
+            raise ConfigurationConflictError("Reload the meeting configuration before generating")
+        return
+    expected = MeetingConfig.model_validate(args["expected_config"])
+    if expected != config:
+        raise ConfigurationConflictError("The meeting configuration changed; reload it")
 
 
 def check_config_policy(config: MeetingConfig) -> None:

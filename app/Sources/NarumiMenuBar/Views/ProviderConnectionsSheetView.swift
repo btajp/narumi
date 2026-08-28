@@ -14,7 +14,7 @@ struct ProviderConnectionsSheetView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("AI プロバイダの接続").font(.title3.bold())
-                Text("接続・認証・実行環境とモデル候補を確認します。工程別のモデル選択・議事録への適用は、まだこの画面では行えません。")
+                Text("接続・認証・実行環境とモデル候補を確認します。Codex のモデルは会議の「設定」またはプロファイルの「議事録の生成方法」で選択して保存します。")
                     .font(.callout).foregroundStyle(.secondary)
             }
             .padding(14)
@@ -51,7 +51,7 @@ struct ProviderConnectionsSheetView: View {
             Button("接続を削除", role: .destructive) { Task { await store.deleteConnection() } }
             Button("キャンセル", role: .cancel) {}
         } message: {
-            Text("この接続専用の API キーも削除します。過去の議事録は保持します。使用中またはプロファイルから参照中の接続は削除できません。")
+            Text("この接続専用の認証情報も削除します。過去の議事録は保持します。使用中または会議・プロファイルから参照中の接続は削除できません。")
         }
         .confirmationDialog("未保存の編集を破棄しますか？", isPresented: $confirmDiscard, titleVisibility: .visible) {
             Button("編集を破棄して続ける", role: .destructive) {
@@ -99,7 +99,7 @@ struct ProviderConnectionsSheetView: View {
                     }
                 }
             }
-            Text("Codex App Server / OpenAI API の接続は、この版では未対応です。")
+            Text("OpenAI API の接続は、この版では未対応です。Codex App Server は ChatGPT ログインで利用します。")
                 .font(.caption).foregroundStyle(.secondary)
             Button("一覧を再読み込み") { navigate(.reload) }
                 .disabled(store.isBusy)

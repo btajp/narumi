@@ -86,11 +86,18 @@ public struct SetProviderConnectionRequest: Encodable, Equatable, Sendable,
                 displayName != nil || enabled != nil || endpoint != nil || authMethod != nil || apiKey != .unchanged
             else { throw invalidProviderRequest(encoder) }
         }
-        if let providerID, authMethod != (providerID == .ollama ? ProviderAuthMethod.none : .apiKey) {
+        if let providerID, authMethod != providerID.supportedAuthMethod {
             throw invalidProviderRequest(encoder)
         }
+        if authMethod == .chatgpt || providerID == .codexAppServer {
+            guard apiKey == .unchanged,
+                endpoint == nil || endpoint == ProviderConnectionSettings.codexEndpoint else {
+                throw invalidProviderRequest(encoder)
+            }
+        }
         if case .replace(let value) = apiKey {
-            guard !value.isEmpty, value.count <= 4096, authMethod != ProviderAuthMethod.none else {
+            guard !value.isEmpty, value.count <= 4096,
+                authMethod != ProviderAuthMethod.none, authMethod != .chatgpt else {
                 throw invalidProviderRequest(encoder)
             }
         }

@@ -32,6 +32,7 @@ _SECRET_FIELDS = {
     "password",
     "secret",
 }
+_EPHEMERAL_FIELDS = {"authorization_url", "user_code"}
 
 
 @contextmanager
@@ -65,6 +66,8 @@ def _validate_value(value: Any) -> None:
         for key, child in value.items():
             if not isinstance(key, str) or key.lower() in _SECRET_FIELDS:
                 raise ValueError("invalid provider metadata field")
+            if key.lower() in _EPHEMERAL_FIELDS and child is not None:
+                raise ValueError("ephemeral provider authentication data cannot be saved")
             _validate_value(child)
     elif isinstance(value, list):
         for child in value:
@@ -84,6 +87,22 @@ def _encode(document: dict[str, Any]) -> str:
     return (
         json.dumps(document, ensure_ascii=False, allow_nan=False, sort_keys=True, indent=2) + "\n"
     )
+
+
+def _redact_loaded_challenges(value: Any) -> bool:
+    """Discard legacy challenges in memory; the next owner transaction removes them on disk."""
+    changed = False
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key.lower() in _EPHEMERAL_FIELDS and child is not None:
+                value[key] = None
+                changed = True
+            else:
+                changed = _redact_loaded_challenges(child) or changed
+    elif isinstance(value, list):
+        for child in value:
+            changed = _redact_loaded_challenges(child) or changed
+    return changed
 
 
 class ProviderStore:
@@ -122,8 +141,9 @@ class ProviderStore:
             if contents is None:
                 return _empty_document(), None
             document = json.loads(contents, object_pairs_hook=_object)
+            redacted = _redact_loaded_challenges(document)
             normalized = _encode(document)
-            return document, normalized
+            return document, None if redacted else normalized
 
     def _require_inactive(self) -> None:
         if self._document is not None:

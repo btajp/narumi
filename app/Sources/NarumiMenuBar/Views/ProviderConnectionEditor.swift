@@ -20,13 +20,24 @@ struct ProviderConnectionEditor: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             TextField("接続名", text: $store.editor.displayName, prompt: Text("用途が分かる名前"))
-            Text("複数の接続を区別する表示名です。例: 議事録用 Anthropic。会議名やモデル ID は変更しません。")
+            Text("複数の接続を区別する表示名です。例: 議事録用 Codex。会議名やモデル ID は変更しません。")
                 .font(.caption).foregroundStyle(.secondary)
             Toggle("この接続を有効にする", isOn: $store.editor.enabled)
                 .toggleStyle(.checkbox)
-            Text("無効にしても設定と API キーは保持します。削除する場合は下の「接続を削除」を使います。")
+            Text("無効にしても設定と認証情報は保持します。削除する場合は下の「接続を削除」を使います。")
                 .font(.caption).foregroundStyle(.secondary)
-            if store.editor.providerID == .ollama {
+            if store.editor.providerID == .codexAppServer {
+                LabeledContent("送信先", value: ProviderConnectionSettings.codexEndpoint)
+                LabeledContent("認証方式", value: "ChatGPT ログイン（API キー不要）")
+                Text("接続名を入力して保存し、下の「実行環境」で準備後、「ChatGPT でログイン」から確認コードを取得します。公式画面でコードを入力して承認します。API キーの入力は不要です。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("デバイスコード認証を利用できない場合はログインを停止します。ほかのログイン方式へ自動では切り替えません。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("ログイン情報はこの接続専用の環境に保存します。既存の Codex アプリや CLI のログイン・設定は共有しません。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("生成には ChatGPT の利用枠を使います。利用条件や上限は契約プランに従い、無制限・無料とは扱いません。接続の保存やログインだけでは会議データを送信しません。")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if store.editor.providerID == .ollama {
                 TextField("接続先", text: $store.editor.endpoint, prompt: Text(ProviderConnectionSettings.ollamaEndpoint))
                     .autocorrectionDisabled()
                 Text("この Mac の Ollama に数値 IP の HTTP/HTTPS URL で接続します。既定は http://127.0.0.1:11434 です。DNS 名・外部 IP・認証情報・クエリは指定できません。HTTPS は証明書の検証も必要です。")

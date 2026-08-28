@@ -317,3 +317,11 @@ def test_endpoint_canonicalization_keeps_only_allowed_origins():
         validate_endpoint("anthropic-api", "http://api.anthropic.com")
     with pytest.raises(InvalidArgumentError):
         validate_endpoint("unsupported", API)
+
+
+@pytest.mark.parametrize("credential", [None, KEY])
+def test_codex_never_reuses_the_anthropic_http_metadata_adapter(credential):
+    metadata, http = client()
+    with pytest.raises(InvalidArgumentError):
+        metadata.fetch("codex-app-server", "https://chatgpt.com", credential)
+    assert http.calls == []

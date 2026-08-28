@@ -54,6 +54,8 @@ class MetadataClient:
         return models[0]
 
     def _requester(self, provider_id: str, endpoint: str, api_key: str | None) -> Callable:
+        if provider_id not in {"anthropic-api", "claude-agent-sdk", "ollama"}:
+            raise InvalidArgumentError("This provider does not use the HTTP metadata adapter")
         endpoint = validate_endpoint(provider_id, endpoint)
         headers: dict[str, str] = {}
         if provider_id == "ollama":

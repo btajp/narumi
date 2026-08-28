@@ -10,13 +10,17 @@ inputs, so a richer brief or new slides append a new version.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from narumi.brief import BRIEF_ARTIFACT_KEY, Brief, inject_brief, load_brief
 from narumi.bundle import Bundle, Manifest, MinutesVersionRecord, StageResult, utc_now_iso
 from narumi.bundle.hashing import sha256_params
+from narumi.errors import AuthenticationRequiredError, InvalidArgumentError
+from narumi.generate.bounded import MinutesLimits, bounded_minutes
+from narumi.generate.checkpoints import MinutesCheckpoints, check_cancelled
 from narumi.generate.integrate import INTEGRATE_KEY, load_merged, uses_llm
 from narumi.generate.prompts import render_prompt
 from narumi.llm.base import LLMProvider
@@ -31,6 +35,9 @@ from narumi.models import (
 )
 from narumi.slides.detect import SLIDES_KEY, SlideEntry, load_slides
 from narumi.slides.embed import copy_slides_to_minutes, select_slides_for_minutes
+
+if TYPE_CHECKING:
+    from narumi.providers.generation import MinutesResolver
 
 MINUTES_PROMPT_VERSION = "minutes-v2"
 CHUNK_PROMPT_NAME = "minutes_chunk"
@@ -171,9 +178,23 @@ def _engine_summary(manifest: Manifest, prefix: str, fallback: str) -> str:
 
 
 def _llm_sections(
-    merged: MergedTranscript, manifest: Manifest, provider: LLMProvider, brief_text: str
+    merged: MergedTranscript,
+    manifest: Manifest,
+    provider: LLMProvider,
+    brief_text: str,
+    limits: MinutesLimits | None = None,
 ) -> tuple[dict[str, str], int]:
     lines = transcript_lines(merged)
+    if limits is not None:
+        answer, count = bounded_minutes(
+            lines,
+            meeting_name=manifest.meeting_name,
+            provider=provider,
+            brief=brief_text,
+            system=MINUTES_SYSTEM_PROMPT,
+            limits=limits,
+        )
+        return _answer_sections(answer), count
     chunks = chunk_lines(lines, chunk_budget(provider)) or [[]]
     summaries: list[str] = []
     for i, chunk in enumerate(chunks, start=1):
@@ -194,12 +215,15 @@ def _llm_sections(
         summaries="\n\n".join(f"### メモ {i}\n{s}" for i, s in enumerate(summaries, start=1)),
     )
     answer = provider.complete(final_prompt, system=MINUTES_SYSTEM_PROMPT)
+    return _answer_sections(answer), len(chunks)
+
+
+def _answer_sections(answer: str) -> dict[str, str]:
     parsed = split_sections(answer)
-    sections = {
+    return {
         name: parsed.get(name) or MISSING_SECTION_TEMPLATE.format(section=name)
         for name in LLM_SECTIONS
     }
-    return sections, len(chunks)
 
 
 def generate_minutes(
@@ -213,6 +237,7 @@ def generate_minutes(
     brief: Brief | None = None,
     slides: Sequence[SlideEntry] | None = None,
     slide_refs: dict[str, str] | None = None,
+    limits: MinutesLimits | None = None,
 ) -> tuple[str, MinutesMeta]:
     """Render minutes markdown + metadata. Plain mode when ``provider`` is ``None`` / ``none``.
 
@@ -228,7 +253,7 @@ def generate_minutes(
     if llm:
         assert provider is not None
         brief_text = brief_block(brief, provider)
-        sections, chunks = _llm_sections(merged, manifest, provider, brief_text)
+        sections, chunks = _llm_sections(merged, manifest, provider, brief_text, limits)
     else:
         sections, chunks = dict.fromkeys(LLM_SECTIONS, PLAIN_PLACEHOLDER), 0
 
@@ -327,7 +352,13 @@ def minutes_output(version: int) -> str:
     return f"minutes/v{version}/minutes.md"
 
 
-def run_generate(bundle: Bundle, *, force: bool = False) -> StageResult:
+def run_generate(
+    bundle: Bundle,
+    *,
+    force: bool = False,
+    minutes_resolver: MinutesResolver | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> StageResult:
     """Append a new minutes version unless the latest one has identical inputs / params.
 
     Existing versions are never overwritten: a changed input or ``force`` always creates
@@ -338,18 +369,37 @@ def run_generate(bundle: Bundle, *, force: bool = False) -> StageResult:
     :func:`generate_minutes` (slides into the transcript, the brief into the LLM prompts).
     """
     config = bundle.manifest.config
+    if config.minutes_model is not None and force:
+        raise InvalidArgumentError(
+            "Codex minutes cannot use force; start a new cache epoch instead"
+        )
+    check_cancelled(should_cancel)
+    selected_provider = None
+    limits = None
+    if config.minutes_model is not None:
+        if minutes_resolver is None:
+            raise AuthenticationRequiredError(
+                "Connected minutes generation requires the authenticated resident server"
+            )
+        selected_provider = minutes_resolver.resolve(config, should_cancel=should_cancel)
+        limits = MinutesLimits.for_provider(selected_provider)
+        name = selected_provider.name
+    else:
+        name = config.llm_provider
+        check_policy(provider_profile(name), config.external_send_policy, provider=name)
     inputs = {INTEGRATE_KEY: bundle.artifact_hash(INTEGRATE_KEY)}
     for extra_key in (SLIDES_KEY, BRIEF_ARTIFACT_KEY):
         record = bundle.artifact(extra_key)
         if record is not None:
             inputs[extra_key] = record.sha256
-    name = config.llm_provider
-    check_policy(provider_profile(name), config.external_send_policy, provider=name)
     params = {
         "provider": name,
         "prompt_version": MINUTES_PROMPT_VERSION,
         "language": config.language,
     }
+    if selected_provider is not None:
+        params.update(selected_provider.generation_params)
+        params["generation_limits"] = limits.params()
     latest = bundle.manifest.latest_minutes_version
     if latest is not None and not force:
         existing = bundle.artifact(minutes_key(latest))
@@ -370,7 +420,16 @@ def run_generate(bundle: Bundle, *, force: bool = False) -> StageResult:
     output = minutes_output(version)
 
     def produce(out: Path) -> None:
-        provider = get_provider(name)
+        provider = selected_provider if selected_provider is not None else get_provider(name)
+        if selected_provider is not None:
+            provider = MinutesCheckpoints(
+                bundle,
+                provider,
+                inputs=inputs,
+                params=params,
+                limits=limits,
+                should_cancel=should_cancel,
+            )
         merged = load_merged(bundle)
         slides = load_slides(bundle) if bundle.artifact(SLIDES_KEY) is not None else []
         refs = copy_slides_to_minutes(bundle, version, slides) if slides else {}
@@ -383,9 +442,11 @@ def run_generate(bundle: Bundle, *, force: bool = False) -> StageResult:
             brief=load_brief(bundle),
             slides=slides or None,
             slide_refs=refs or None,
+            limits=limits,
         )
         meta.inputs = dict(inputs)
         meta.params.update(params)
+        check_cancelled(should_cancel)
         out.write_text(text, encoding="utf-8")
         bundle.write_json(f"minutes/v{version}/meta.json", meta)
 

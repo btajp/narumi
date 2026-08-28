@@ -1,4 +1,4 @@
-"""Persisted, connection-scoped API verification; no browser or ambient SDK login."""
+"""Persisted API verification and explicit, isolated Codex login operations."""
 
 from __future__ import annotations
 
@@ -7,11 +7,13 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from narumi.errors import BusyError, InvalidArgumentError, NarumiError, NotFoundError
+from narumi.providers._codex_auth import CodexAuthentication
 from narumi.providers._common import (
     cancel_auth,
     check_provider_idle,
     check_revision,
     connection,
+    invalidate_checks,
     timestamp,
 )
 
@@ -22,6 +24,7 @@ if TYPE_CHECKING:
 class Authentication:
     def __init__(self, service: ProviderService) -> None:
         self.service = service
+        self.codex = CodexAuthentication(service, self)
 
     def authenticate(self, args: dict[str, Any]) -> dict[str, Any]:
         if args["action"] == "start":
@@ -33,7 +36,7 @@ class Authentication:
     def status(self, args: dict[str, Any]) -> dict[str, Any]:
         document = self.service.store.read()
         operation = self._lookup(document, args)
-        return {"operation": copy.deepcopy(operation)}
+        return {"operation": self.codex.public_operation(document, operation)}
 
     def _start(self, args: dict[str, Any]) -> dict[str, Any]:
         service = self.service
@@ -46,6 +49,10 @@ class Authentication:
             if not record["enabled"]:
                 raise InvalidArgumentError("Enable this provider connection before authenticating")
             check_provider_idle(document, record["provider_id"])
+            if record["provider_id"] == "codex-app-server":
+                self.codex.require_ready(document)
+                record["credential_present"] = False
+                invalidate_checks(document, record)
             operation = self._operation(record, args)
             document["auth_operations"][operation["operation_id"]] = operation
             record["active_auth"] = self._active(operation)
@@ -54,12 +61,16 @@ class Authentication:
                 "token": operation["operation_id"],
                 "server_instance_id": service.server_instance_id,
                 "connection_id": record["connection_id"],
+                "kind": "authentication",
             }
             receipt = service.requests.accept(document, args, fingerprint)
             response = service.requests.complete(receipt, {"operation": operation})
             snapshot = copy.deepcopy(record)
         try:
-            service.auth_executor.submit(self._verify, operation["operation_id"], snapshot)
+            worker = (
+                self.codex.login if snapshot["provider_id"] == "codex-app-server" else self._verify
+            )
+            service.auth_executor.submit(worker, operation["operation_id"], snapshot)
         except Exception:
             self._submission_failed(operation["operation_id"], snapshot)
             raise NarumiError("Provider authentication could not be started") from None
@@ -109,6 +120,8 @@ class Authentication:
                     return
                 operation.update(
                     state="failed",
+                    authorization_url=None,
+                    user_code=None,
                     reason="authentication_verification_unavailable",
                     updated_at=timestamp(),
                 )
@@ -121,9 +134,12 @@ class Authentication:
                     record.update(active_auth=None, auth_state="failed")
         except Exception:
             pass
+        finally:
+            self.codex.forget(operation_id)
 
     def _cancel(self, args: dict[str, Any]) -> dict[str, Any]:
         service = self.service
+        cancel_codex = False
         with service.store.transaction() as document:
             fingerprint, replay = self._replay(document, args)
             if replay is not None:
@@ -132,10 +148,20 @@ class Authentication:
             check_revision(record, args["expected_revision"])
             operation = self._lookup(document, args)
             if operation["state"] in ("pending", "unknown"):
-                operation.update(
-                    state="cancelled", reason="authentication_cancelled", updated_at=timestamp()
-                )
                 active = record["active_auth"]
+                cancel_codex = (
+                    record["provider_id"] == "codex-app-server"
+                    and active is not None
+                    and active["operation_id"] == operation["operation_id"]
+                    and operation["action"] == "start"
+                )
+                operation.update(
+                    state="cancelled",
+                    authorization_url=None,
+                    user_code=None,
+                    reason="authentication_cancelled",
+                    updated_at=timestamp(),
+                )
                 if active is not None and active["operation_id"] == operation["operation_id"]:
                     record["active_auth"] = None
                     record["auth_state"] = (
@@ -143,11 +169,23 @@ class Authentication:
                         if record["credential_present"] or record["auth_method"] == "none"
                         else "unconfigured"
                     )
+            self.codex.forget(operation["operation_id"])
             receipt = service.requests.accept(document, args, fingerprint)
-            return service.requests.complete(receipt, {"operation": operation})
+            response = service.requests.complete(receipt, {"operation": operation})
+        if cancel_codex:
+            try:
+                service.codex_backend.cancel_auth(
+                    args["connection_id"], operation_id=operation["operation_id"]
+                )
+            except Exception:
+                raise NarumiError("Provider authentication cancellation is unresolved") from None
+        return response
 
     def _logout(self, args: dict[str, Any]) -> dict[str, Any]:
         service = self.service
+        record = service.store.read()["connections"].get(args["connection_id"])
+        if record is not None and record["provider_id"] == "codex-app-server":
+            return self.codex.logout(args)
         with service.store.transaction() as document:
             fingerprint, replay = self._replay(document, args)
             if replay is not None:
@@ -155,7 +193,10 @@ class Authentication:
             record = connection(document, args["connection_id"])
             check_revision(record, args["expected_revision"])
             check = document["checks"].get(record["provider_id"])
-            if check is not None and check["connection_id"] != record["connection_id"]:
+            if check is not None and (
+                check["connection_id"] != record["connection_id"]
+                or check.get("kind") == "generation"
+            ):
                 raise BusyError("Another connection of this provider is being verified")
             runtime = document["runtimes"].get(record["provider_id"], {})
             active_setup = runtime.get("active_setup")
@@ -189,8 +230,9 @@ class Authentication:
         replay = self.service.requests.replay(document, args, fingerprint)
         if replay is not None:
             operation = document["auth_operations"].get(replay["operation"]["operation_id"])
-            if operation is not None:
-                replay = {"operation": copy.deepcopy(operation)}
+            replay = {
+                "operation": self.codex.public_operation(document, operation or replay["operation"])
+            }
         return fingerprint, replay
 
     def _operation(self, record: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
@@ -204,6 +246,7 @@ class Authentication:
             "action": args["action"],
             "state": "pending",
             "authorization_url": None,
+            "user_code": None,
             "reason": None,
             "created_at": now,
             "updated_at": now,

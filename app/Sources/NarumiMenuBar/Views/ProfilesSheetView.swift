@@ -7,6 +7,9 @@ struct ProfilesSheetView: View {
     @ObservedObject var model: MainWindowModel
     @State private var form: MainWindowModel.ProfileForm?
     @State private var deleting: String?
+    @State private var saving = false
+    @State private var selectionGeneration: UInt64 = 0
+    @State private var loadingProfile = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -14,9 +17,9 @@ struct ProfilesSheetView: View {
                 .frame(width: 200)
             Divider()
             editor
-                .frame(width: 420)
+                .frame(width: 560)
         }
-        .frame(height: 520)
+        .frame(height: 660)
         .task {
             await model.reloadProfiles()
         }
@@ -41,8 +44,15 @@ struct ProfilesSheetView: View {
                     }
                     .contentShape(Rectangle())
                     .onTapGesture {
+                        guard !saving else { return }
+                        selectionGeneration &+= 1
+                        let generation = selectionGeneration
+                        loadingProfile = true
                         Task {
-                            form = await model.editProfile(name: profile.name)
+                            let loaded = await model.editProfile(name: profile.name)
+                            guard selectionGeneration == generation else { return }
+                            form = loaded
+                            loadingProfile = false
                         }
                     }
                 }
@@ -50,10 +60,13 @@ struct ProfilesSheetView: View {
             Divider()
             HStack {
                 Button {
+                    selectionGeneration &+= 1
+                    loadingProfile = false
                     form = MainWindowModel.ProfileForm()
                 } label: {
                     Label("新規", systemImage: "plus")
                 }
+                .disabled(saving)
                 Spacer()
                 Button("閉じる") {
                     model.showProfilesSheet = false
@@ -88,26 +101,9 @@ struct ProfilesSheetView: View {
                     if binding.wrappedValue.isNew {
                         TextField("名前（必須）", text: binding.name)
                     }
-                    capabilityPicker("文字起こしエンジン", selection: binding.transcriptionEngine,
-                                     options: capabilities?.transcriptionEngines ?? [])
-                    capabilityPicker("話者分離エンジン", selection: binding.diarizationEngine,
-                                     options: capabilities?.diarizationEngines ?? [])
-                    capabilityPicker("LLM プロバイダ", selection: binding.llmProvider,
-                                     options: capabilities?.llmProviders ?? [])
-                    Picker("外部送信ポリシー", selection: binding.externalSendPolicy) {
-                        Text("（設定しない）").tag("")
-                        Text("local_only").tag("local_only")
-                        Text("subscription_ok").tag("subscription_ok")
-                        Text("api_ok").tag("api_ok")
-                    }
-                    TextField("言語（ja / en など）", text: binding.language)
-                    TextField("自分の名前", text: binding.selfName)
-                    VStack(alignment: .leading) {
-                        Text("語彙ヒント（1 行 1 語）")
-                        TextEditor(text: binding.vocabHintsText)
-                            .frame(minHeight: 60)
-                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3)))
-                    }
+                    ProcessingConfigurationFields(
+                        form: binding.processing, capabilities: capabilities,
+                        catalog: model.minutesModelCatalog, isProfile: true)
                     TextField("既定 scope（任意）", text: binding.scope)
                     TextField("既定 engagement（任意）", text: binding.engagement)
                 }
@@ -131,12 +127,14 @@ struct ProfilesSheetView: View {
                 }
             }
             .formStyle(.grouped)
+            .disabled(saving || loadingProfile)
             Divider()
             HStack {
                 if !binding.wrappedValue.isNew {
                     Button("削除…", role: .destructive) {
                         deleting = binding.wrappedValue.name
                     }
+                    .disabled(saving || loadingProfile)
                     .confirmationDialog(
                         "プロファイルを削除しますか？",
                         isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
@@ -144,9 +142,12 @@ struct ProfilesSheetView: View {
                     ) {
                         Button("削除する", role: .destructive) {
                             if let name = deleting {
+                                saving = true
+                                selectionGeneration &+= 1
                                 Task {
                                     await model.deleteProfile(name: name)
                                     form = nil
+                                    saving = false
                                 }
                             }
                             deleting = nil
@@ -157,27 +158,23 @@ struct ProfilesSheetView: View {
                     }
                 }
                 Spacer()
-                Button("保存") {
+                Button(saving ? "保存中…" : "保存") {
+                    guard let current = form else { return }
+                    saving = true
+                    selectionGeneration &+= 1
                     Task {
-                        if let current = form, await model.saveProfile(current) {
-                            form = nil
-                        }
+                        if await model.saveProfile(current) { form = nil }
+                        saving = false
                     }
                 }
+                .disabled(saving || loadingProfile || binding.wrappedValue.name.trimmingCharacters(in: .whitespaces).isEmpty
+                    || (binding.wrappedValue.processing.minutesModel.mode == .codex
+                        && (model.minutesModelCatalog.isLoading
+                            || model.minutesModelCatalog.validationMessage(for: binding.wrappedValue.processing) != nil)))
                 .keyboardShortcut(.defaultAction)
             }
             .padding(10)
         }
     }
 
-    private func capabilityPicker(_ title: String, selection: Binding<String>, options: [String]) -> some View {
-        Picker(title, selection: selection) {
-            Text("（設定しない）").tag("")
-            let values = options.contains(selection.wrappedValue) || selection.wrappedValue.isEmpty
-                ? options : options + [selection.wrappedValue]
-            ForEach(values, id: \.self) { option in
-                Text(option).tag(option)
-            }
-        }
-    }
 }

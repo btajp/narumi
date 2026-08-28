@@ -27,6 +27,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["pipeline/tests", "server/tests"]
+pythonpath = ["."]
 asyncio_mode = "auto"
 markers = [
   "real: opt-in tests that hit real engines/providers (deselected by default)",

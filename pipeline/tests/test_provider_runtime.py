@@ -24,12 +24,14 @@ from narumi.providers.service import ProviderService
 from .provider_fakes import (
     INSTANCE_ONE,
     INSTANCE_TWO,
+    FakeCodexBackend,
     FakeMetadata,
     FakeProgress,
     FakeRuntimeInspector,
     JobQueue,
     ManualExecutor,
     MemorySecretStore,
+    prepared_codex_connection,
 )
 
 
@@ -44,6 +46,7 @@ def runtime_setup(tmp_path):
         server_instance_id=INSTANCE_ONE,
         submit_job=jobs,
         runtime_inspector=inspector,
+        codex_backend=FakeCodexBackend(),
     )
     yield service, jobs, inspector, secrets
     service.close()
@@ -230,6 +233,7 @@ def test_restart_preserves_unknown_and_checks_old_process_lease(runtime_setup, t
         server_instance_id=INSTANCE_TWO,
         submit_job=next_jobs,
         runtime_inspector=inspector,
+        codex_backend=FakeCodexBackend(),
     )
     runtime = provider(restarted)["runtime"]
     assert runtime["active_setup"]["state"] == "unknown"
@@ -268,6 +272,7 @@ def test_installed_inspection_creates_private_evidence_without_starting_sdk(tmp_
         auth_executor=ManualExecutor(),
         submit_job=jobs,
         runtime_inspector=RuntimeInspector(),
+        codex_backend=FakeCodexBackend(),
     )
     resource = provider(service)["runtime"]["resources"][0]
     assert resource["source"] == "installed"
@@ -296,6 +301,7 @@ def test_missing_dependency_remains_not_prepared_without_installer(tmp_path, mon
         auth_executor=ManualExecutor(),
         submit_job=jobs,
         runtime_inspector=RuntimeInspector(),
+        codex_backend=FakeCodexBackend(),
     )
     service.prepare_runtime(prepare_args(service))
     with pytest.raises(EngineUnavailableError):
@@ -332,6 +338,7 @@ def test_http_adapters_prepare_without_unused_anthropic_or_httpx_packages(tmp_pa
         metadata_client=FakeMetadata(),
         auth_executor=ManualExecutor(),
         submit_job=jobs,
+        codex_backend=FakeCodexBackend(),
     )
     for index, provider_id in enumerate(("anthropic-api", "ollama")):
         args = prepare_args(service, provider_id, f"prepare-http-adapter-{index}")
@@ -367,3 +374,73 @@ def test_runtime_parent_allow_acl_rejects_before_acceptance_and_can_be_repaired(
     service.prepare_runtime(args)
     jobs.run()
     assert provider(service)["runtime"]["state"] == "ready"
+
+
+def test_codex_runtime_uses_fixed_backend_catalog_and_explicit_job(runtime_setup):
+    service, jobs, inspector, secrets = runtime_setup
+    backend = service.codex_backend
+    descriptor = provider(service, "codex-app-server")
+    resource = descriptor["runtime"]["resources"][0]
+    assert descriptor["auth_methods"] == ["chatgpt"]
+    assert resource["source"] == "approved_download"
+    assert resource["download_host"] == "github.com"
+    args = prepare_args(service, "codex-app-server")
+    response = service.prepare_runtime(args)
+    assert service.prepare_runtime(args) == response
+    assert backend.calls == inspector.calls == secrets.calls == []
+    jobs.run()
+    assert backend.calls == [("prepare", resource)]
+    assert inspector.calls == []
+    ready = provider(service, "codex-app-server")
+    assert ready["runtime"]["state"] == "ready"
+    assert ready["runtime"]["last_setup"]["state"] == "succeeded"
+    assert service.list_connections()["connections"] == []
+    load_contracts().validate_output("list_providers", service.list_providers())
+
+
+def test_codex_runtime_failure_and_cancellation_never_publish_ready(runtime_setup):
+    service, jobs, _, _ = runtime_setup
+    backend = service.codex_backend
+    service.prepare_runtime(prepare_args(service, "codex-app-server"))
+    with pytest.raises(CancelledError):
+        jobs.run(cancelled=True)
+    assert backend.calls == []
+    backend.error = RuntimeError("fixture-secret /private/codex-runtime")
+    service.prepare_runtime(prepare_args(service, "codex-app-server", "retry-codex-prepare"))
+    with pytest.raises(EngineUnavailableError, match="preparation failed"):
+        jobs.run(1)
+    assert provider(service, "codex-app-server")["runtime"]["state"] == "failed"
+    assert "fixture-secret" not in service.store.path.read_text()
+
+
+def test_codex_runtime_update_marks_previous_model_observations_stale(runtime_setup):
+    service, jobs, _, _ = runtime_setup
+    record = prepared_codex_connection(service)
+    service.codex_backend.version = "2.0.0"
+    service.prepare_runtime(prepare_args(service, "codex-app-server"))
+    jobs.run()
+    models = service.list_models({"connection_id": record["connection_id"]})
+    assert models["catalog_state"] == "stale"
+    assert models["models"][0]["availability"] == "unverified"
+    assert service.list_connections()["connections"][0]["credential_present"] is True
+
+
+@pytest.mark.parametrize("instance_id", [INSTANCE_ONE, INSTANCE_TWO])
+def test_nonowner_job_observation_and_close_preserve_resident_preparation(
+    runtime_setup, instance_id
+):
+    owner, jobs, _, _ = runtime_setup
+    result = owner.prepare_runtime(prepare_args(owner))
+    before = owner.store.path.read_bytes()
+    observer = ProviderService(
+        owner.root,
+        recover=False,
+        server_instance_id=instance_id,
+        secret_store=MemorySecretStore(),
+        auth_executor=ManualExecutor(),
+    )
+    observer.observe_job(result["job_id"], "cancelled")
+    observer.close()
+    assert owner.store.path.read_bytes() == before
+    jobs.run()
+    assert provider(owner)["runtime"]["state"] == "ready"

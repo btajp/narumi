@@ -81,7 +81,7 @@ class JobProgress:
 class JobManager:
     """Thread-pool job runner with catalog persistence (default one worker: 1 会議ずつ処理)."""
 
-    def __init__(self, catalog: Catalog, *, max_workers: int = 1) -> None:
+    def __init__(self, catalog: Catalog, *, max_workers: int = 1, recover: bool = True) -> None:
         if max_workers < 1:
             raise ValueError("max_workers must be >= 1")
         self.catalog = catalog
@@ -95,9 +95,12 @@ class JobManager:
         self._meetings: dict[str, str | None] = {}
         self._cancel_events: dict[str, threading.Event] = {}
         self._closed = False
-        stale = catalog.mark_stale_jobs("job abandoned: narumi-server restarted")
-        if stale:
-            logger.warning("marked %d stale job(s) as failed at start-up", stale)
+        # Only the resident server owns restart recovery. A temporary context may share this
+        # catalog with a live server whose queued and running jobs must remain untouched.
+        if recover:
+            stale = catalog.mark_stale_jobs("job abandoned: narumi-server restarted")
+            if stale:
+                logger.warning("marked %d stale job(s) as failed at start-up", stale)
 
     # ------------------------------------------------------------------ submission
     def submit(self, kind: str, meeting_id: str | None, fn: JobFn) -> str:
@@ -154,6 +157,7 @@ class JobManager:
                     details={"job_id": job_id},
                 )
             payload = dict(result)
+            self.catalog.update_job(job_id, status="succeeded", result=payload)
         except CancelledError as exc:
             if confidential:
                 self.catalog.update_job(job_id, status="cancelled", error=_cancelled_payload())
@@ -187,7 +191,17 @@ class JobManager:
                 },
             )
             raise
-        self.catalog.update_job(job_id, status="succeeded", result=payload)
+        except BaseException:
+            # Async cancellation and other abrupt exits still finish the catalog row before
+            # _forget drops the future. Do not expose exception values or swallow the exit.
+            error = (
+                _provider_setup_error(ErrorCode.INTERNAL)
+                if confidential
+                else NarumiError("Job interrupted", code=ErrorCode.INTERNAL)
+            )
+            logger.warning("job %s interrupted", job_id)
+            self.catalog.update_job(job_id, status="failed", error=error.to_payload()["error"])
+            raise
         logger.info("job %s succeeded", job_id)
         return payload
 
@@ -200,7 +214,7 @@ class JobManager:
         progress checkpoint raises :class:`narumi.errors.CancelledError` — the returned row may
         therefore still say ``running``. Cancelling an already-cancelled job is a no-op.
         ``NotFoundError`` for unknown ids; ``BusyError`` when the job already finished
-        (``succeeded`` / ``failed``) and can no longer be cancelled.
+        (``succeeded`` / ``failed``) or belongs to another job manager.
         """
         with self._lock:
             job = self.catalog.get_job(job_id)
@@ -224,10 +238,10 @@ class JobManager:
                 event.set()
                 logger.info("job %s flagged for cooperative cancellation", job_id)
             else:
-                # active in the catalog but unknown to this manager (normally impossible:
-                # start-up marks such rows failed); close it out instead of leaving it stuck
-                logger.warning("cancelling job %s that this manager does not own", job_id)
-                self.catalog.update_job(job_id, status="cancelled", error=_cancelled_payload())
+                raise BusyError(
+                    "job is owned by another job manager",
+                    details={"job_id": job_id, "status": status},
+                )
         refreshed = self.catalog.get_job(job_id)
         return job if refreshed is None else refreshed
 
@@ -274,7 +288,28 @@ class JobManager:
             if self._closed:
                 return
             self._closed = True
+            # Future cancellation invokes _forget synchronously, so retain ownership before
+            # shutting down the executor. Never reconcile other managers' catalog rows.
+            owned = list(self._futures.items())
         self._executor.shutdown(wait=wait, cancel_futures=True)
-        stale = self.catalog.mark_stale_jobs("job cancelled: narumi-server shut down")
+        stale = 0
+        with self._lock:
+            for job_id, future in owned:
+                # Running jobs finish in _run (also when wait=False); touching those rows here
+                # could overwrite a concurrently completed result. Only dropped work fails here.
+                if not future.cancelled():
+                    continue
+                job = self.catalog.get_job(job_id)
+                if job is None or job["status"] not in ACTIVE_JOB_STATUSES:
+                    continue
+                self.catalog.update_job(
+                    job_id,
+                    status="failed",
+                    error={
+                        "code": str(ErrorCode.INTERNAL),
+                        "message": "job cancelled: narumi-server shut down",
+                    },
+                )
+                stale += 1
         if stale:
-            logger.info("marked %d unfinished job(s) as failed at shutdown", stale)
+            logger.info("marked %d owned queued job(s) as failed at shutdown", stale)

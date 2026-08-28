@@ -58,7 +58,7 @@ final class ServerReadinessTests: XCTestCase {
     }
 
     func testUnsupportedContractCannotBeAdoptedEvenWhenBundleVersionMatches() throws {
-        for version in ["1.0.0", "1.1.0", "2.0.0-rc.1", "3.0.0", "malformed"] {
+        for version in ["1.0.0", "1.1.0", "2.0.0-rc.1", "3.0.0-rc.1", "4.0.0", "malformed"] {
             var info = try response()
             info.contractVersion = version
             var expected = identity

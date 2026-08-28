@@ -61,7 +61,7 @@ final class ProviderContractModelsTests: XCTestCase {
 
     func testAllNineProviderToolResponseContracts() throws {
         let providers = try all(ListProvidersResponse.self, "list_providers")
-        XCTAssertEqual(providers[0].providers.map(\.providerID), [.anthropicAPI, .claudeAgentSDK, .ollama])
+        XCTAssertEqual(providers[0].providers.map(\.providerID), [.anthropicAPI, .claudeAgentSDK, .ollama, .codexAppServer])
         XCTAssertEqual(providers[0].providers[1].authMethods, [.apiKey])
         XCTAssertEqual(providers[0].providers[1].runtime.state, .notPrepared)
         let connections = try all(ListProviderConnectionsResponse.self, "list_provider_connections")
@@ -104,7 +104,7 @@ final class ProviderContractModelsTests: XCTestCase {
         let resource = try XCTUnwrap((runtime["resources"] as? [[String: Any]])?.first)
         try requireNullableKeys(ProviderRuntimeResource.self, resource, ["version", "download_host", "sha256"])
         let operation = try XCTUnwrap(first("get_provider_auth_status")["operation"] as? [String: Any])
-        try requireNullableKeys(ProviderAuthOperation.self, operation, ["authorization_url", "reason"])
+        try requireNullableKeys(ProviderAuthOperation.self, operation, ["authorization_url", "user_code", "reason"])
         try requireNullableKeys(ProviderConnectionTestResult.self, first("test_provider_connection"), ["reason"])
         let model = try firstArrayItem("list_provider_models", "models")
         try requireNullableKeys(
@@ -118,7 +118,7 @@ final class ProviderContractModelsTests: XCTestCase {
     }
 
     func testUnknownCapabilitiesAndWrongBooleanTypesAreRejected() throws {
-        XCTAssertThrowsError(try decode(ProviderID.self, "codex-app-server"))
+        XCTAssertThrowsError(try decode(ProviderID.self, "openai-api"))
         XCTAssertThrowsError(try decode(ProviderRole.self, "future_role"))
         XCTAssertThrowsError(try decode(ProviderAuthMethod.self, "subscription"))
         XCTAssertThrowsError(try decode(ProviderAvailability.self, "future_state"))
@@ -266,5 +266,115 @@ final class ProviderContractModelsTests: XCTestCase {
         XCTAssertEqual(setup["expected_catalog_revision"] as? String, "bundled-v1")
         XCTAssertEqual(setup["action"] as? String, "update")
         XCTAssertEqual(setup["request_id"] as? String, "runtime-request")
+    }
+
+    func testCodexConnectionAcceptsChatGPTLoginOnlyAtItsFixedEndpoint() throws {
+        var connection = try firstArrayItem("list_provider_connections", "connections")
+        connection["provider_id"] = "codex-app-server"
+        connection["auth_method"] = "chatgpt"
+        connection["endpoint"] = "https://chatgpt.com"
+        connection["credential_present"] = false
+        XCTAssertEqual(try decode(ProviderConnection.self, connection).authMethod, .chatgpt)
+        for endpoint: Any in ["https://api.openai.com", "https://example.invalid", NSNull()] {
+            var changed = connection
+            changed["endpoint"] = endpoint
+            XCTAssertThrowsError(try decode(ProviderConnection.self, changed))
+        }
+        connection["auth_method"] = "api_key"
+        XCTAssertThrowsError(try decode(ProviderConnection.self, connection))
+
+        let valid = try encoded(SetProviderConnectionRequest(
+            providerID: .codexAppServer, displayName: "Meeting Codex", authMethod: .chatgpt,
+            endpoint: ProviderConnectionSettings.codexEndpoint))
+        XCTAssertEqual(valid["provider_id"] as? String, "codex-app-server")
+        XCTAssertEqual(valid["auth_method"] as? String, "chatgpt")
+        XCTAssertNil(valid["api_key"])
+        for mutation in [ProviderCredentialUpdate.clear, .replace("fixture-key")] {
+            XCTAssertThrowsError(try encoded(SetProviderConnectionRequest(
+                providerID: .codexAppServer, displayName: "Meeting Codex", authMethod: .chatgpt, apiKey: mutation)))
+        }
+        XCTAssertThrowsError(try encoded(SetProviderConnectionRequest(
+            providerID: .codexAppServer, displayName: "Meeting Codex", authMethod: .apiKey)))
+        XCTAssertThrowsError(try encoded(SetProviderConnectionRequest(
+            providerID: .codexAppServer, displayName: "Meeting Codex", authMethod: .chatgpt,
+            endpoint: "https://example.invalid")))
+    }
+
+    func testDeviceAuthorizationChallengeIsAcceptedOnlyWhileLoginIsPending() throws {
+        var operation = try XCTUnwrap(first("get_provider_auth_status")["operation"] as? [String: Any])
+        operation["action"] = "start"
+        operation["state"] = "pending"
+        operation["authorization_url"] = ProviderSettingsFixtures.authorizationURL()
+        operation["user_code"] = ProviderSettingsFixtures.userCode
+        let decoded = try decode(ProviderAuthOperation.self, operation)
+        XCTAssertEqual(decoded.authorizationURL?.browserURL.absoluteString, ProviderSettingsFixtures.authorizationURL())
+        XCTAssertEqual(decoded.userCode?.displayValue, ProviderSettingsFixtures.userCode)
+        for field in ["authorization_url", "user_code"] {
+            var incomplete = operation
+            incomplete[field] = NSNull()
+            XCTAssertThrowsError(try decode(ProviderAuthOperation.self, incomplete))
+        }
+        for state in ["succeeded", "failed", "cancelled", "unknown"] {
+            operation["state"] = state
+            XCTAssertThrowsError(try decode(ProviderAuthOperation.self, operation))
+        }
+        operation["state"] = "pending"
+        for action in ["cancel", "logout"] {
+            operation["action"] = action
+            XCTAssertThrowsError(try decode(ProviderAuthOperation.self, operation))
+        }
+    }
+
+    func testDeviceAuthorizationURLRejectsOtherDestinationsAndBrowserOAuth() {
+        let valid = ProviderSettingsFixtures.authorizationURL()
+        let replacements = [
+            ("https://auth.openai.com", "http://auth.openai.com"),
+            ("https://auth.openai.com", "file://auth.openai.com"),
+            ("https://auth.openai.com", "https://auth.openai.com.evil.invalid"),
+            ("https://auth.openai.com", "https://auth.openai.com@evil.invalid"),
+            ("https://auth.openai.com", "https://user@auth.openai.com"),
+            ("https://auth.openai.com", "https://auth.openai.com:443"),
+            ("/codex/device", "/oauth/authorize?response_type=code"),
+            ("/codex/device", "/oauth/token"),
+            ("/codex/device", "/codex/other"),
+            ("/codex/device", "/codex/%64evice"),
+        ]
+        for (original, replacement) in replacements {
+            XCTAssertNil(ProviderAuthorizationURL(valid.replacingOccurrences(of: original, with: replacement)), replacement)
+        }
+        for suffix in ["/", "#fragment", "?user_code=ABCD-EFGH", "?redirect_uri=http://localhost:1455/auth/callback", "\n"] {
+            XCTAssertNil(ProviderAuthorizationURL(valid + suffix), suffix)
+        }
+        XCTAssertNil(ProviderAuthorizationURL("javascript:alert(1)"))
+        XCTAssertNil(ProviderAuthorizationURL(valid + String(repeating: "x", count: 8192)))
+    }
+
+    func testDeviceUserCodeAcceptsOnlyBoundedASCIIAndRemainsRequired() throws {
+        for value in ["ABCD-EFGH", "abcd1234", String(repeating: "A", count: 32)] {
+            XCTAssertEqual(try decode(ProviderUserCode.self, value).displayValue, value)
+        }
+        for value in ["", String(repeating: "A", count: 33), " ABCD-EFGH", "ABCD EFGH", "ABCD_EFGH", "ABCD/EFGH", "ABCD\nEFGH", "ＡＢＣＤ-ＥＦＧＨ", "ABCD-ＥFGH"] {
+            XCTAssertNil(ProviderUserCode(value))
+            XCTAssertThrowsError(try decode(ProviderUserCode.self, value))
+        }
+        var operation = try XCTUnwrap(first("get_provider_auth_status")["operation"] as? [String: Any])
+        operation.removeValue(forKey: "user_code")
+        XCTAssertThrowsError(try decode(ProviderAuthOperation.self, operation))
+    }
+
+    func testDeviceAuthorizationChallengeNeverAppearsInDiagnosticsOrReflection() throws {
+        let url = try XCTUnwrap(ProviderAuthorizationURL(ProviderSettingsFixtures.authorizationURL()))
+        let code = try XCTUnwrap(ProviderUserCode(ProviderSettingsFixtures.userCode))
+        let operation = ProviderSettingsFixtures.auth(authorizationURL: url)
+        for output in [String(describing: url), String(reflecting: url), String(reflecting: code), String(reflecting: operation)] {
+            XCTAssertFalse(output.contains(ProviderSettingsFixtures.userCode))
+            XCTAssertFalse(output.contains(ProviderSettingsFixtures.authorizationURL()))
+            XCTAssertTrue(output.contains("<redacted>"))
+        }
+        var dumped = ""
+        dump(operation, to: &dumped)
+        XCTAssertFalse(dumped.contains(ProviderSettingsFixtures.userCode))
+        XCTAssertFalse(dumped.contains(ProviderSettingsFixtures.authorizationURL()))
+        XCTAssertTrue(dumped.contains("<redacted>"))
     }
 }

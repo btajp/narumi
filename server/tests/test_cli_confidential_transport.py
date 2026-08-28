@@ -75,7 +75,7 @@ class Endpoint:
     failure_status: int = 403
     rpc_error_label: str | None = None
     delay_label: str | None = None
-    contract_version: str = "2.0.0"
+    contract_version: str = "3.0.0"
     protocol_version: str = cli_tools.PROTOCOL_VERSION
     reported_instance: str | None = None
 
@@ -324,7 +324,7 @@ def test_authentication_failures_do_not_fallback_or_resend(
     assert SECRET not in result.output
 
 
-@pytest.mark.parametrize("version", ["1.1.0", "3.0.0", "invalid", SECRET])
+@pytest.mark.parametrize("version", ["1.1.0", "2.0.0", "4.0.0", "invalid", SECRET])
 def test_contract_major_is_checked_before_sending_new_arguments(
     endpoint_factory, monkeypatch, version
 ):

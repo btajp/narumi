@@ -7,6 +7,7 @@ enum ProviderSettingsFixtures {
     static let instanceID = "00000000-0000-4000-8000-000000000001"
     static let jobID = "job-0123456789ab"
     static let timestamp = "2026-08-28T09:00:00Z"
+    static let userCode = "ABCD-EFGH"
 
     static func connection(
         connectionID: String = ProviderSettingsFixtures.connectionID,
@@ -18,8 +19,8 @@ enum ProviderSettingsFixtures {
         ProviderConnection(
             connectionID: connectionID, revision: revision, providerID: providerID, displayName: name,
             enabled: enabled,
-            endpoint: providerID == .ollama ? ProviderConnectionSettings.ollamaEndpoint : ProviderConnectionSettings.anthropicEndpoint,
-            authMethod: providerID == .ollama ? .none : .apiKey,
+            endpoint: ProviderConnectionSettings(providerID: providerID).normalizedEndpoint,
+            authMethod: providerID.supportedAuthMethod,
             credentialPresent: providerID == .ollama ? false : credential,
             authState: authState, catalogState: catalogState, checkedAt: nil,
             activeAuth: activeAuth, lastGenerationState: generation)
@@ -51,7 +52,7 @@ enum ProviderSettingsFixtures {
     ) -> ProviderDescriptor {
         ProviderDescriptor(
             providerID: providerID, displayName: ProviderDisplay.name(providerID), roles: [.llm],
-            authMethods: providerID == .ollama ? [.none] : [.apiKey], availability: .unverified,
+            authMethods: [providerID.supportedAuthMethod], availability: .unverified,
             reason: "adapter_capability_verification_required",
             runtime: ProviderRuntime(
                 state: state, version: nil, catalogRevision: "fixture-v1", resources: [resource()],
@@ -60,14 +61,21 @@ enum ProviderSettingsFixtures {
 
     static func auth(
         requestID: String = "original-start", state: ProviderAuthOperationState = .pending,
-        instanceID: String = ProviderSettingsFixtures.instanceID, action: ProviderAuthAction = .start
+        instanceID: String = ProviderSettingsFixtures.instanceID, action: ProviderAuthAction = .start,
+        connectionID: String = ProviderSettingsFixtures.connectionID, connectionRevision: Int = 1,
+        authorizationURL: ProviderAuthorizationURL? = nil, userCode: ProviderUserCode? = nil,
+        reason: String? = nil
     ) -> ProviderAuthOperation {
         ProviderAuthOperation(
-            operationID: operationID, connectionID: connectionID, connectionRevision: 1,
+            operationID: operationID, connectionID: connectionID, connectionRevision: connectionRevision,
             serverInstanceID: instanceID, startRequestID: requestID, action: action, state: state,
-            reason: state == .unknown ? "authentication_operation_interrupted" : nil,
+            authorizationURL: authorizationURL,
+            userCode: authorizationURL == nil ? userCode : (userCode ?? ProviderUserCode(Self.userCode)),
+            reason: reason ?? (state == .unknown ? "authentication_operation_interrupted" : nil),
             createdAt: timestamp, updatedAt: timestamp)
     }
+
+    static func authorizationURL() -> String { "https://auth.openai.com/codex/device" }
 
     static func activeAuth(requestID: String = "original-start", state: ProviderAuthOperationState = .pending) -> ProviderActiveAuth {
         ProviderActiveAuth(operationID: operationID, startRequestID: requestID, serverInstanceID: instanceID, state: state)

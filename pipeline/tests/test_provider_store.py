@@ -174,6 +174,40 @@ def test_plaintext_secret_fields_are_rejected_at_any_depth(tmp_path: Path, field
     assert store.path.read_bytes() == previous
 
 
+@pytest.mark.parametrize("field", ["authorization_url", "user_code"])
+def test_authentication_challenges_cannot_enter_operations_or_receipts(tmp_path: Path, field: str):
+    store = initialized(tmp_path)
+    previous = store.path.read_bytes()
+    for section in ("auth_operations", "requests"):
+        with pytest.raises(NarumiError) as error, store.transaction() as document:
+            document[section]["fixture"] = {"nested": [{field: SECRET}]}
+        assert SECRET not in str(error.value)
+        assert error.value.details == {}
+        assert store.path.read_bytes() == previous
+
+
+def test_legacy_challenges_are_redacted_on_read_and_removed_only_by_a_transaction(tmp_path: Path):
+    store = initialized(tmp_path)
+    document = store.read()
+    challenge = {
+        "authorization_url": "https://auth.openai.com/oauth/authorize",
+        "user_code": SECRET,
+    }
+    document["auth_operations"]["legacy"] = dict(challenge)
+    document["requests"]["legacy"] = {"response": {"operation": dict(challenge)}}
+    original = json.dumps(document)
+    store.path.write_text(original)
+    reopened = ProviderStore(tmp_path)
+    redacted = {"authorization_url": None, "user_code": None}
+    assert reopened.read()["auth_operations"]["legacy"] == redacted
+    assert reopened.read()["requests"]["legacy"]["response"]["operation"] == redacted
+    assert store.path.read_text() == original
+    with reopened.transaction():
+        pass
+    assert SECRET not in store.path.read_text()
+    assert challenge["authorization_url"] not in store.path.read_text()
+
+
 @pytest.mark.parametrize("value", [b"not-json", float("nan"), {1: "integer-key"}])
 def test_non_json_metadata_is_rejected_atomically(tmp_path: Path, value):
     store = initialized(tmp_path)

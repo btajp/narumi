@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import secrets
+from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -23,7 +24,12 @@ from narumi.context_sources import PARSER_VERSION, parse_context
 from narumi.errors import InvalidArgumentError, NotFoundError
 from narumi.models import Transcript
 
-from narumi_server.handlers.common import locked_bundle, sync_catalog
+from narumi_server.handlers.common import (
+    check_expected_config,
+    locked_bundle,
+    sync_catalog,
+    validated_config,
+)
 from narumi_server.handlers.processing import enqueue_regenerate
 
 if TYPE_CHECKING:
@@ -58,53 +64,63 @@ def register_context(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]
         purpose="register_context",
         allow_recording=not auto_regenerate,
     ) as bundle:
-        context_id = new_context_id()
-        registered_at = utc_now_iso()
-        source: dict[str, Any] = {
-            "context_id": context_id,
-            "meeting_id": bundle.meeting_id,
-            "source_type": args["source_type"],
-            "label": args.get("label"),
-            "registered_at": registered_at,
-            "request_id": args.get("request_id"),
-        }
-        if kind == "content":
-            source["content"] = args["content"]
-        elif kind == "url":
-            source["url"] = args["url"]
-        else:
-            source.update(read_context_file(args["file_path"]))
+        check_expected_config(bundle.manifest.config, args, generation=auto_regenerate)
+        guard = validated_config(ctx, bundle.manifest.config) if auto_regenerate else nullcontext()
+        with guard:
+            return _register_context(ctx, bundle, args, kind, auto_regenerate)
 
-        rel = f"{SOURCES_DIR}/{context_id}.json"
-        bundle.write_json(rel, source)
-        status = _try_parse(bundle, rel, source, context_id=context_id, kind=kind)
-        bundle.manifest.contexts.append(
-            ContextRecord(
-                context_id=context_id,
-                source_type=args["source_type"],
-                registered_at=registered_at,
-                path=rel,
-                status=status,
-                label=args.get("label"),
-                request_id=args.get("request_id"),
-            )
-        )
-        bundle.save()
-        sync_catalog(ctx, bundle)
-        ctx.catalog.record_context(
-            bundle.meeting_id, context_id, args["source_type"], status, registered_at
-        )
-        ctx.catalog.audit(
-            ctx.actor,
-            "register_context",
-            {"meeting_id": bundle.meeting_id, "context_id": context_id, "kind": kind},
-        )
 
-        result: dict[str, Any] = {"context_id": context_id, "status": status}
-        if auto_regenerate:
-            result["job_id"] = enqueue_regenerate(
-                ctx, bundle.meeting_id, force=False, reason=f"register_context {context_id}"
-            )
+def _register_context(
+    ctx: ServerContext, bundle: Bundle, args: dict[str, Any], kind: str, auto_regenerate: bool
+) -> dict[str, Any]:
+    """Persist the source with its meeting and optional provider reference locks held."""
+    context_id = new_context_id()
+    registered_at = utc_now_iso()
+    source: dict[str, Any] = {
+        "context_id": context_id,
+        "meeting_id": bundle.meeting_id,
+        "source_type": args["source_type"],
+        "label": args.get("label"),
+        "registered_at": registered_at,
+        "request_id": args.get("request_id"),
+    }
+    if kind == "content":
+        source["content"] = args["content"]
+    elif kind == "url":
+        source["url"] = args["url"]
+    else:
+        source.update(read_context_file(args["file_path"]))
+
+    rel = f"{SOURCES_DIR}/{context_id}.json"
+    bundle.write_json(rel, source)
+    status = _try_parse(bundle, rel, source, context_id=context_id, kind=kind)
+    bundle.manifest.contexts.append(
+        ContextRecord(
+            context_id=context_id,
+            source_type=args["source_type"],
+            registered_at=registered_at,
+            path=rel,
+            status=status,
+            label=args.get("label"),
+            request_id=args.get("request_id"),
+        )
+    )
+    bundle.save()
+    sync_catalog(ctx, bundle)
+    ctx.catalog.record_context(
+        bundle.meeting_id, context_id, args["source_type"], status, registered_at
+    )
+    ctx.catalog.audit(
+        ctx.actor,
+        "register_context",
+        {"meeting_id": bundle.meeting_id, "context_id": context_id, "kind": kind},
+    )
+
+    result: dict[str, Any] = {"context_id": context_id, "status": status}
+    if auto_regenerate:
+        result["job_id"] = enqueue_regenerate(
+            ctx, bundle.meeting_id, force=False, reason=f"register_context {context_id}"
+        )
     return result
 
 

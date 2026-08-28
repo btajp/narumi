@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from narumi.bundle import Bundle, TrackRecord, sha256_file
+from narumi.bundle import Bundle, TrackRecord, new_meeting_id, sha256_file
 from narumi.errors import (
     BusyError,
     NarumiError,
@@ -17,7 +17,6 @@ from narumi.errors import (
 )
 
 from narumi_server.handlers.common import (
-    check_config_policy,
     config_from_mapping,
     default_meeting_name,
     find_bundle,
@@ -25,6 +24,7 @@ from narumi_server.handlers.common import (
     probe_duration_or_none,
     resolve_profile,
     sync_catalog,
+    validated_config,
 )
 from narumi_server.handlers.processing import enqueue_process
 from narumi_server.locks import HANDLER_WAIT_SECONDS
@@ -43,10 +43,14 @@ def start_recording(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
     # Reserve before preflight or bundle creation. The controller's start() re-enters this
     # thread-owned gate, while a competing request fails immediately rather than queuing.
     with ctx.recorder.recording_operation():
-        return _start_recording(ctx, args)
+        meeting_id = new_meeting_id()
+        with ctx.locks.hold(meeting_id, purpose="start_recording"):
+            return _start_recording(ctx, args, meeting_id=meeting_id)
 
 
-def _start_recording(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
+def _start_recording(
+    ctx: ServerContext, args: dict[str, Any], *, meeting_id: str
+) -> dict[str, Any]:
     if ctx.recorder.is_active:
         raise BusyError(
             "a recording is already running",
@@ -65,16 +69,16 @@ def _start_recording(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]
         )
     profile = resolve_profile(ctx, args.get("profile"))
     config = config_from_mapping(profile.config, args.get("config"))
-    check_config_policy(config)
-
-    bundle = Bundle.create(
-        ctx.meetings_root,
-        meeting_name=args.get("meeting_name") or default_meeting_name(),
-        engagement=args["engagement"] if "engagement" in args else profile.engagement,
-        scope=args["scope"] if "scope" in args else profile.scope,
-        profile=profile.name,
-        config=config,
-    )
+    with validated_config(ctx, config):
+        bundle = Bundle.create(
+            ctx.meetings_root,
+            meeting_id=meeting_id,
+            meeting_name=args.get("meeting_name") or default_meeting_name(),
+            engagement=args["engagement"] if "engagement" in args else profile.engagement,
+            scope=args["scope"] if "scope" in args else profile.scope,
+            profile=profile.name,
+            config=config,
+        )
     try:
         started = ctx.recorder.start(bundle)
     except BaseException:

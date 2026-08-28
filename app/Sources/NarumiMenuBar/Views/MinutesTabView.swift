@@ -9,6 +9,8 @@ struct MinutesTabView: View {
     @State private var regenerateForce = false
     @State private var regenerateReason = ""
     @State private var showRegeneratePopover = false
+    @State private var confirmedConfig: MeetingConfig?
+    @State private var confirmedMeetingID: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -33,6 +35,8 @@ struct MinutesTabView: View {
             }
 
             Button {
+                confirmedConfig = model.detail?.config
+                confirmedMeetingID = model.detail?.meeting.meetingID
                 showRegeneratePopover = true
             } label: {
                 Label("再生成", systemImage: "arrow.clockwise")
@@ -40,6 +44,7 @@ struct MinutesTabView: View {
             .popover(isPresented: $showRegeneratePopover, arrowEdge: .bottom) {
                 regeneratePopover
             }
+            .disabled(model.detail?.meeting.meetingID != model.selectedMeetingID)
 
             Menu {
                 if model.exportDestinations.isEmpty {
@@ -71,25 +76,51 @@ struct MinutesTabView: View {
     private var regeneratePopover: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("議事録を再生成").font(.headline)
-            Toggle("強制再生成（入力が同じでも新しい版を作る）", isOn: $regenerateForce)
-                .toggleStyle(.checkbox)
+            if let confirmedConfig {
+                MinutesGenerationDisclosure(config: confirmedConfig, catalog: model.minutesModelCatalog)
+            }
+            if confirmedConfig?.minutesModel != nil {
+                Text("同じ入力・選択では保存済み結果を再利用します。結果不明の送信を新しく試すには、会議設定で試行番号を増やして保存してください。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("会議設定を開く") {
+                    showRegeneratePopover = false
+                    model.selectedTab = .settings
+                }
+            } else {
+                Toggle("強制再生成（入力が同じでも新しい版を作る）", isOn: $regenerateForce)
+                    .toggleStyle(.checkbox)
+            }
             TextField("理由（任意。manifest に記録されます）", text: $regenerateReason)
                 .textFieldStyle(.roundedBorder)
-                .frame(width: 320)
             HStack {
                 Spacer()
                 Button("再生成を開始") {
+                    let config = confirmedConfig
+                    let meetingID = confirmedMeetingID
+                    let force = config?.minutesModel == nil && regenerateForce
                     showRegeneratePopover = false
                     Task {
-                        await model.regenerate(force: regenerateForce, reason: regenerateReason)
+                        await model.regenerate(
+                            force: force, reason: regenerateReason, expectedConfig: config,
+                            expectedMeetingID: meetingID)
                         regenerateReason = ""
                         regenerateForce = false
                     }
                 }
+                .disabled(regenerationBlocked)
                 .keyboardShortcut(.defaultAction)
             }
         }
         .padding(12)
+        .frame(width: 480)
+    }
+
+    private var regenerationBlocked: Bool {
+        guard let confirmedConfig, let confirmedMeetingID,
+            confirmedMeetingID == model.selectedMeetingID else { return true }
+        guard confirmedConfig.minutesModel != nil else { return false }
+        return model.minutesModelCatalog.isLoading
+            || model.minutesModelCatalog.validationMessage(for: ProcessingConfigurationForm(config: confirmedConfig)) != nil
     }
 
     @ViewBuilder

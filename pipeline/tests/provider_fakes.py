@@ -7,7 +7,8 @@ import uuid
 from concurrent.futures import Future
 
 from narumi.contracts.loader import load_contracts
-from narumi.errors import CancelledError
+from narumi.errors import AuthenticationRequiredError, CancelledError
+from narumi.providers._common import AUTH_METHODS
 from narumi.providers.runtime import RuntimeInspector
 
 INSTANCE_ONE = "00000000-0000-4000-8000-000000000001"
@@ -126,15 +127,146 @@ class FakeRuntimeInspector(RuntimeInspector):
             raise self.error
 
 
+class FakeCodexBackend:
+    """No subprocess, credential access or external request, including during construction."""
+
+    def __init__(self):
+        self.calls = []
+        self.authenticated = set()
+        self.version = "1.0.0"
+        self.error = None
+        self.complete_error = None
+        self.response = "fixture completion"
+        self.authorization_url = "https://auth.openai.com/codex/device"
+        self.user_code = "FIXTURE-USER-CODE"
+        self.on_auth = None
+        model = copy.deepcopy(
+            load_contracts()["list_provider_models"].output_examples[0]["models"][0]
+        )
+        model.update(
+            model_id="codex-fixture-model",
+            display_name="Codex fixture model",
+            availability="available",
+            reason=None,
+            source="runtime",
+            parameter_schema={
+                "type": "object",
+                "properties": {
+                    "reasoning_effort": {"type": "string", "enum": ["low", "medium", "high"]},
+                },
+                "required": [],
+                "additionalProperties": False,
+            },
+        )
+        model["billing"]["kind"] = "subscription"
+        self.models = [model]
+
+    def resource(self):
+        return {
+            "resource_id": "codex-runtime",
+            "display_name": "Codex runtime fixture",
+            "kind": "runtime",
+            "version": self.version,
+            "source": "approved_download",
+            "download_host": "github.com",
+            "sha256": "a" * 64,
+            "license": "Apache-2.0",
+        }
+
+    def prepare(self, resource, progress):
+        self.calls.append(("prepare", resource))
+        progress("fixture_codex_preparation", 0.5)
+        if self.error is not None:
+            raise self.error
+
+    def authenticate(self, connection_id, *, on_authorization_code, cancelled, operation_id=None):
+        self.calls.append(("authenticate", connection_id))
+        on_authorization_code(self.authorization_url, self.user_code)
+        if self.on_auth is not None:
+            self.on_auth(connection_id, cancelled)
+        if cancelled():
+            raise CancelledError("fixture authentication cancelled")
+        if self.error is not None:
+            raise self.error
+        self.authenticated.add(connection_id)
+
+    def list_models(self, connection_id):
+        self.calls.append(("list_models", connection_id))
+        if self.error is not None:
+            raise self.error
+        if connection_id not in self.authenticated:
+            raise AuthenticationRequiredError("fixture account is not authenticated")
+        return copy.deepcopy(self.models)
+
+    def logout(self, connection_id):
+        self.calls.append(("logout", connection_id))
+        if self.error is not None:
+            raise self.error
+        self.authenticated.discard(connection_id)
+
+    def cancel_auth(self, connection_id, *, operation_id=None):
+        self.calls.append(("cancel_auth", connection_id))
+
+    def complete(
+        self,
+        connection_id,
+        model_id,
+        parameters,
+        prompt,
+        *,
+        system=None,
+        should_cancel=None,
+        max_tokens=None,
+    ):
+        self.calls.append(("complete", connection_id, model_id, parameters, prompt, system))
+        if should_cancel is not None and should_cancel():
+            raise CancelledError("fixture generation cancelled")
+        if self.complete_error is not None:
+            raise self.complete_error
+        return self.response
+
+    def close(self):
+        self.calls.append(("close",))
+
+
 def create_connection(
     service, *, provider_id="anthropic-api", key="fixture-key", request_id="create"
 ):
     args = {
         "provider_id": provider_id,
         "display_name": "Fixture connection",
-        "auth_method": "none" if provider_id == "ollama" else "api_key",
+        "auth_method": AUTH_METHODS[provider_id],
         "request_id": "provider-" + request_id,
     }
-    if provider_id != "ollama" and key is not None:
+    if AUTH_METHODS[provider_id] == "api_key" and key is not None:
         args["api_key"] = key
     return service.set_connection(args)["connection"]
+
+
+def prepared_codex_connection(service, *, models=None, request_id="prepared-codex"):
+    """Seed verified local observations without performing authentication or generation."""
+    record = create_connection(service, provider_id="codex-app-server", request_id=request_id)
+    backend = service.codex_backend
+    selected_models = copy.deepcopy(backend.models if models is None else models)
+    fetched_at = "2026-08-29T00:00:00Z"
+    with service.store.transaction() as document:
+        runtime = service.runtime._current("codex-app-server", document)
+        runtime["state"] = "ready"
+        document["runtimes"]["codex-app-server"] = runtime
+        saved = document["connections"][record["connection_id"]]
+        saved.update(
+            auth_state="authenticated",
+            credential_present=True,
+            catalog_state="ready",
+            checked_at=fetched_at,
+        )
+        document["catalogs"][record["connection_id"]] = {
+            "models": selected_models,
+            "connection_revision": record["revision"],
+            "runtime_catalog_revision": runtime["catalog_revision"],
+            "catalog_id": uuid.uuid4().hex,
+            "fetched_at": fetched_at,
+        }
+        record = copy.deepcopy(saved)
+    backend.authenticated.add(record["connection_id"])
+    return record

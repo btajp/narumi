@@ -11,6 +11,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from narumi.model_selection import ModelSelection
+
 SPEAKER_ME = "me"
 SPEAKER_OTHER = "other"
 
@@ -29,6 +31,7 @@ class MeetingConfig(BaseModel):
     transcription_engine: str = "auto"
     diarization_engine: str = "none"
     llm_provider: str = "none"
+    minutes_model: ModelSelection | None = None
     external_send_policy: ExternalSendPolicy = ExternalSendPolicy.LOCAL_ONLY
     language: str = "ja"
     self_name: str | None = None

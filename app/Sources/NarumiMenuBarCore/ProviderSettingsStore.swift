@@ -71,7 +71,47 @@ public final class ProviderSettingsStore {
     }
     public var canTest: Bool {
         canUseSavedConnection && pendingAuthentication?.unresolved != true
+            && (selectedConnection?.providerID != .codexAppServer || selectedProvider?.runtime.state == .ready)
             && (selectedConnection?.authMethod == ProviderAuthMethod.none || selectedConnection?.credentialPresent == true)
+    }
+    public var canAuthenticate: Bool {
+        guard canUseSavedConnection, pendingAuthentication?.unresolved != true else { return false }
+        if selectedConnection?.authMethod == .chatgpt { return selectedProvider?.runtime.state == .ready }
+        return canTest
+    }
+    public var canLogout: Bool {
+        guard canEdit, !saveNeedsReconciliation, !editor.hasUnsavedChanges, !revisionConflict,
+            let connection = selectedConnection, pendingAuthentication?.unresolved != true else { return false }
+        // Codex invalidates credential presence when logout is accepted. A failed
+        // cleanup must remain explicitly retryable even after reopening settings.
+        if connection.providerID == .codexAppServer { return true }
+        return connection.enabled && connection.authMethod != .none && connection.credentialPresent
+    }
+    /// A challenge is presented only for the currently selected, matching login.
+    public var deviceAuthorization: ProviderDeviceAuthorization? {
+        guard isLoaded, !revisionConflict,
+            let connection = selectedConnection, connection.enabled,
+            connection.providerID == .codexAppServer, connection.authMethod == .chatgpt,
+            let pending = pendingAuthentication, pending.state == .pending, pending.action == .start,
+            pending.connectionRevision == connection.revision,
+            let active = connection.activeAuth, active.state == .pending,
+            active.operationID == pending.operationID, active.startRequestID == pending.startRequestID,
+            active.serverInstanceID == pending.serverInstanceID,
+            let authorizationURL = pending.authorizationURL, let userCode = pending.userCode else { return nil }
+        return ProviderDeviceAuthorization(authorizationURL: authorizationURL, userCode: userCode)
+    }
+    public var browserAuthorizationURL: URL? { deviceAuthorization?.authorizationURL.browserURL }
+
+    /// Invoked by the copy button only. The writer is injected so tests never touch the clipboard.
+    public func copyAuthorizationUserCode(_ writer: (String) -> Bool) {
+        guard canEdit, let authorization = deviceAuthorization else { return }
+        notice = nil
+        errorMessage = nil
+        if writer(authorization.userCode.displayValue) {
+            notice = "確認コードをコピーしました。公式のデバイスログイン画面に入力してください。"
+        } else {
+            errorMessage = "確認コードをコピーできませんでした。表示されているコードを公式画面に入力してください。"
+        }
     }
     public var canDelete: Bool {
         canEdit && !saveNeedsReconciliation && selectedConnection != nil && pendingAuthentication?.unresolved != true
@@ -215,6 +255,7 @@ public final class ProviderSettingsStore {
         isLoaded = false
         recoverySnapshotAvailable = false
         editor.dismiss()
+        recovery.clearAuthorizationChallenges()
         clearModels()
         lastTest = nil
         errorMessage = nil
@@ -242,7 +283,7 @@ public final class ProviderSettingsStore {
         editor.apiKey = ""
         let failure = error as? ProviderSettingsFailure ?? ProviderSettingsFailure(.internalError)
         errorMessage = failure.message
-        if saving { errorMessage! += " API キーの入力は消去しました。必要なら再入力してください。" }
+        if saving && editor.usesAPIKey { errorMessage! += " API キーの入力は消去しました。必要なら再入力してください。" }
         if failure.code == .configurationConflict { revisionConflict = true }
         operation = nil
     }

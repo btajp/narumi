@@ -91,6 +91,7 @@
         "action",
         "state",
         "authorization_url",
+        "user_code",
         "reason",
         "created_at",
         "updated_at"
@@ -123,8 +124,15 @@
           "$ref": "#/$defs/provider_auth_operation_state"
         },
         "authorization_url": {
-          "type": "null",
-          "description": "PR1 supports API keys and unauthenticated local Ollama only; no browser login URL is issued."
+          "enum": ["https://auth.openai.com/codex/device", null],
+          "description": "Official Codex ChatGPT device-login URL, paired with user_code only while start is pending; otherwise null. Browser OAuth URLs and loopback callbacks are not supported. The URL is held only in memory for the pending operation and must not be persisted in receipts, logs or diagnostics."
+        },
+        "user_code": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[A-Za-z0-9-]+(?![\\s\\S])",
+          "description": "Transient code the user enters at authorization_url. ASCII letters, digits and hyphens only, at most 32 characters. Present only as a pair with the device URL during start/pending. Never persist in receipts, logs or diagnostics; clear on completion, cancellation, failure, unknown outcome or restart. Access tokens and runtime credential files are never returned."
         },
         "reason": {
           "$ref": "#/$defs/provider_reason"
@@ -137,7 +145,29 @@
         }
       },
       "additionalProperties": false,
-      "description": "Persisted public authentication operation. Starting again is never an implicit recovery action; query by the original start_request_id."
+      "description": "Public authentication operation with durable non-secret identity and state. authorization_url and user_code are memory-only pending device-login data, excluded from persistent receipts, logs and diagnostics. Starting again is never an implicit recovery action; query by the original start_request_id.",
+      "allOf": [
+        {
+          "if": {
+            "properties": { "action": { "const": "start" }, "state": { "const": "pending" } },
+            "required": ["action", "state"]
+          },
+          "else": {
+            "properties": {
+              "authorization_url": { "type": "null" },
+              "user_code": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "authorization_url": { "type": "null" } },
+            "required": ["authorization_url"]
+          },
+          "then": { "properties": { "user_code": { "type": "null" } } },
+          "else": { "properties": { "user_code": { "type": "string" } } }
+        }
+      ]
     },
     "provider_connection": {
       "type": "object",
@@ -181,14 +211,14 @@
           ],
           "minLength": 1,
           "maxLength": 2048,
-          "description": "Non-secret, validated destination. Official Anthropic endpoints are fixed; Ollama is restricted to loopback."
+          "description": "Non-secret, validated destination. Official Anthropic and Codex destinations are fixed; Ollama is restricted to loopback."
         },
         "auth_method": {
           "$ref": "#/$defs/provider_auth_method"
         },
         "credential_present": {
           "type": "boolean",
-          "description": "Presence only; no key, token, digest or internal SecretStore identifier is exposed."
+          "description": "Presence only; no key, token, digest, internal SecretStore identifier or Codex runtime credential is exposed."
         },
         "auth_state": {
           "$ref": "#/$defs/provider_auth_state"
@@ -252,10 +282,18 @@
             }
           },
           "else": {
-            "properties": {
-              "auth_method": {
-                "const": "api_key"
+            "if": {
+              "properties": { "provider_id": { "const": "codex-app-server" } },
+              "required": ["provider_id"]
+            },
+            "then": {
+              "properties": {
+                "auth_method": { "const": "chatgpt" },
+                "endpoint": { "const": "https://chatgpt.com" }
               }
+            },
+            "else": {
+              "properties": { "auth_method": { "const": "api_key" } }
             }
           }
         }

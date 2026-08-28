@@ -1,7 +1,7 @@
 {
   "name": "set_provider_connection",
   "title": "Set provider connection",
-  "description": "Create or atomically update a provider connection without authenticating, fetching models or generating. New connections require provider_id, display_name and auth_method; connection_id and expected_revision must be omitted. Updates require connection_id and expected_revision and cannot change provider_id. Omitted mutable fields are retained; enabled defaults to true on creation. api_key is write-only: omit to retain, null to delete. A new API connection without a key is saved as unconfigured. New or changed credentials invalidate authentication and catalog checks. Endpoint or authentication changes never silently reuse credentials; incompatible, active or stale changes are rejected. API keys are accepted only through the authenticated transport and stored in the connection's SecretStore, never responses, logs, request caches or diagnostics. CLI secret input uses a hidden prompt or stdin, not ordinary argv or literal --json. The same request_id returns the original result, without repeating a secret mutation. On failure returns an error_envelope (isError=true) with code: invalid_argument, not_found, configuration_conflict, busy, authentication_required, internal. All provider operations require the authenticated resident server; no implicit in-process or unauthenticated HTTP fallback is allowed.",
+  "description": "Create or atomically update a provider connection without authenticating, fetching models or generating. Codex App Server accepts only auth_method=chatgpt and endpoint=https://chatgpt.com, rejects api_key including null, and keeps official login credentials inside its connection-specific narumi runtime without exposing them. Updates are also checked against the saved provider type. New connections require provider_id, display_name and auth_method; connection_id and expected_revision must be omitted. Updates require connection_id and expected_revision and cannot change provider_id. Omitted mutable fields are retained; enabled defaults to true on creation. api_key is write-only: omit to retain, null to delete. A new API connection without a key is saved as unconfigured. New or changed credentials invalidate authentication and catalog checks. Endpoint or authentication changes never silently reuse credentials; incompatible, active or stale changes are rejected. API keys are accepted only through the authenticated transport and stored in the connection's SecretStore, never responses, logs, request caches or diagnostics. CLI secret input uses a hidden prompt or stdin, not ordinary argv or literal --json. The same request_id returns the original result, without repeating a secret mutation. On failure returns an error_envelope (isError=true) with code: invalid_argument, not_found, configuration_conflict, busy, authentication_required, internal. All provider operations require the authenticated resident server; no implicit in-process or unauthenticated HTTP fallback is allowed.",
   "annotations": {
     "readOnlyHint": false,
     "destructiveHint": false,
@@ -34,7 +34,7 @@
         "minLength": 1,
         "maxLength": 2048,
         "pattern": "^https?://",
-        "description": "Official Anthropic connections use https://api.anthropic.com. Ollama accepts only numeric 127.0.0.0/8 or [::1] HTTP/HTTPS base URLs without userinfo, query or fragment; HTTPS requires normal certificate validation. DNS hostnames, redirects and proxies are not used."
+        "description": "Official Anthropic connections use https://api.anthropic.com; Codex App Server uses https://chatgpt.com. Ollama accepts only numeric 127.0.0.0/8 or [::1] HTTP/HTTPS base URLs without userinfo, query or fragment; HTTPS requires normal certificate validation. DNS hostnames, redirects and proxies are not used."
       },
       "auth_method": {
         "$ref": "../defs/providers.json#/$defs/provider_auth_method"
@@ -119,6 +119,29 @@
       }
     ],
     "allOf": [
+      {
+        "if": {
+          "properties": { "provider_id": { "const": "codex-app-server" } },
+          "required": ["provider_id"]
+        },
+        "then": {
+          "properties": {
+            "auth_method": { "const": "chatgpt" },
+            "endpoint": { "const": "https://chatgpt.com" }
+          },
+          "not": { "required": ["api_key"] }
+        }
+      },
+      {
+        "if": {
+          "properties": { "auth_method": { "const": "chatgpt" } },
+          "required": ["auth_method"]
+        },
+        "then": {
+          "properties": { "endpoint": { "const": "https://chatgpt.com" } },
+          "not": { "required": ["api_key"] }
+        }
+      },
       {
         "if": {
           "properties": {
@@ -229,6 +252,12 @@
         "auth_method": "none",
         "endpoint": "http://127.0.0.1:11434",
         "request_id": "provider-request-20260828-004"
+      },
+      {
+        "provider_id": "codex-app-server",
+        "display_name": "Codex 議事録",
+        "auth_method": "chatgpt",
+        "request_id": "provider-codex-request-20260829-001"
       }
     ],
     "output": [
@@ -260,6 +289,23 @@
           "auth_method": "api_key",
           "credential_present": true,
           "auth_state": "unverified",
+          "catalog_state": "unfetched",
+          "checked_at": null,
+          "active_auth": null,
+          "last_generation_state": "never"
+        }
+      },
+      {
+        "connection": {
+          "connection_id": "conn-fedcba987654",
+          "revision": 1,
+          "provider_id": "codex-app-server",
+          "display_name": "Codex 議事録",
+          "enabled": true,
+          "endpoint": "https://chatgpt.com",
+          "auth_method": "chatgpt",
+          "credential_present": false,
+          "auth_state": "unconfigured",
           "catalog_state": "unfetched",
           "checked_at": null,
           "active_auth": null,

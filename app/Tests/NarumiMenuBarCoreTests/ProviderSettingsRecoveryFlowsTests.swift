@@ -128,4 +128,233 @@ final class ProviderSettingsRecoveryFlowsTests: XCTestCase {
         XCTAssertEqual(store.recovery.setups[.anthropicAPI]?.state, .succeeded)
         XCTAssertNil(store.setupJobs[.anthropicAPI])
     }
+
+    func testLostCodexLoginResponseRecoversBrowserURLWithoutStartingAgain() async throws {
+        let url = try XCTUnwrap(ProviderAuthorizationURL(ProviderSettingsFixtures.authorizationURL()))
+        let client = FakeProviderSettingsClient(
+            connections: [ProviderSettingsFixtures.connection(providerID: .codexAppServer, credential: false)],
+            providers: [ProviderSettingsFixtures.provider(providerID: .codexAppServer)],
+            scenario: .init(loseAuthResponse: true, authLookupState: .pending, authorizationURL: url))
+        let store = ProviderSettingsStore(client: client)
+        await store.load()
+        await store.startAuthentication()
+        XCTAssertEqual(store.browserAuthorizationURL, url.browserURL)
+        XCTAssertEqual(store.deviceAuthorization?.userCode.displayValue, ProviderSettingsFixtures.userCode)
+        XCTAssertEqual(store.pendingAuthentication?.state, .pending)
+        await store.startAuthentication()
+        await store.refreshOperations()
+        let starts = await client.authRequests
+        let lookups = await client.authLookups
+        XCTAssertEqual(starts.count, 1)
+        XCTAssertEqual(lookups.count, 2)
+        XCTAssertTrue(lookups.allSatisfy { $0.startRequestID == starts[0].requestID })
+    }
+
+    func testClosingSettingsClearsLoginURLAndANewStoreRecoversOnlyByStatusLookup() async throws {
+        let url = try XCTUnwrap(ProviderAuthorizationURL(ProviderSettingsFixtures.authorizationURL()))
+        let client = FakeProviderSettingsClient(
+            connections: [ProviderSettingsFixtures.connection(providerID: .codexAppServer, credential: false)],
+            providers: [ProviderSettingsFixtures.provider(providerID: .codexAppServer)],
+            scenario: .init(authLookupState: .pending, authorizationURL: url))
+        let store = ProviderSettingsStore(client: client)
+        await store.load()
+        await store.startAuthentication()
+        XCTAssertNotNil(store.browserAuthorizationURL)
+        let requestID = try XCTUnwrap(store.pendingAuthentication?.startRequestID)
+        store.dismiss()
+        XCTAssertNil(store.browserAuthorizationURL)
+        XCTAssertNil(store.pendingAuthentication?.authorizationURL)
+        XCTAssertNil(store.pendingAuthentication?.userCode)
+        XCTAssertEqual(store.pendingAuthentication?.startRequestID, requestID)
+
+        let reopened = ProviderSettingsStore(client: client)
+        await reopened.load()
+        XCTAssertNil(reopened.browserAuthorizationURL)
+        XCTAssertTrue(reopened.needsPolling)
+        XCTAssertFalse(reopened.canAuthenticate)
+        await reopened.refreshOperations()
+        XCTAssertEqual(reopened.browserAuthorizationURL, url.browserURL)
+        XCTAssertEqual(reopened.deviceAuthorization?.userCode.displayValue, ProviderSettingsFixtures.userCode)
+        let starts = await client.authRequests
+        let lookups = await client.authLookups
+        XCTAssertEqual(starts.count, 1)
+        XCTAssertEqual(lookups.map(\.startRequestID), [requestID])
+    }
+
+    func testRestartedCodexLoginStaysUnknownUntilExplicitCancellation() async throws {
+        let url = try XCTUnwrap(ProviderAuthorizationURL(ProviderSettingsFixtures.authorizationURL()))
+        let client = FakeProviderSettingsClient(
+            connections: [ProviderSettingsFixtures.connection(
+                providerID: .codexAppServer, credential: false, authState: .unknown,
+                activeAuth: ProviderSettingsFixtures.activeAuth(state: .unknown))],
+            providers: [ProviderSettingsFixtures.provider(providerID: .codexAppServer)],
+            scenario: .init(authLookupState: .unknown, authorizationURL: url))
+        let store = ProviderSettingsStore(client: client)
+        await store.load()
+        await store.refreshOperations()
+        XCTAssertNil(store.browserAuthorizationURL)
+        XCTAssertNil(store.pendingAuthentication?.userCode)
+        XCTAssertFalse(store.needsPolling)
+        XCTAssertFalse(store.canAuthenticate)
+        await store.startAuthentication()
+        let starts = await client.authRequests
+        XCTAssertTrue(starts.isEmpty)
+        await store.cancelAuthentication()
+        XCTAssertEqual(store.pendingAuthentication?.state, .cancelled)
+        XCTAssertTrue(store.canAuthenticate)
+        XCTAssertNil(store.browserAuthorizationURL)
+        let actions = await client.authRequests
+        XCTAssertEqual(actions.map(\.action), [.cancel])
+    }
+
+    func testLoginURLCannotMoveToAnotherConnectionOrSurviveARevisionChange() async throws {
+        let url = try XCTUnwrap(ProviderAuthorizationURL(ProviderSettingsFixtures.authorizationURL()))
+        let connection = ProviderSettingsFixtures.connection(providerID: .codexAppServer, credential: false)
+        let other = ProviderSettingsFixtures.connection(connectionID: "conn-abcdef012345", providerID: .codexAppServer)
+        let client = FakeProviderSettingsClient(
+            connections: [connection, other], providers: [ProviderSettingsFixtures.provider(providerID: .codexAppServer)],
+            scenario: .init(authLookupState: .pending, authorizationURL: url))
+        let store = ProviderSettingsStore(client: client)
+        await store.load()
+        await store.startAuthentication()
+        XCTAssertNotNil(store.browserAuthorizationURL)
+        store.selectConnection(other.connectionID)
+        XCTAssertNil(store.browserAuthorizationURL)
+        store.selectConnection(connection.connectionID)
+        XCTAssertNotNil(store.browserAuthorizationURL)
+        let active = try XCTUnwrap(store.selectedConnection?.activeAuth)
+        await client.replaceConnections([
+            ProviderSettingsFixtures.changed(connection, revision: 2, activeAuth: active), other,
+        ])
+        await store.load()
+        XCTAssertEqual(store.pendingAuthentication?.state, .unknown)
+        XCTAssertNil(store.browserAuthorizationURL)
+        XCTAssertNil(store.pendingAuthentication?.authorizationURL)
+        XCTAssertNil(store.pendingAuthentication?.userCode)
+        let starts = await client.authRequests
+        XCTAssertEqual(starts.count, 1)
+    }
+
+    func testFailedOrCancelledCodexLogoutCanBeExplicitlyRetriedAfterReopeningWithoutCredentialPresence() async {
+        for state in [ProviderAuthOperationState.failed, .cancelled] {
+            let client = FakeProviderSettingsClient(
+                connections: [ProviderSettingsFixtures.connection(providerID: .codexAppServer, authState: .authenticated)],
+                providers: [ProviderSettingsFixtures.provider(providerID: .codexAppServer)],
+                scenario: .init(authLookupState: state))
+            let store = ProviderSettingsStore(client: client)
+            await store.load()
+            await store.logout()
+            XCTAssertFalse(store.selectedConnection?.credentialPresent ?? true)
+            XCTAssertFalse(store.canLogout)
+            await store.refreshOperations()
+            XCTAssertEqual(store.pendingAuthentication?.state, state)
+            XCTAssertTrue(store.canLogout)
+
+            let reopened = ProviderSettingsStore(client: client)
+            await reopened.load()
+            XCTAssertFalse(reopened.selectedConnection?.credentialPresent ?? true)
+            XCTAssertTrue(reopened.canLogout)
+            let beforeRetry = await client.authRequests
+            XCTAssertEqual(beforeRetry.count, 1)
+            await reopened.logout()
+            let afterRetry = await client.authRequests
+            XCTAssertEqual(afterRetry.map(\.action), [.logout, .logout])
+            XCTAssertEqual(afterRetry.map(\.expectedRevision), [1, 2])
+            XCTAssertNotEqual(afterRetry[0].requestID, afterRetry[1].requestID)
+        }
+    }
+
+    func testDisabledCodexConnectionCanStillExplicitlyRemoveItsOwnLogin() async {
+        let client = FakeProviderSettingsClient(
+            connections: [ProviderSettingsFixtures.connection(providerID: .codexAppServer, enabled: false)],
+            providers: [ProviderSettingsFixtures.provider(providerID: .codexAppServer)])
+        let store = ProviderSettingsStore(client: client)
+        await store.load()
+        XCTAssertFalse(store.canTest)
+        XCTAssertFalse(store.canAuthenticate)
+        XCTAssertTrue(store.canLogout)
+        await store.logout()
+        let requests = await client.authRequests
+        let models = await client.modelRequests
+        XCTAssertEqual(requests.map(\.action), [.logout])
+        XCTAssertTrue(models.isEmpty)
+    }
+
+    func testDeviceCodeCopyIsExplicitAndRequiresTheCurrentPendingChallenge() async throws {
+        let url = try XCTUnwrap(ProviderAuthorizationURL(ProviderSettingsFixtures.authorizationURL()))
+        let client = FakeProviderSettingsClient(
+            connections: [ProviderSettingsFixtures.connection(providerID: .codexAppServer, credential: false)],
+            providers: [ProviderSettingsFixtures.provider(providerID: .codexAppServer)],
+            scenario: .init(authLookupState: .pending, authorizationURL: url))
+        let store = ProviderSettingsStore(client: client)
+        var copies: [String] = []
+        let copy: (String) -> Bool = { copies.append($0); return true }
+        await store.load()
+        store.copyAuthorizationUserCode(copy)
+        XCTAssertTrue(copies.isEmpty)
+        await store.startAuthentication()
+        XCTAssertTrue(copies.isEmpty)
+        store.copyAuthorizationUserCode(copy)
+        XCTAssertEqual(copies, [ProviderSettingsFixtures.userCode])
+        XCTAssertFalse(store.notice?.contains(ProviderSettingsFixtures.userCode) ?? true)
+        await store.refreshOperations()
+        XCTAssertEqual(copies.count, 1)
+        store.copyAuthorizationUserCode { _ in false }
+        XCTAssertFalse(store.errorMessage?.contains(ProviderSettingsFixtures.userCode) ?? true)
+        await client.configure(.init(authLookupState: .succeeded))
+        await store.refreshOperations()
+        XCTAssertNil(store.deviceAuthorization)
+        store.copyAuthorizationUserCode(copy)
+        XCTAssertEqual(copies.count, 1)
+        store.dismiss()
+        store.copyAuthorizationUserCode(copy)
+        XCTAssertEqual(copies.count, 1)
+    }
+
+    func testUnavailableDeviceLoginIsExplicitWithoutFallbackOrAutomaticRetry() async {
+        let client = FakeProviderSettingsClient(
+            connections: [ProviderSettingsFixtures.connection(providerID: .codexAppServer, credential: false)],
+            providers: [ProviderSettingsFixtures.provider(providerID: .codexAppServer)],
+            scenario: .init(authLookupState: .failed, authLookupReason: "device_code_login_unavailable"))
+        let store = ProviderSettingsStore(client: client)
+        await store.load()
+        await store.startAuthentication()
+        await store.refreshOperations()
+        XCTAssertEqual(store.pendingAuthentication?.state, .failed)
+        XCTAssertTrue(store.pendingAuthentication?.reasonMessage?.contains("デバイスコード認証を開始できませんでした") ?? false)
+        XCTAssertTrue(store.pendingAuthentication?.reasonMessage?.contains("他方式への自動切替は行いません") ?? false)
+        XCTAssertNil(store.deviceAuthorization)
+        await store.refreshOperations()
+        let starts = await client.authRequests
+        XCTAssertEqual(starts.map(\.action), [.start])
+    }
+
+    func testSnapshotWithoutMatchingActiveLoginCannotKeepOrCopyStaleDeviceCode() async throws {
+        let url = try XCTUnwrap(ProviderAuthorizationURL(ProviderSettingsFixtures.authorizationURL()))
+        let snapshots = [
+            ProviderSettingsFixtures.connection(providerID: .codexAppServer, credential: false),
+            ProviderSettingsFixtures.connection(
+                providerID: .codexAppServer, credential: false,
+                activeAuth: ProviderSettingsFixtures.activeAuth(requestID: "another-start")),
+        ]
+        for snapshot in snapshots {
+            let client = FakeProviderSettingsClient(
+                connections: [ProviderSettingsFixtures.connection(providerID: .codexAppServer, credential: false)],
+                providers: [ProviderSettingsFixtures.provider(providerID: .codexAppServer)],
+                scenario: .init(authLookupState: .pending, authorizationURL: url))
+            let store = ProviderSettingsStore(client: client)
+            await store.load()
+            await store.startAuthentication()
+            let requestID = try XCTUnwrap(store.pendingAuthentication?.startRequestID)
+            XCTAssertNotNil(store.deviceAuthorization)
+            await client.replaceConnections([snapshot])
+            await store.load()
+            XCTAssertNil(store.deviceAuthorization)
+            XCTAssertNil(store.pendingAuthentication?.userCode)
+            XCTAssertEqual(store.pendingAuthentication?.startRequestID, requestID)
+            var writes = 0
+            store.copyAuthorizationUserCode { _ in writes += 1; return true }
+            XCTAssertEqual(writes, 0)
+        }
+    }
 }

@@ -23,6 +23,7 @@ from narumi.providers._common import (
     timestamp,
 )
 from narumi.providers.metadata import validate_endpoint
+from narumi.providers.metadata.validation import check_public_payload
 
 if TYPE_CHECKING:
     from narumi.providers.service import ProviderService
@@ -59,12 +60,23 @@ class ModelCatalog:
                 "token": token,
                 "server_instance_id": service.server_instance_id,
                 "connection_id": record["connection_id"],
+                "kind": "metadata",
             }
         result = self.fetch(snapshot)
         with service.store.transaction() as document:
+            check = document["checks"].get(snapshot["provider_id"])
+            owns_check = (
+                check is not None
+                and check["token"] == token
+                and check["server_instance_id"] == service.server_instance_id
+            )
             self.release_check(document, snapshot["provider_id"], token)
             record = connection(document, snapshot["connection_id"])
-            if not self.same_configuration(record, snapshot):
+            if (
+                service.closed.is_set()
+                or not owns_check
+                or not self.same_configuration(record, snapshot)
+            ):
                 service.store.commit(document)
                 raise ConfigurationConflictError("Provider connection changed during verification")
             self.apply(document, record, result)
@@ -78,6 +90,8 @@ class ModelCatalog:
         """No state mutation and no generation. Discard all untrusted exception contents."""
         service = self.service
         credential = None
+        if snapshot["auth_method"] == "chatgpt" and not snapshot["credential_present"]:
+            return CheckResult(None, "credential_required", True)
         if snapshot["auth_method"] == "api_key":
             account = snapshot.get("secret_account")
             if not snapshot["credential_present"] or account is None:
@@ -90,7 +104,14 @@ class ModelCatalog:
                 return CheckResult(None, "credential_required", True)
         try:
             endpoint = validate_endpoint(snapshot["provider_id"], snapshot["endpoint"])
-            models = service.metadata.fetch(snapshot["provider_id"], endpoint, credential)
+            if snapshot["provider_id"] == "codex-app-server":
+                runtime = service.runtime._current(snapshot["provider_id"], service.store.read())
+                if runtime["state"] != "ready":
+                    return CheckResult(None, "runtime_preparation_required")
+                models = service.codex_backend.list_models(snapshot["connection_id"])
+                check_public_payload(models)
+            else:
+                models = service.metadata.fetch(snapshot["provider_id"], endpoint, credential)
             payload = {
                 "connection_id": snapshot["connection_id"],
                 "connection_revision": snapshot["revision"],
@@ -130,9 +151,15 @@ class ModelCatalog:
                 "connection_revision": record["revision"],
                 "catalog_id": uuid.uuid4().hex,
             }
+            if record["provider_id"] == "codex-app-server":
+                document["catalogs"][record["connection_id"]]["runtime_catalog_revision"] = (
+                    document["runtimes"][record["provider_id"]]["catalog_revision"]
+                )
             return
         record["auth_state"] = "failed" if result.authentication_failed else "unverified"
         if result.authentication_failed:
+            if record["auth_method"] == "chatgpt":
+                record["credential_present"] = False
             record["catalog_state"] = "authentication_required"
         elif record["connection_id"] in document["catalogs"]:
             record["catalog_state"] = "stale"

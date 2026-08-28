@@ -1,7 +1,7 @@
 {
   "name": "get_provider_auth_status",
   "title": "Get provider auth status",
-  "description": "Read one persisted public authentication operation for the given connection by exactly one of operation_id or start_request_id. The latter recovers an accepted start whose response was lost. Bind unresolved work to its recorded server_instance_id; a restart or another server's idle response never proves completion. If continuation cannot be confirmed, return state=unknown without issuing a new login or provider request. No credentials or browser state are returned. On failure returns an error_envelope (isError=true) with code: invalid_argument, not_found, authentication_required, internal. All provider operations require the authenticated resident server; no implicit in-process or unauthenticated HTTP fallback is allowed.",
+  "description": "Read one public authentication operation for the given connection by exactly one of operation_id or start_request_id. Identity and state are durable; any pending device-login URL and user code come only from current in-memory state. The latter recovers an accepted start whose response was lost. Bind unresolved work to its recorded server_instance_id; a restart or another server's idle response never proves completion. If continuation cannot be confirmed, return state=unknown without issuing a new login or provider request. No access tokens, session credentials, runtime files or browser state are returned. Only a pending Codex start may include authorization_url=https://auth.openai.com/codex/device and user_code together; all terminal, cancelled, unknown or restarted operations return both as null. Neither the URL nor code is persisted in logs, receipts or diagnostics. Browser OAuth URLs and loopback callbacks are not supported. On failure returns an error_envelope (isError=true) with code: invalid_argument, not_found, authentication_required, internal. All provider operations require the authenticated resident server; no implicit in-process or unauthenticated HTTP fallback is allowed.",
   "annotations": {
     "readOnlyHint": true,
     "destructiveHint": false,
@@ -84,7 +84,8 @@
           "authorization_url": null,
           "reason": null,
           "created_at": "2026-08-28T09:00:00Z",
-          "updated_at": "2026-08-28T09:00:00Z"
+          "updated_at": "2026-08-28T09:00:00Z",
+          "user_code": null
         }
       },
       {
@@ -99,7 +100,24 @@
           "authorization_url": null,
           "reason": "authentication_operation_interrupted",
           "created_at": "2026-08-28T09:00:00Z",
-          "updated_at": "2026-08-28T09:00:00Z"
+          "updated_at": "2026-08-28T09:00:00Z",
+          "user_code": null
+        }
+      },
+      {
+        "operation": {
+          "operation_id": "auth-0123456789ab",
+          "connection_id": "conn-0123456789ab",
+          "connection_revision": 2,
+          "server_instance_id": "00000000-0000-4000-8000-000000000001",
+          "start_request_id": "provider-request-20260828-001",
+          "action": "start",
+          "state": "pending",
+          "authorization_url": "https://auth.openai.com/codex/device",
+          "reason": null,
+          "created_at": "2026-08-28T09:00:00Z",
+          "updated_at": "2026-08-28T09:00:00Z",
+          "user_code": "ABCD-EFGH"
         }
       }
     ]
