@@ -104,7 +104,7 @@ class CliState:
     data_root: Path | None
     pretty: bool
     confidential: bool = False
-    contract_version: str = "3.0.0"
+    contract_version: str = "4.0.0"
 
 
 def _redacted_error_payload(
@@ -346,7 +346,7 @@ class McpHttpClient:
         self._notify("notifications/initialized")
         return result
 
-    def probe(self, expected_contract_version: str = "3.0.0") -> None:
+    def probe(self, expected_contract_version: str = "4.0.0") -> None:
         """``initialize`` + ``get_server_info`` with short timeouts.
 
         No user operation is sent until the resident server proves contract compatibility.

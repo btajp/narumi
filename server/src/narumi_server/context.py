@@ -51,6 +51,7 @@ class ServerContext:
     provider_secret_store: SecretStore | None = field(default=None, repr=False)
     provider_metadata_client: MetadataClient | None = field(default=None, repr=False)
     provider_codex_backend: Any | None = field(default=None, repr=False)
+    provider_http_backend: Any | None = field(default=None, repr=False)
     transports: list[str] = field(default_factory=list)
     validate_output: bool = False
     handlers: Mapping[str, Handler] = field(default_factory=lambda: dict(HANDLERS))
@@ -72,6 +73,7 @@ class ServerContext:
                 secret_store=self.provider_secret_store,
                 metadata_client=self.provider_metadata_client,
                 codex_backend=self.provider_codex_backend,
+                http_backend=self.provider_http_backend,
                 recover="streamable-http" in self.transports,
                 contracts=self.contracts,
                 server_instance_id=self.server_instance_id,
@@ -172,6 +174,7 @@ def build_context(
     provider_secret_store: SecretStore | None = None,
     provider_metadata_client: MetadataClient | None = None,
     provider_codex_backend: Any | None = None,
+    provider_http_backend: Any | None = None,
     server_instance_id: str | None = None,
 ) -> ServerContext:
     """Assemble a :class:`ServerContext` from settings and the environment.
@@ -201,6 +204,7 @@ def build_context(
         provider_secret_store=provider_secret_store,
         provider_metadata_client=provider_metadata_client,
         provider_codex_backend=provider_codex_backend,
+        provider_http_backend=provider_http_backend,
         server_instance_id=server_instance_id if server_instance_id is not None else str(uuid4()),
         transports=list(transports),
         validate_output=(
