@@ -4,6 +4,23 @@ narumi（narumi.app / pipeline / server）の変更履歴。最新の版を先�
 `VERSION`・`pipeline/pyproject.toml`・`server/pyproject.toml` と最新見出しの版は常に一致させる
 （`scripts/check-version.sh` が検査し、`scripts/release-app.sh` がリリースノートとして抜粋する）。
 
+## 0.3.0 - 2026-08-29
+
+- Codex App Server の接続追加・専用 ChatGPT ログイン・モデル選択から、単独のテキスト議事録生成までを追加
+- ChatGPT ログインに公式の確認コード方式を使用。利用者がブラウザでコードを入力して承認し、他アプリのログイン用コールバックポートは使わない。URL・コードのアプリ内保持は一時的とし、完了・取消・失敗・閉じる・結果不明時に消去
+- デバイスログインが無効なアカウント・組織ではエラーで停止し、ブラウザ OAuth・API キー方式へ自動変更しない
+- 公式 npm 版 Codex CLI 0.150.1 の既存インストールを専用 runtime へ準備し、版・SHA256 を検証。新規インストールやダウンロードは行わない
+- Codex の認証情報を接続専用領域へ保存し、既存の Codex アプリ・CLI の認証・設定・会話を流用しない
+- 会議設定・プロファイルに `minutes_model` を追加し、接続 revision・モデル・推論量を選択可能に。省略は保持、null は解除、従来の `llm_provider` は維持
+- `subscription_ok` / `api_ok` の明示選択と再生成前の送信確認を追加。保存だけでは送信せず、Codex の議事録生成に音声・動画・画像を渡さない
+- 確認済み設定を `expected_config` で照合し、設定変更との競合を外部送信前に拒否。契約を 3.0.0 に更新し、全 37 ツールを維持
+- Codex の強制再生成を禁止し、同じ入力・選択では保存済み結果を再利用。narumi は結果不明の生成を自動で開始し直さず、利用者が `cache_epoch` を明示的に増やして新しい試行を行う
+- 生成時にモデルへ渡す tools を空にする設定を追加。管理設定や未確認の実効設定を検出した場合は利用を拒否
+- 固定版 SDK の HTTP リダイレクト・401 認証回復・未処理が確定した HTTP/2 NACK の再送は残るため、全通信の URL 固定や一度だけの送信は保証しない
+- OpenAI API・音声認識 API、全工程のモデル選択、複数案の生成・統合、Claude Agent SDK による生成は未対応
+- 固定版 Codex CLI を外部通信できない loopback fixture で検証し、選択モデル・tools 空・正常完了・切断後の結果不明と自動再送なしを確認
+- 通常テストは fake とローカル TLS を使用。実 ChatGPT ログイン・実生成・アプリ更新後の画面操作は未検証
+
 ## 0.2.0 - 2026-08-29
 
 - 「AI 接続」画面に Anthropic API / Claude Agent SDK / ローカル Ollama の接続管理・認証確認・モデル候補の参照を追加
