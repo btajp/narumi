@@ -376,9 +376,12 @@ final class ServerLauncher {
     private func syncBundledRuntimeIfNeeded(_ runtime: BundledRuntime) async throws -> BundledServerIdentity {
         let manifest: RuntimeManifest
         let manifestData: Data
-        guard let runtimeInstallation else {
+        guard let runtimeInstallation, let runtimeSyncOwnership, runtimeLease != nil else {
             throw RuntimeSyncFailure(step: "復旧", reason: "ランタイムの排他制御がありません")
         }
+        // The lease also checks this before acquisition completes. Keep the check next to
+        // recovery so a future caller cannot replace a live orphan's candidate environment.
+        try runtimeSyncOwnership.requireIdle()
         let recovery = try runtimeInstallation.recover()
         if recovery == .rolledBack { note("recovered an interrupted runtime installation") }
         do {

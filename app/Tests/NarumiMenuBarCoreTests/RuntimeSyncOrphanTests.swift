@@ -3,17 +3,26 @@ import XCTest
 
 @testable import NarumiMenuBarCore
 
-/// Real subprocesses, but no app, uv, Python installation, network or user data. A tiny
-/// fixture app uses the production ownership helper around a shell script acting as uv.
+/// Real subprocesses, but no GUI app, uv, Python installation, HTTP or user data. A tiny
+/// fixture uses the production ownership helper and actual ServerLauncher with a fake MCP
+/// client; all paths and the briefly bound loopback port are isolated to the test.
 final class RuntimeSyncOrphanTests: XCTestCase {
     private struct Timeout: Error {}
 
     func testCrashedAppCannotClearStagingWhileUVOrDescendantsRemain() throws {
+        try assertCrashRecovery(modes: ["uv", "grandchild", "pending", "fast"])
+    }
+
+    func testLauncherStartChecksOrphanOwnershipBeforeRecoveringPendingInstallation() throws {
+        try assertCrashRecovery(modes: ["server"])
+    }
+
+    private func assertCrashRecovery(modes: [String]) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("narumi-orphan-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let executable = try compileFixture(in: root)
-        for mode in ["uv", "grandchild", "pending", "fast", "server"] {
+        for mode in modes {
             let data = root.appendingPathComponent(mode)
             let paths = RuntimePaths(dataRoot: data)
             try FileManager.default.createDirectory(at: paths.venvStaging, withIntermediateDirectories: true)
@@ -42,12 +51,17 @@ final class RuntimeSyncOrphanTests: XCTestCase {
             }
             try wait { FileManager.default.fileExists(atPath: data.appendingPathComponent(ready).path) }
             let ownerURL = paths.root.appendingPathComponent("sync-owner.json")
-            let record = try? JSONDecoder().decode(RuntimeSyncOwnership.Record.self, from: Data(contentsOf: ownerURL))
+            let ownerData = try? Data(contentsOf: ownerURL)
+            let record = ownerData.flatMap { try? JSONDecoder().decode(RuntimeSyncOwnership.Record.self, from: $0) }
+            let journalData = try? Data(contentsOf: paths.transactionJournal)
             // SIGKILL only this test's fixture app; the guard must never kill its orphan.
             XCTAssertEqual(kill(app.processIdentifier, SIGKILL), 0)
             try wait { !app.isRunning }
             app.waitUntilExit()
-            let retry = try launch(executable, arguments: [data.path, "retry"])
+            // Server recovery must exercise the actual Launcher.start() call order, not a
+            // fixture that performs requireIdle()/lease/recover on the launcher's behalf.
+            let retryMode = mode == "server" ? "launcher-retry" : "retry"
+            let retry = try launch(executable, arguments: [data.path, retryMode])
             try wait { !retry.isRunning }
             retry.waitUntilExit()
             if mode == "fast" {
@@ -62,19 +76,26 @@ final class RuntimeSyncOrphanTests: XCTestCase {
             if mode == "server" {
                 XCTAssertEqual(try Data(contentsOf: paths.venvPrevious.appendingPathComponent("sentinel")), Data("old runtime".utf8))
                 XCTAssertEqual(try Data(contentsOf: paths.installedManifest), Data("old marker".utf8))
+                XCTAssertEqual(try Data(contentsOf: ownerURL), try XCTUnwrap(ownerData))
+                XCTAssertEqual(try Data(contentsOf: paths.transactionJournal), try XCTUnwrap(journalData))
+                let failure = try String(contentsOf: data.appendingPathComponent("launcher-error"), encoding: .utf8)
+                XCTAssertTrue(failure.contains("前回の"), failure)
+                XCTAssertFalse(failure.contains("manifest 読み込み"), "ownership must fail before recovery/manifest loading")
             }
             if let child = record?.child {
                 XCTAssertTrue(try RuntimeSyncOwnership.processGroupExists(child.processGroup), "guard did not stop the orphan")
                 try Data().write(to: data.appendingPathComponent("finish"))
                 try wait { (try? RuntimeSyncOwnership.processGroupExists(child.processGroup)) == false }
-                let afterExit = try launch(executable, arguments: [data.path, "retry"])
+                let afterExit = try launch(executable, arguments: [data.path, retryMode])
                 try wait { !afterExit.isRunning }
                 afterExit.waitUntilExit()
-                XCTAssertEqual(afterExit.terminationStatus, 0, "safe to clear only after the original group exits")
+                XCTAssertEqual(afterExit.terminationStatus, mode == "server" ? 2 : 0)
                 XCTAssertFalse(FileManager.default.fileExists(atPath: ownerURL.path))
                 if mode == "server" {
                     XCTAssertEqual(try Data(contentsOf: activeSentinel), Data("old runtime".utf8))
                     XCTAssertFalse(FileManager.default.fileExists(atPath: paths.transactionJournal.path))
+                    let failure = try String(contentsOf: data.appendingPathComponent("launcher-error"), encoding: .utf8)
+                    XCTAssertTrue(failure.contains("manifest 読み込み"), "only after safe recovery may the launcher read the fixture manifest")
                 }
             } else {
                 XCTAssertEqual(mode, "pending", "normal launches must persist the identity before uv can run")
@@ -112,8 +133,17 @@ final class RuntimeSyncOrphanTests: XCTestCase {
             .appendingPathComponent("Sources/NarumiMenuBarCore")
         let compiler = Process()
         compiler.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        compiler.arguments = ["swiftc", "-swift-version", "6", "-parse-as-library", "-o", executable.path, source.path]
-            + ["RuntimeSyncOwnership.swift", "RuntimeGuards.swift", "RuntimeInstallation.swift", "RuntimeSyncPlan.swift", "RuntimeManifest.swift"]
+        // Compile the real launcher unchanged with its Foundation-only dependencies. The
+        // module name makes its Core import a no-op; no GUI entry point or Sparkle is linked.
+        compiler.arguments = [
+            "swiftc", "-swift-version", "6", "-parse-as-library", "-module-name", "NarumiMenuBarCore",
+            "-o", executable.path, source.path,
+            core.deletingLastPathComponent().appendingPathComponent("NarumiMenuBar/ServerLauncher.swift").path,
+        ]
+            + [
+                "RuntimeSyncOwnership.swift", "RuntimeGuards.swift", "RuntimeInstallation.swift", "RuntimeSyncPlan.swift", "RuntimeManifest.swift",
+                "ServerCommand.swift", "ServerConfig.swift", "ServerReadiness.swift", "ServerState.swift", "ContractModels.swift", "ToolCatalog.swift",
+            ]
                 .map { core.appendingPathComponent($0).path }
         let output = Pipe()
         compiler.standardOutput = output
@@ -139,12 +169,40 @@ final class RuntimeSyncOrphanTests: XCTestCase {
     private static let fakeApp = """
         import Darwin
         import Foundation
+        struct FakeToolResult: Sendable {
+            let structuredContent: FakeContent?
+        }
+        struct FakeContent: Sendable {
+            func serialized() -> Data { Data() }
+        }
+        actor MCPClient {
+            func callTool(_ name: String, arguments: [String: String]) -> FakeToolResult {
+                fatalError("The orphan recovery test must never call MCP")
+            }
+            func reset() {}
+        }
         @main struct FakeApp {
-            static func main() {
+            @MainActor static func main() async {
                 do {
                     let data = URL(fileURLWithPath: CommandLine.arguments[1])
                     let mode = CommandLine.arguments[2]
                     let paths = RuntimePaths(dataRoot: data)
+                    if mode == "launcher-retry" {
+                        // Intentionally do not acquire a lease or inspect ownership here.
+                        // The real launcher must guard recovery, including before HTTP bind.
+                        let port = try unusedPort()
+                        let config = ServerConfig(
+                            repository: nil, repositorySource: nil, port: port,
+                            serverURL: URL(string: "http://127.0.0.1:\\(port)/mcp")!, recorder: nil,
+                            logFile: data.appendingPathComponent("server.log"), dataRoot: data.path,
+                            runtimeMode: .bundled, bundledRuntime: BundledRuntime(root: data.appendingPathComponent("empty-bundle")),
+                            runtimePaths: paths, runtimeLogFile: data.appendingPathComponent("runtime.log"))
+                        let launcher = ServerLauncher(config: config, client: MCPClient())
+                        await launcher.start()
+                        guard case .failed(let message) = launcher.state else { exit(3) }
+                        try Data(message.utf8).write(to: data.appendingPathComponent("launcher-error"))
+                        exit(2)
+                    }
                     let lease = try RuntimeLease(paths: paths)
                     try withExtendedLifetime(lease) {
                         let ownership = RuntimeSyncOwnership(paths: paths)
@@ -191,6 +249,24 @@ final class RuntimeSyncOrphanTests: XCTestCase {
                 } catch {
                     exit(2)
                 }
+            }
+
+            static func unusedPort() throws -> Int {
+                let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+                guard descriptor >= 0 else { throw POSIXError(.EIO) }
+                defer { close(descriptor) }
+                var address = sockaddr_in()
+                address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+                address.sin_family = sa_family_t(AF_INET)
+                address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+                var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+                let result = withUnsafeMutablePointer(to: &address) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        Darwin.bind(descriptor, $0, length) == 0 && getsockname(descriptor, $0, &length) == 0
+                    }
+                }
+                guard result else { throw POSIXError(.EIO) }
+                return Int(UInt16(bigEndian: address.sin_port))
             }
         }
         """

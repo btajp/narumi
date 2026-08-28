@@ -4,9 +4,11 @@ import XCTest
 
 final class DesktopJobRequestStateTests: XCTestCase {
     private func request(
-        _ id: String, tool: String = ToolCatalog.stopRecording
+        _ id: String, tool: String = ToolCatalog.stopRecording, runAsync: Bool? = nil
     ) -> DesktopJobRequestState.Request {
-        .init(requestID: id, tool: tool, arguments: Data(#"{ "request_id": "\#(id)" }"#.utf8))
+        let asyncArgument = runAsync.map { ", \"run_async\": \($0)" } ?? ""
+        return .init(
+            requestID: id, tool: tool, arguments: Data("{ \"request_id\": \"\(id)\"\(asyncArgument) }".utf8))
     }
 
     func testInitialSendCountsAsPendingButCannotBeRetried() throws {
@@ -92,6 +94,140 @@ final class DesktopJobRequestStateTests: XCTestCase {
         XCTAssertEqual(state.pendingCount, 0)
         XCTAssertEqual(state.uncertainCount, 0)
         XCTAssertNil(state.beginRetry())
+    }
+
+    private let rejectionCases: [(tool: String, preflightCodes: Set<String>)] = [
+        (ToolCatalog.regenerate,
+            ["invalid_argument", "not_found", "busy", "scope_denied", "policy_violation", "engine_unavailable"]),
+        (ToolCatalog.importRecording,
+            ["invalid_argument", "not_found", "busy", "policy_violation", "engine_unavailable"]),
+        (ToolCatalog.registerContext, ["invalid_argument", "not_found", "busy", "scope_denied"]),
+        (ToolCatalog.exportMinutes, ["invalid_argument", "not_found", "busy", "scope_denied"]),
+        (ToolCatalog.stopRecording, ["invalid_argument", "not_found", "busy"]),
+        ("unknown_tool", []),
+    ]
+    private let failureCodes: [String?] = [
+        "invalid_argument", "not_found", "busy", "scope_denied", "policy_violation", "engine_unavailable",
+        "contract_mismatch", "cancelled", "recorder_unavailable", "internal",
+        "permission_denied", "scope_mismatch", "unknown_code", nil,
+    ]
+
+    func testFirstFailureUsesTheToolSpecificContractPreflightTable() throws {
+        for row in rejectionCases {
+            for code in failureCodes {
+                var state = DesktopJobRequestState()
+                let token = try XCTUnwrap(state.begin(request("request-1", tool: row.tool, runAsync: true)))
+                let definitive = row.preflightCodes.contains(code ?? "")
+                let label = "\(row.tool): \(code ?? "no structured error")"
+                XCTAssertTrue(state.finishFailure(token, errorCode: code), label)
+                XCTAssertEqual(state.pendingCount, definitive ? 0 : 1, label)
+                XCTAssertEqual(state.uncertainCount, definitive ? 0 : 1, label)
+                if definitive {
+                    XCTAssertNil(state.beginRetry(), label)
+                } else {
+                    XCTAssertEqual(try XCTUnwrap(state.beginRetry()).request.tool, row.tool, label)
+                }
+            }
+        }
+    }
+
+    func testEveryReplayErrorRetainsTheOriginalUnknownRequest() throws {
+        for row in rejectionCases {
+            for code in failureCodes {
+                var state = DesktopJobRequestState()
+                let original = request("request-1", tool: row.tool, runAsync: true)
+                let send = try XCTUnwrap(state.begin(original))
+                XCTAssertTrue(state.finishFailure(send, errorCode: nil))
+                let retry = try XCTUnwrap(state.beginRetry())
+                let label = "\(row.tool): \(code ?? "no structured error")"
+                XCTAssertTrue(state.finishFailure(retry.token, errorCode: code), label)
+                XCTAssertEqual(state.pendingCount, 1, label)
+                XCTAssertEqual(state.uncertainCount, 1, label)
+                XCTAssertEqual(try XCTUnwrap(state.beginRetry()).request, original, label)
+            }
+        }
+    }
+
+    func testDefinitiveRegenerateRejectionsReleaseRecordingAndUpdateGates() throws {
+        for code in ["scope_denied", "policy_violation", "engine_unavailable"] {
+            var requests = DesktopJobRequestState()
+            var session = DesktopSessionState()
+            session.connectionChanged(to: .running(pid: 123))
+            let poll = try XCTUnwrap(session.beginPoll())
+            session.finishPoll(
+                poll, info: ServerInfoSummary(recordingCapable: true), recording: .init(active: false))
+            let send = try XCTUnwrap(requests.begin(request("request-1", tool: ToolCatalog.regenerate)))
+            session.setJobRequestState(pending: true, pendingStop: false)
+            XCTAssertFalse(session.canStart)
+            XCTAssertNotNil(session.updateBlockReason(launcherBusy: false, knownJobsBusy: false))
+
+            XCTAssertTrue(requests.finishFailure(send, errorCode: code))
+            session.setJobRequestState(pending: requests.pendingCount > 0, pendingStop: false)
+            XCTAssertTrue(session.canStart, code)
+            XCTAssertNil(session.updateBlockReason(launcherBusy: false, knownJobsBusy: false), code)
+        }
+    }
+
+    func testStaleFailureCannotClearANewerRetry() throws {
+        var state = DesktopJobRequestState()
+        let initial = try XCTUnwrap(state.begin(request("request-1", tool: ToolCatalog.regenerate)))
+        XCTAssertTrue(state.finishFailure(initial, errorCode: nil))
+        let retry = try XCTUnwrap(state.beginRetry())
+        let before = state
+        XCTAssertFalse(state.finishFailure(initial, errorCode: "scope_denied"))
+        XCTAssertEqual(state, before)
+        XCTAssertTrue(state.finishFailure(retry.token, errorCode: "scope_denied"))
+        XCTAssertEqual(state.pendingCount, 1)
+        XCTAssertEqual(state.uncertainCount, 1)
+    }
+
+    func testUnknownSynchronousExportIsHeldWithoutAutomaticReplay() throws {
+        let asyncModes: [Bool?] = [nil, false]
+        for runAsync in asyncModes {
+            for code in [nil, "engine_unavailable", "internal", "contract_mismatch"] {
+                var state = DesktopJobRequestState()
+                let original = request("export-1", tool: ToolCatalog.exportMinutes, runAsync: runAsync)
+                XCTAssertFalse(original.canAutomaticallyRetry)
+                let send = try XCTUnwrap(state.begin(original))
+                XCTAssertFalse(state.requiresManualRecovery(requestID: "export-1"))
+                XCTAssertTrue(state.finishFailure(send, errorCode: code))
+                XCTAssertTrue(state.requiresManualRecovery(requestID: "export-1"))
+                for _ in 0..<3 { XCTAssertNil(state.beginRetry()) }
+                XCTAssertEqual(state.pendingCount, 1)
+                XCTAssertEqual(state.uncertainCount, 1)
+            }
+        }
+    }
+
+    func testUnknownSynchronousExportDoesNotStarveOtherJobRecovery() throws {
+        var state = DesktopJobRequestState()
+        let export = try XCTUnwrap(state.begin(request("export-1", tool: ToolCatalog.exportMinutes)))
+        let regenerate = try XCTUnwrap(state.begin(request("regenerate-1", tool: ToolCatalog.regenerate)))
+        state.finishFailure(export, errorCode: "engine_unavailable")
+        state.finishFailure(regenerate, errorCode: nil)
+        let retry = try XCTUnwrap(state.beginRetry())
+        XCTAssertEqual(retry.request.requestID, "regenerate-1")
+        XCTAssertTrue(state.confirm(retry.token))
+        XCTAssertTrue(state.requiresManualRecovery(requestID: "export-1"))
+        XCTAssertEqual(state.pendingCount, 1)
+        XCTAssertNil(state.beginRetry())
+    }
+
+    func testOnlyAnExplicitBooleanAsyncExportCanAutomaticallyReplay() {
+        let cases: [(String, Bool)] = [
+            (#"{"run_async":true}"#, true),
+            (#"{"run_async":false}"#, false),
+            (#"{"run_async":null}"#, false),
+            (#"{"run_async":"true"}"#, false),
+            (#"{"run_async":1}"#, false),
+            ("{}", false),
+            ("invalid JSON", false),
+        ]
+        for (arguments, expected) in cases {
+            let request = DesktopJobRequestState.Request(
+                requestID: "export-1", tool: ToolCatalog.exportMinutes, arguments: Data(arguments.utf8))
+            XCTAssertEqual(request.canAutomaticallyRetry, expected, arguments)
+        }
     }
 
     func testStaleCallbackCannotRemoveOrResetANewerRetry() throws {

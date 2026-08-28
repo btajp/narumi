@@ -21,14 +21,16 @@ extension MCPClient {
         do {
             let result = try await performToolCall(name, arguments: arguments, confidential: confidential)
             await finishJobRequest(token, tool: name, result: result)
+            if jobRequests.requiresManualRecovery(requestID: requestID) {
+                throw MCPClientError.tool(message: Self.uncertainExportMessage, payload: nil)
+            }
             return result
         } catch {
-            if Self.isDefinitiveInitialRejection(error) {
-                jobRequests.confirm(token)
-            } else {
-                jobRequests.markUncertain(token)
-            }
+            jobRequests.finishFailure(token, errorCode: Self.toolErrorCode(error))
             await publishJobRequestState()
+            if jobRequests.requiresManualRecovery(requestID: requestID) {
+                throw MCPClientError.tool(message: Self.uncertainExportMessage, payload: nil)
+            }
             throw error
         }
     }
@@ -45,7 +47,7 @@ extension MCPClient {
             let result = try await performToolCall(retry.request.tool, arguments: arguments, confidential: false)
             await finishJobRequest(retry.token, tool: retry.request.tool, result: result)
         } catch {
-            jobRequests.markUncertain(retry.token)
+            jobRequests.finishFailure(retry.token, errorCode: Self.toolErrorCode(error))
             await publishJobRequestState()
         }
     }
@@ -91,12 +93,11 @@ extension MCPClient {
         }
     }
 
-    private static func isDefinitiveInitialRejection(_ error: any Error) -> Bool {
-        guard case MCPClientError.tool(_, let payload) = error,
-            let code = payload?["error"]?["code"]?.stringValue
-        else { return false }
-        // These are pre-mutation checks in the job-producing handlers. An internal,
-        // malformed or unrecognized response may follow a successfully queued job.
-        return ["invalid_argument", "not_found", "busy", "permission_denied", "scope_mismatch"].contains(code)
+    private static func toolErrorCode(_ error: any Error) -> String? {
+        guard case MCPClientError.tool(_, let payload) = error else { return nil }
+        return payload?["error"]?["code"]?.stringValue
     }
+
+    private static let uncertainExportMessage =
+        "エクスポート結果を確認できません。重複送信を避けるため自動再送はせず、録画開始と更新を保留しています。送信先の状態を確認してください。"
 }
