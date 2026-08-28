@@ -1,0 +1,163 @@
+{
+  "name": "list_provider_models",
+  "title": "List provider models",
+  "description": "List model candidates for one saved connection, intersecting provider metadata with verified runtime and adapter capabilities. role defaults to llm; unavailable or unverified models remain explicitly labeled and are not silently selected. refresh=false returns only cached/local metadata and performs no external request; refresh=true explicitly permits metadata discovery at the validated provider endpoint. No meeting content or generation is sent. Catalog observations do not increment configuration revision. cursor is an opaque page token bound to the connection/revision/catalog; invalid or stale cursors are rejected. Return null limits or pricing when unknown, never guessed capabilities or zero cost. No ambient credentials, redirects, proxies, model download or endpoint fallback is used. On failure returns an error_envelope (isError=true) with code: invalid_argument, not_found, configuration_conflict, authentication_required, engine_unavailable, model_unavailable, internal. All provider operations require the authenticated resident server; no implicit in-process or unauthenticated HTTP fallback is allowed.",
+  "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "connection_id": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_connection_id"
+      },
+      "role": {
+        "$ref": "../defs/providers.json#/$defs/provider_role",
+        "default": "llm"
+      },
+      "cursor": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "refresh": {
+        "type": "boolean",
+        "default": false
+      }
+    },
+    "required": [
+      "connection_id"
+    ],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "connection_id": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_connection_id"
+      },
+      "connection_revision": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_connection_revision"
+      },
+      "models": {
+        "type": "array",
+        "items": {
+          "$ref": "../defs/provider_models.json#/$defs/provider_model_descriptor"
+        }
+      },
+      "next_cursor": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "catalog_state": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_catalog_state"
+      },
+      "fetched_at": {
+        "oneOf": [
+          {
+            "$ref": "../defs/common.json#/$defs/timestamp"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "connection_id",
+      "connection_revision",
+      "models",
+      "next_cursor",
+      "catalog_state",
+      "fetched_at"
+    ],
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {
+        "connection_id": "conn-0123456789ab"
+      },
+      {
+        "connection_id": "conn-0123456789ab",
+        "role": "llm",
+        "refresh": true
+      },
+      {
+        "connection_id": "conn-abcdef012345",
+        "role": "llm",
+        "cursor": null,
+        "refresh": false
+      }
+    ],
+    "output": [
+      {
+        "connection_id": "conn-0123456789ab",
+        "connection_revision": 2,
+        "models": [
+          {
+            "model_id": "fixture-text-model",
+            "display_name": "Contract fixture model",
+            "resolved_revision": null,
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ],
+            "roles": [
+              "llm"
+            ],
+            "timestamp_support": "none",
+            "context_window": null,
+            "max_output_tokens": null,
+            "parameter_schema": {
+              "type": "object",
+              "properties": {
+                "max_tokens": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4096
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "availability": "unverified",
+            "reason": "adapter_capability_verification_required",
+            "source": "provider_api",
+            "fetched_at": "2026-08-28T09:00:00Z",
+            "billing": {
+              "kind": "api",
+              "input_usd_per_million_tokens": null,
+              "output_usd_per_million_tokens": null,
+              "audio_usd_per_minute": null,
+              "fetched_at": null
+            }
+          }
+        ],
+        "next_cursor": null,
+        "catalog_state": "ready",
+        "fetched_at": "2026-08-28T09:00:00Z"
+      },
+      {
+        "connection_id": "conn-abcdef012345",
+        "connection_revision": 1,
+        "models": [],
+        "next_cursor": null,
+        "catalog_state": "unfetched",
+        "fetched_at": null
+      }
+    ]
+  }
+}

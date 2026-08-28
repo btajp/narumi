@@ -72,7 +72,6 @@ final class ToolCatalogTests: XCTestCase {
 
     func testEveryContractToolHasAnAppSurface() throws {
         let manifest = try loadManifest()
-        XCTAssertEqual(ToolCatalog.allUsed.count, 28)
         XCTAssertEqual(Set(ToolCatalog.allUsed), Set(manifest.tools))
     }
 

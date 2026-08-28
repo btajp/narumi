@@ -46,6 +46,13 @@ public struct BundledServerIdentity: Equatable, Sendable {
     }
 
     public func validate(_ info: ServerInfo) throws {
+        guard RecordingPermissionContract.supportsSetup(info.contractVersion),
+            info.secureTransport?.mode == "pinned_tls",
+            info.secureTransport?.tlsRequired == true,
+            info.secureTransport?.clientAuthRequired == true
+        else {
+            throw MCPConnectionError.incompatibleContract
+        }
         guard info.name == "narumi" else { throw Mismatch(field: "name") }
         guard info.serverVersion == serverVersion else { throw Mismatch(field: "server_version") }
         guard info.contractVersion == contractVersion else { throw Mismatch(field: "contract_version") }

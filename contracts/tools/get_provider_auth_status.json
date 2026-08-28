@@ -1,0 +1,107 @@
+{
+  "name": "get_provider_auth_status",
+  "title": "Get provider auth status",
+  "description": "Read one persisted public authentication operation for the given connection by exactly one of operation_id or start_request_id. The latter recovers an accepted start whose response was lost. Bind unresolved work to its recorded server_instance_id; a restart or another server's idle response never proves completion. If continuation cannot be confirmed, return state=unknown without issuing a new login or provider request. No credentials or browser state are returned. On failure returns an error_envelope (isError=true) with code: invalid_argument, not_found, authentication_required, internal. All provider operations require the authenticated resident server; no implicit in-process or unauthenticated HTTP fallback is allowed.",
+  "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "connection_id": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_connection_id"
+      },
+      "operation_id": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_auth_operation_id"
+      },
+      "start_request_id": {
+        "$ref": "../defs/common.json#/$defs/request_id"
+      }
+    },
+    "required": [
+      "connection_id"
+    ],
+    "additionalProperties": false,
+    "oneOf": [
+      {
+        "required": [
+          "operation_id"
+        ],
+        "not": {
+          "required": [
+            "start_request_id"
+          ]
+        }
+      },
+      {
+        "required": [
+          "start_request_id"
+        ],
+        "not": {
+          "required": [
+            "operation_id"
+          ]
+        }
+      }
+    ]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "operation": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_auth_operation"
+      }
+    },
+    "required": [
+      "operation"
+    ],
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {
+        "connection_id": "conn-0123456789ab",
+        "operation_id": "auth-0123456789ab"
+      },
+      {
+        "connection_id": "conn-0123456789ab",
+        "start_request_id": "provider-request-20260828-001"
+      }
+    ],
+    "output": [
+      {
+        "operation": {
+          "operation_id": "auth-0123456789ab",
+          "connection_id": "conn-0123456789ab",
+          "connection_revision": 2,
+          "server_instance_id": "00000000-0000-4000-8000-000000000001",
+          "start_request_id": "provider-request-20260828-001",
+          "action": "start",
+          "state": "succeeded",
+          "authorization_url": null,
+          "reason": null,
+          "created_at": "2026-08-28T09:00:00Z",
+          "updated_at": "2026-08-28T09:00:00Z"
+        }
+      },
+      {
+        "operation": {
+          "operation_id": "auth-0123456789ab",
+          "connection_id": "conn-0123456789ab",
+          "connection_revision": 2,
+          "server_instance_id": "00000000-0000-4000-8000-000000000001",
+          "start_request_id": "provider-request-20260828-001",
+          "action": "start",
+          "state": "unknown",
+          "authorization_url": null,
+          "reason": "authentication_operation_interrupted",
+          "created_at": "2026-08-28T09:00:00Z",
+          "updated_at": "2026-08-28T09:00:00Z"
+        }
+      }
+    ]
+  }
+}

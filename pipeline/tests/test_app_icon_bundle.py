@@ -85,6 +85,8 @@ elif tool == "uv":
         print("pydantic==2.11.1")
         if "--extra" in args and "slides" in args:
             print("pillow==11.0.0")
+        if "--extra" in args and "secure" in args:
+            print("cryptography==46.0.0")
     else:
         sys.exit("unexpected uv action")
 elif tool != "swift":
@@ -107,7 +109,7 @@ def build_fixture(tmp_path: Path):
     shutil.copyfile(
         ROOT / "app/recording.entitlements.plist", project / "app/recording.entitlements.plist"
     )
-    for name in ("NarumiMenuBar", "narumi-recorder"):
+    for name in ("NarumiMenuBar", "narumi-recorder", "narumi-keychain"):
         write_file(project / "app/.build/release" / name, "#!/bin/sh\nexit 0\n").chmod(0o755)
     key = write_file(project / "app/sparkle-public-key.txt", "fixture-public-key")
     commands = project / "test-bin"
@@ -233,6 +235,10 @@ def test_icon_is_registered_in_every_bundle_mode(build_fixture, options):
         call["args"] for call in calls if call["tool"] == "codesign" and "--sign" in call["args"]
     ]
     assert signing[-1][-1] == str(app)
+    keychain = app / "Contents/MacOS/narumi-keychain"
+    assert keychain.read_bytes() == (project / "app/.build/release/narumi-keychain").read_bytes()
+    assert os.access(keychain, os.X_OK)
+    assert any(args[-1] == str(keychain) and "--entitlements" not in args for args in signing)
     recording_targets = {str(app), str(app / "Contents/MacOS/narumi-recorder")}
     entitled_signing = [args for args in signing if "--entitlements" in args]
     assert len(entitled_signing) == 2
@@ -250,7 +256,8 @@ def test_icon_is_registered_in_every_bundle_mode(build_fixture, options):
         checked = [
             call["args"] for call in calls if call["tool"] == "codesign" and action in call["args"]
         ]
-        assert {args[-1] for args in checked} == recording_targets
+        expected = recording_targets | ({str(keychain)} if action == "--verify" else set())
+        assert {args[-1] for args in checked} == expected
         for args in checked:
             if action == "--verify":
                 assert "--strict" in args
@@ -272,6 +279,7 @@ def test_icon_is_registered_in_every_bundle_mode(build_fixture, options):
                 assert not staging.is_relative_to(app)
                 assert not staging.exists()
         assert "pillow==11.0.0" in (runtime / "requirements.txt").read_text()
+        assert "cryptography==46.0.0" in (runtime / "requirements.txt").read_text()
         assert not (runtime / "contracts/local-notes.md").exists()
         assert any(
             call["tool"] == "uv" and "export" in call["args"] and "slides" in call["args"]
@@ -293,6 +301,29 @@ def test_missing_or_invalid_icon_preserves_existing_bundle(build_fixture, bad_ic
     assert result.returncode == 1
     assert sentinel.read_text() == "keep existing app"
     assert not (project / "tools.jsonl").exists()
+
+
+def test_missing_keychain_helper_preserves_existing_bundle(build_fixture):
+    project, environment = build_fixture
+    (project / "app/.build/release/narumi-keychain").unlink()
+    sentinel = write_file(project / "output/narumi.app/keep.txt", "keep existing app")
+    result = run_build(project, environment, "--skip-build")
+    assert result.returncode == 1
+    assert "missing binary:" in result.stderr and "narumi-keychain" in result.stderr
+    assert sentinel.read_text() == "keep existing app"
+    assert not (project / "tools.jsonl").exists()
+
+
+def test_invalid_keychain_helper_signature_fails_build(build_fixture):
+    project, environment = build_fixture
+    environment["NARUMI_TEST_CODESIGN_FAULT_TARGET"] = str(
+        project / "output/narumi.app/Contents/MacOS/narumi-keychain"
+    )
+    environment["NARUMI_TEST_CODESIGN_FAULT"] = "verify-error"
+    result = run_build(project, environment, "--skip-build")
+    assert result.returncode != 0
+    assert "invalid signature" in result.stderr
+    assert "built:" not in result.stdout
 
 
 @pytest.mark.parametrize(

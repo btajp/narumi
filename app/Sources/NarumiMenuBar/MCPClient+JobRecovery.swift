@@ -22,22 +22,46 @@ extension MCPClient {
             let result = try await performToolCall(name, arguments: arguments, confidential: confidential)
             await finishJobRequest(token, tool: name, result: result)
             if jobRequests.requiresManualRecovery(requestID: requestID) {
-                throw MCPClientError.tool(message: Self.uncertainExportMessage, payload: nil)
+                throw MCPClientError.tool(message: Self.uncertainMessage(tool: name), payload: nil)
             }
             return result
         } catch {
             jobRequests.finishFailure(token, errorCode: Self.toolErrorCode(error))
             await publishJobRequestState()
             if jobRequests.requiresManualRecovery(requestID: requestID) {
-                throw MCPClientError.tool(message: Self.uncertainExportMessage, payload: nil)
+                throw MCPClientError.tool(message: Self.uncertainMessage(tool: name), payload: nil)
             }
             throw error
+        }
+    }
+
+    /// The public provider catalog preserves setup request/job IDs even after a response is
+    /// lost. Reconcile those IDs locally; never resend an installer or replace its request ID.
+    func reconcileProviderSetupRequests(_ result: ToolCallResult) async {
+        guard case .array(let providers)? = result.structuredContent?["providers"] else { return }
+        for provider in providers {
+            guard let providerID = provider["provider_id"]?.stringValue else { continue }
+            for field in ["active_setup", "last_setup"] {
+                guard let operation = provider["runtime"]?[field],
+                    let requestID = operation["start_request_id"]?.stringValue,
+                    let resourceID = operation["resource_id"]?.stringValue,
+                    let jobID = operation["job_id"]?.stringValue,
+                    jobID.range(of: "^job-[0-9a-f]{12,32}$", options: .regularExpression) != nil,
+                    jobRequests.confirmProviderSetup(requestID: requestID, providerID: providerID, resourceID: resourceID)
+                else { continue }
+                await publishJobRequestState(jobID: jobID)
+            }
         }
     }
 
     /// One retry per status tick avoids a retry loop. A transport, protocol or internal
     /// failure never clears an unknown outcome, including errors from the replay itself.
     func recoverPendingJobCalls() async {
+        if jobRequests.pendingTools.contains(ToolCatalog.prepareProviderRuntime) {
+            // A local metadata lookup is safe even when the provider sheet has closed.
+            // Its response reconciles the original request in performToolCall.
+            _ = try? await performToolCall(ToolCatalog.listProviders, arguments: [:], confidential: false)
+        }
         guard let retry = jobRequests.beginRetry() else { return }
         do {
             guard case .object(let arguments) = try JSONNode.parse(retry.request.arguments) else {
@@ -91,6 +115,10 @@ extension MCPClient {
         return payload?["error"]?["code"]?.stringValue
     }
 
-    private static let uncertainExportMessage =
-        "エクスポート結果を確認できません。重複送信を避けるため自動再送はせず、録画開始と更新を保留しています。送信先の状態を確認してください。"
+    private static func uncertainMessage(tool: String) -> String {
+        if tool == ToolCatalog.prepareProviderRuntime {
+            return "プロバイダ準備の受付結果を確認できません。自動再送せず、接続設定画面から元のジョブを再確認します。"
+        }
+        return "エクスポート結果を確認できません。重複送信を避けるため自動再送はせず、録画開始と更新を保留しています。送信先の状態を確認してください。"
+    }
 }

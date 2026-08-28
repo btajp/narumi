@@ -31,12 +31,17 @@ final class ToolResponseErrorMessageTests: XCTestCase {
         XCTAssertFalse(first.contains("example-"))
     }
 
-    func testOtherToolErrorsKeepTheirExistingDiagnosticText() {
-        let error = ReflectedError(description: "Missing required field")
-        for tool in ToolCatalog.allUsed where tool != ToolCatalog.setGaiaConnection {
+    func testEveryToolHidesUntrustedExceptionDetails() {
+        let secret = "example-reflected-provider-secret"
+        let error = ReflectedError(description: "Unexpected response: \(secret)\nAuthorization: Bearer fixture-token")
+        for tool in ToolCatalog.allUsed + ["future_unknown_tool"] {
+            let message = ToolResponseErrorMessage.decoding(toolName: tool, error: error)
             XCTAssertEqual(
-                ToolResponseErrorMessage.decoding(toolName: tool, error: error),
-                "\(tool) の応答を解釈できません: Missing required field")
+                message,
+                "\(tool) の応答を解釈できません（安全のため応答の詳細は表示しません）")
+            XCTAssertFalse(message.contains(secret))
+            XCTAssertFalse(message.contains("Authorization"))
+            XCTAssertFalse(message.contains("fixture-token"))
         }
     }
 }

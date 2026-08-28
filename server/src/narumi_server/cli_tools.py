@@ -1,16 +1,11 @@
 """Product CLI ``narumi``: a contract-driven 1:1 mapping of the MCP tools.
 
 Subcommands are generated from ``contracts/`` at start-up — one per tool
-(``list_meetings`` → ``narumi list-meetings``) plus the generic escape hatch
-``narumi tool <name> --json '{...}'``. The CLI never calls the library directly
-(that is ``narumi-dev``): a call goes to a running ``narumi-server`` when the
-``--server-url`` endpoint answers an MCP probe (``initialize`` +
-``get_server_info`` with ~1s timeouts), otherwise it runs in this process
-through the same ``narumi_server.app.dispatch`` code path the server uses.
-``--require-server`` / ``--in-process`` force either side. Recording tools
-(``start_recording`` / ``stop_recording`` / ``get_recording_status``) are
-refused in-process: the recording would die with the CLI process. Permission setup also needs
-the resident server so it uses the same recorder identity and recording-operation lock.
+(``list_meetings`` → ``narumi list-meetings``) plus generic JSON/stdin input.
+Resident calls require an owner-validated bootstrap, pinned TLS and client authentication.
+Only local, non-secret tools may run in-process when no bootstrap exists and no server URL
+was selected. A security, protocol or contract error never falls back or resends a call.
+Recording, provider and write-only tools always require the resident server.
 
 Success prints the tool's structured content as JSON on stdout (``--pretty``
 by default, ``--raw`` for one line); every failure prints the contract
@@ -21,9 +16,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
+import ssl
 import sys
 import urllib.error
-import urllib.parse
 import urllib.request
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
@@ -32,40 +28,65 @@ from pathlib import Path
 from typing import Any
 
 import click
-from narumi.config import DEFAULT_HTTP_PORT, ENV_HOME
+from narumi.config import ENV_HOME
+from narumi.config import data_root as resolve_data_root
 from narumi.contracts import ContractSet, ToolContract, load_contracts
-from narumi.errors import ErrorCode, InvalidArgumentError, NarumiError
+from narumi.errors import ContractMismatchError, ErrorCode, InvalidArgumentError, NarumiError
 
 from narumi_server import __version__
 from narumi_server.app import dispatch
 from narumi_server.cli_input import (
     build_tool_input,
     collect_args,
+    contains_secret_value,
     parse_json_option,
+    read_stdin,
+    secret_strings,
     with_request_id,
 )
-from narumi_server.cli_transport import ConfidentialHttpTransport
+from narumi_server.cli_transport import ConfidentialHttpTransport, confidential_endpoint
 from narumi_server.context import build_context
+from narumi_server.secure_transport import (
+    BootstrapNotFoundError,
+    ClientTransport,
+    TransportSecurityError,
+    load_client_transport,
+)
+from narumi_server.transport_logging import install_transport_log_filters
 
 ENV_SERVER_URL = "NARUMI_SERVER_URL"
-DEFAULT_SERVER_URL = f"http://127.0.0.1:{DEFAULT_HTTP_PORT}/mcp"
 ERROR_EXIT_CODE = 2
 TRANSPORT_CLI = "cli"
 RECORDING_TOOLS = frozenset({"start_recording", "stop_recording", "get_recording_status"})
 """Tools that need the resident server: in-process the recorder dies with the CLI process."""
-RESIDENT_SERVER_TOOLS = RECORDING_TOOLS | {"configure_recording_permission"}
+PROVIDER_TOOLS = frozenset(
+    {
+        "list_providers",
+        "list_provider_connections",
+        "set_provider_connection",
+        "delete_provider_connection",
+        "authenticate_provider_connection",
+        "get_provider_auth_status",
+        "test_provider_connection",
+        "list_provider_models",
+        "prepare_provider_runtime",
+    }
+)
+RESIDENT_SERVER_TOOLS = RECORDING_TOOLS | PROVIDER_TOOLS | {"configure_recording_permission"}
 
 MODE_AUTO = "auto"
 MODE_IN_PROCESS = "in-process"
 MODE_REQUIRE_SERVER = "require-server"
 
 PROTOCOL_VERSION = "2025-06-18"
+SUPPORTED_PROTOCOL_VERSIONS = frozenset({PROTOCOL_VERSION})
 PROBE_TIMEOUT = 1.0
 """Seconds for each probe round-trip (connect + ``initialize``)."""
 PROBE_CALL_TIMEOUT = 2.0
 """Seconds for the probe's ``get_server_info`` call (it may run ``narumi-recorder check``)."""
 CALL_TIMEOUT = 600.0
 """Bound for the real tool call. Generous: tools enqueue jobs instead of awaiting them."""
+MAX_RESPONSE_BYTES = 8_388_608
 
 GENERIC_COMMAND = "tool"
 
@@ -78,11 +99,12 @@ _SECRET_TOOL_META = "narumi_secret_tool"
 class CliState:
     """Global options plus the per-call transport policy derived from the contract."""
 
-    server_url: str
+    server_url: str | None
     mode: str
     data_root: Path | None
     pretty: bool
     confidential: bool = False
+    contract_version: str = "2.0.0"
 
 
 def _redacted_error_payload(
@@ -93,6 +115,10 @@ def _redacted_error_payload(
     except (TypeError, ValueError):
         code = ErrorCode.INTERNAL
     message = "Invalid command input" if code == ErrorCode.INVALID_ARGUMENT else "Tool call failed"
+    if code == ErrorCode.CONTRACT_MISMATCH:
+        message = "Contract major mismatch; update narumi.app, narumi-server and the CLI together"
+    elif code == ErrorCode.AUTHENTICATION_REQUIRED:
+        message = "An authenticated resident narumi-server is required; open narumi.app and retry"
     return {"error": {"code": str(code), "message": message, "details": {"tool": tool}}}
 
 
@@ -165,7 +191,10 @@ class _ContractGroup(click.Group):
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
         contract = self._selected_contract(args)
         ctx.meta[_SECRET_TOOL_META] = (
-            contract.name if contract is not None and contract.has_write_only_input else None
+            contract.name
+            if contract is not None
+            and (contract.has_write_only_input or contract.name in PROVIDER_TOOLS)
+            else None
         )
         try:
             return super().parse_args(ctx, args)
@@ -202,11 +231,6 @@ def _sse_messages(text: str) -> list[Any]:
     return messages
 
 
-def _snippet(body: bytes, limit: int = 200) -> str:
-    text = body.decode("utf-8", errors="replace").strip()
-    return text[:limit]
-
-
 class McpHttpClient:
     """Minimal synchronous MCP Streamable HTTP client for one-shot CLI calls.
 
@@ -216,25 +240,17 @@ class McpHttpClient:
     ``Mcp-Session-Id`` the server assigns.
     """
 
-    def __init__(self, url: str, *, confidential: bool = False) -> None:
-        self._transport = ConfidentialHttpTransport(url) if confidential else None
-        if self._transport is not None:
-            url = self._transport.url
-        parsed = urllib.parse.urlsplit(url)
-        if parsed.scheme not in ("http", "https") or not parsed.netloc:
-            raise InvalidArgumentError(
-                f"--server-url must be an http(s) URL: {url!r}", details={"server_url": url}
-            )
-        self.url = url
+    def __init__(self, credentials: ClientTransport) -> None:
+        self._transport = ConfidentialHttpTransport(credentials)
+        self.url = self._transport.url
+        self.server_instance_id = credentials.server_instance_id
         self.session_id: str | None = None
         self.negotiated_version: str | None = None
         self._next_id = 0
 
     # -------------------------------------------------------------- wire helpers
     def _open(self, request: urllib.request.Request, timeout: float) -> Any:
-        if self._transport is not None:
-            return self._transport.open(request, timeout=timeout)
-        return urllib.request.urlopen(request, timeout=timeout)
+        return self._transport.open(request, timeout=timeout)
 
     def _headers(self) -> dict[str, str]:
         headers = {
@@ -254,21 +270,35 @@ class McpHttpClient:
         )
         try:
             with self._open(request, timeout) as response:
-                return response.status, response.headers, response.read()
+                body = response.read(MAX_RESPONSE_BYTES + 1)
+                if len(body) > MAX_RESPONSE_BYTES:
+                    raise ServerUnreachableError("Resident server response exceeds the size limit")
+                return response.status, response.headers, body
         except urllib.error.HTTPError as exc:
-            snippet = _snippet(exc.read())
-            raise ServerUnreachableError(f"HTTP {exc.code} from {self.url}: {snippet}") from exc
+            status = exc.code
+            exc.close()
+            if status in (401, 403):
+                raise NarumiError(
+                    "Resident server authentication failed; restart narumi.app and retry",
+                    code=ErrorCode.AUTHENTICATION_REQUIRED,
+                ) from None
+            raise ServerUnreachableError("Resident server rejected the HTTP request") from None
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            reason = getattr(exc, "reason", None)
-            raise ServerUnreachableError(str(reason if reason is not None else exc)) from exc
+            if isinstance(getattr(exc, "reason", exc), ssl.SSLError):
+                raise TransportSecurityError() from None
+            raise ServerUnreachableError(
+                "Could not establish the authenticated server connection"
+            ) from None
 
     def _request(self, method: str, params: dict[str, Any], timeout: float) -> dict[str, Any]:
         self._next_id += 1
         request_id = self._next_id
         message = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
-        status, headers, body = self._post(message, timeout)
+        _status, headers, body = self._post(message, timeout)
         session = headers.get("mcp-session-id")
         if session:
+            if not re.fullmatch(r"[!-~]{1,512}", session):
+                raise ServerUnreachableError("Resident server returned an invalid session header")
             self.session_id = session
         content_type = (headers.get("content-type") or "").split(";")[0].strip().lower()
         try:
@@ -277,12 +307,9 @@ class McpHttpClient:
             elif content_type == _SSE_CONTENT_TYPE:
                 candidates = _sse_messages(body.decode("utf-8"))
             else:
-                raise ServerUnreachableError(
-                    f"unexpected response from {self.url} "
-                    f"(status {status}, content type {content_type or 'missing'})"
-                )
-        except ValueError as exc:
-            raise ServerUnreachableError(f"invalid JSON from {self.url}: {exc}") from exc
+                raise ServerUnreachableError("Resident server returned an unsupported response")
+        except (ValueError, RecursionError, UnicodeError):
+            raise ServerUnreachableError("Resident server returned invalid JSON") from None
         for candidate in candidates:
             if (
                 isinstance(candidate, dict)
@@ -290,7 +317,7 @@ class McpHttpClient:
                 and ("result" in candidate or "error" in candidate)
             ):
                 return candidate
-        raise ServerUnreachableError(f"no JSON-RPC response to {method!r} from {self.url}")
+        raise ServerUnreachableError("Resident server returned no matching JSON-RPC response")
 
     def _notify(self, method: str) -> None:
         self._post({"jsonrpc": "2.0", "method": method}, PROBE_TIMEOUT)
@@ -308,24 +335,37 @@ class McpHttpClient:
         )
         error = response.get("error")
         if error is not None:
-            raise ServerUnreachableError(f"initialize failed: {error}")
+            raise ServerUnreachableError("Resident server initialization failed")
         result = response.get("result")
         if not isinstance(result, dict):
-            raise ServerUnreachableError(f"initialize returned no result from {self.url}")
+            raise ServerUnreachableError("Resident server initialization returned no result")
         version = result.get("protocolVersion")
-        if isinstance(version, str):
-            self.negotiated_version = version
+        if not isinstance(version, str) or version not in SUPPORTED_PROTOCOL_VERSIONS:
+            raise ServerUnreachableError("Resident server returned an unsupported protocol version")
+        self.negotiated_version = version
         self._notify("notifications/initialized")
         return result
 
-    def probe(self) -> None:
+    def probe(self, expected_contract_version: str = "2.0.0") -> None:
         """``initialize`` + ``get_server_info`` with short timeouts.
 
-        Raises :class:`ServerUnreachableError` when nothing MCP-shaped answers. A reachable
-        server whose ``get_server_info`` returns an error envelope still counts as reachable.
+        No user operation is sent until the resident server proves contract compatibility.
         """
         self.initialize(PROBE_TIMEOUT)
-        self._call_tool("get_server_info", {}, PROBE_CALL_TIMEOUT)
+        payload, is_error = self._call_tool("get_server_info", {}, PROBE_CALL_TIMEOUT)
+        if is_error or payload.get("name") != "narumi":
+            raise ServerUnreachableError("Resident server compatibility check failed")
+        expected, actual = (
+            _contract_major(expected_contract_version),
+            _contract_major(payload.get("contract_version")),
+        )
+        if expected is None or actual != expected:
+            raise ContractMismatchError(
+                "Contract major mismatch; update narumi.app, narumi-server and the CLI together",
+                details={"expected_major": expected, "server_major": actual},
+            )
+        if payload.get("server_instance_id") != self.server_instance_id:
+            raise ServerUnreachableError("Resident server instance no longer matches the bootstrap")
 
     def call_tool(self, tool: str, args: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         return self._call_tool(tool, args, CALL_TIMEOUT)
@@ -336,15 +376,14 @@ class McpHttpClient:
         response = self._request("tools/call", {"name": tool, "arguments": args}, timeout)
         error = response.get("error")
         if error is not None:
-            message = error.get("message") if isinstance(error, dict) else None
             raise NarumiError(
-                f"server rejected the call: {message or error}",
+                "Resident server rejected the tool call",
                 code=ErrorCode.INTERNAL,
-                details={"tool": tool, "jsonrpc_error": error},
+                details={"tool": tool},
             )
         result = response.get("result")
         if not isinstance(result, dict):
-            raise ServerUnreachableError(f"tools/call returned no result from {self.url}")
+            raise ServerUnreachableError("Resident server returned no tool result")
         payload = result.get("structuredContent")
         if payload is None:
             payload = _payload_from_content(result)
@@ -362,8 +401,21 @@ class McpHttpClient:
             return
         request = urllib.request.Request(self.url, headers=self._headers(), method="DELETE")
         with contextlib.suppress(Exception):
-            with self._open(request, PROBE_TIMEOUT) as response:
-                response.read()
+            with self._open(request, PROBE_TIMEOUT):
+                pass
+
+
+def _contract_major(version: Any) -> int | None:
+    if (
+        not isinstance(version, str)
+        or re.fullmatch(
+            r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:[-+][0-9A-Za-z.+-]+)?",
+            version,
+        )
+        is None
+    ):
+        return None
+    return int(version.split(".", 1)[0])
 
 
 def _payload_from_content(result: dict[str, Any]) -> Any:
@@ -390,30 +442,35 @@ def _call(state: CliState, tool: str, args: dict[str, Any]) -> tuple[dict[str, A
 def _call_over_http(
     state: CliState, tool: str, args: dict[str, Any]
 ) -> tuple[dict[str, Any], bool] | None:
-    """``None`` when no server answers the probe and falling back in-process is allowed."""
-    client = McpHttpClient(state.server_url, confidential=state.confidential)
+    """Only a missing bootstrap can permit local execution; failures never cause replay."""
+    if state.server_url is not None:
+        confidential_endpoint(state.server_url)
+    install_transport_log_filters()
+    try:
+        credentials = load_client_transport(
+            resolve_data_root(state.data_root), expected_url=state.server_url
+        )
+    except BootstrapNotFoundError:
+        if (
+            state.mode == MODE_AUTO
+            and state.server_url is None
+            and tool not in RESIDENT_SERVER_TOOLS
+            and not state.confidential
+        ):
+            return None
+        raise
+    client = McpHttpClient(credentials)
     try:
         try:
-            client.probe()
-        except ServerUnreachableError as exc:
-            if state.mode == MODE_REQUIRE_SERVER:
-                raise NarumiError(
-                    f"narumi-server at {state.server_url} is not reachable "
-                    f"(--require-server): {exc}",
-                    code=ErrorCode.INTERNAL,
-                    details={"server_url": state.server_url},
-                ) from exc
-            return None
-        try:
+            client.probe(state.contract_version)
             return client.call_tool(tool, args)
-        except ServerUnreachableError as exc:
-            # The probe succeeded, so the call may have reached the server: surface the
-            # failure instead of retrying in-process (the tool could run twice).
+        except ServerUnreachableError:
             raise NarumiError(
-                f"lost the connection to narumi-server at {state.server_url}: {exc}",
+                "Authenticated narumi-server call failed; the operation was not retried. "
+                "Check the server and query operation status before trying again.",
                 code=ErrorCode.INTERNAL,
-                details={"server_url": state.server_url, "tool": tool},
-            ) from exc
+                details={"tool": tool},
+            ) from None
     finally:
         client.close()
 
@@ -421,12 +478,17 @@ def _call_over_http(
 def _call_in_process(
     state: CliState, tool: str, args: dict[str, Any]
 ) -> tuple[dict[str, Any], bool]:
+    if state.confidential or tool in PROVIDER_TOOLS:
+        raise NarumiError(
+            "Provider and write-only tools require an authenticated resident narumi-server",
+            code=ErrorCode.AUTHENTICATION_REQUIRED,
+            details={"tool": tool},
+        )
     if tool in RESIDENT_SERVER_TOOLS:
         raise InvalidArgumentError(
             f"{tool} needs a resident narumi-server to keep recorder ownership and operation "
-            "locking in one process. Start `narumi-server --http` or narumi.app and retry, "
-            "or point --server-url / NARUMI_SERVER_URL at a running server.",
-            details={"tool": tool, "server_url": state.server_url},
+            "locking in one process. Start narumi.app or `narumi-server --http` and retry.",
+            details={"tool": tool},
         )
     ctx = build_context(state.data_root, transports=[TRANSPORT_CLI])
     try:
@@ -442,11 +504,33 @@ def _render(payload: dict[str, Any], *, pretty: bool) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
-def _run(state: CliState, tool: str, args: dict[str, Any], *, redact: bool = False) -> None:
+def _echoes_secret(value: Any, secrets: tuple[str, ...]) -> bool:
+    if isinstance(value, str):
+        return any(secret in value for secret in secrets)
+    if isinstance(value, dict):
+        return any(
+            _echoes_secret(key, secrets) or _echoes_secret(item, secrets)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_echoes_secret(item, secrets) for item in value)
+    return False
+
+
+def _run(
+    state: CliState,
+    tool: str,
+    args: dict[str, Any],
+    *,
+    redact: bool = False,
+    secrets: tuple[str, ...] = (),
+) -> None:
     """Execute and print: result JSON on stdout, error envelope on stderr with exit 2."""
     try:
         # Use the same contract decision for input privacy and the entire HTTP session.
         payload, is_error = _call(replace(state, confidential=redact), tool, args)
+        if secrets and _echoes_secret(payload, secrets):
+            payload, is_error = _redacted_error_payload(tool, ErrorCode.INTERNAL), True
     except NarumiError as exc:
         payload = _redacted_error_payload(tool, exc.code) if redact else exc.to_payload()
         is_error = True
@@ -467,6 +551,7 @@ def _run(state: CliState, tool: str, args: dict[str, Any], *, redact: bool = Fal
 # ---------------------------------------------------------------------------- CLI assembly
 def _make_tool_command(contract: ToolContract) -> click.Command:
     inputs = build_tool_input(contract)
+    private = contract.has_write_only_input or contract.name in PROVIDER_TOOLS
 
     def callback(**kwargs: Any) -> None:
         state: CliState = click.get_current_context().obj
@@ -474,13 +559,11 @@ def _make_tool_command(contract: ToolContract) -> click.Command:
             args = collect_args(contract, inputs, kwargs)
         except NarumiError as exc:
             payload = (
-                _redacted_error_payload(contract.name, exc.code)
-                if contract.has_write_only_input
-                else exc.to_payload()
+                _redacted_error_payload(contract.name, exc.code) if private else exc.to_payload()
             )
             click.echo(_render(payload, pretty=state.pretty), err=True)
             sys.exit(ERROR_EXIT_CODE)
-        _run(state, contract.name, args, redact=contract.has_write_only_input)
+        _run(state, contract.name, args, redact=private, secrets=secret_strings(contract, args))
 
     return click.Command(
         name=contract.name.replace("_", "-"),
@@ -492,38 +575,45 @@ def _make_tool_command(contract: ToolContract) -> click.Command:
 
 
 def _make_generic_command(contracts: ContractSet) -> click.Command:
-    def callback(name: str, args_json: str) -> None:
+    def callback(name: str, args_json: str | None, json_stdin: bool) -> None:
         state: CliState = click.get_current_context().obj
         tool = name.replace("-", "_")
         contract = contracts.get(tool)
+        private = contract is not None and (contract.has_write_only_input or tool in PROVIDER_TOOLS)
         try:
             if contract is None:
                 raise InvalidArgumentError(
                     f"unknown tool: {name}",
                     details={"tool": name, "known_tools": contracts.tool_names()},
                 )
-            args = parse_json_option("json", args_json, redact=contract.has_write_only_input)
+            if args_json is not None and json_stdin:
+                raise InvalidArgumentError("--json and --json-stdin are mutually exclusive")
+            document = (
+                read_stdin() if json_stdin else (args_json if args_json is not None else "{}")
+            )
+            args = parse_json_option("json", document, redact=private or json_stdin)
             if not isinstance(args, dict):
                 raise InvalidArgumentError(
                     "--json must be a JSON object of tool arguments",
                     details={
                         "tool": tool,
-                        **({} if contract.has_write_only_input else {"value": args_json}),
+                        **({} if private or json_stdin else {"value": args_json}),
                     },
                 )
+            if not json_stdin and contains_secret_value(contract, args):
+                raise InvalidArgumentError(
+                    "--json cannot contain write-only values; use --json-stdin or a hidden prompt"
+                )
         except NarumiError as exc:
-            payload = (
-                _redacted_error_payload(tool, exc.code)
-                if contract is not None and contract.has_write_only_input
-                else exc.to_payload()
-            )
+            payload = _redacted_error_payload(tool, exc.code) if private else exc.to_payload()
             click.echo(_render(payload, pretty=state.pretty), err=True)
             sys.exit(ERROR_EXIT_CODE)
         _run(
             state,
             tool,
             with_request_id(contract, args),
-            redact=contract.has_write_only_input,
+            redact=private,
+            secrets=secret_strings(contract, args),
         )
 
     return click.Command(
@@ -532,9 +622,13 @@ def _make_generic_command(contracts: ContractSet) -> click.Command:
             click.Argument(["name"]),
             click.Option(
                 ["--json", "args_json"],
-                default="{}",
-                show_default=True,
-                help="Tool arguments as one JSON object (request_id is added when omitted).",
+                default=None,
+                help="Non-secret JSON arguments (default: {}; request_id is added when omitted).",
+            ),
+            click.Option(
+                ["--json-stdin"],
+                is_flag=True,
+                help="Read the JSON object from stdin; required for write-only values.",
             ),
         ],
         callback=callback,
@@ -560,15 +654,14 @@ def build_cli(contracts: ContractSet | None = None) -> click.Group:
         "--server-url",
         envvar=ENV_SERVER_URL,
         show_envvar=True,
-        default=DEFAULT_SERVER_URL,
-        show_default=True,
-        help="narumi-server Streamable HTTP endpoint tried first.",
+        default=None,
+        help="Authenticated HTTPS endpoint; must match this data root's trusted bootstrap.",
     )
     @click.option(
         "--in-process",
         "mode",
         flag_value=MODE_IN_PROCESS,
-        help="Never contact a server; run the tool in this process (recording tools refuse).",
+        help="Run local tools in this process; provider, recording and write-only tools refuse.",
     )
     @click.option(
         "--require-server",
@@ -582,7 +675,7 @@ def build_cli(contracts: ContractSet | None = None) -> click.Group:
         envvar=ENV_HOME,
         show_envvar=True,
         default=None,
-        help="Data root for in-process execution (a server uses its own data root).",
+        help="Data root used for trusted server discovery and local execution.",
     )
     @click.option(
         "--pretty/--raw",
@@ -593,22 +686,23 @@ def build_cli(contracts: ContractSet | None = None) -> click.Group:
     @click.pass_context
     def cli(
         ctx: click.Context,
-        server_url: str,
+        server_url: str | None,
         mode: str | None,
         data_root: Path | None,
         pretty: bool,
     ) -> None:
         """narumi product CLI: the MCP tools from contracts/, one subcommand each.
 
-        With a running narumi-server the call is sent over Streamable HTTP; otherwise it
-        runs in-process against the same data root. Output is the tool's JSON result;
-        errors are the contract error envelope on stderr with exit code 2.
+        Resident calls use pinned TLS and client authentication from the trusted bootstrap.
+        Without a bootstrap, local tools may run in-process unless a server URL was specified.
+        Errors use the contract error envelope on stderr with exit code 2.
         """
         ctx.obj = CliState(
             server_url=server_url,
             mode=mode or MODE_AUTO,
             data_root=data_root,
             pretty=pretty,
+            contract_version=contract_set.contract_version,
         )
 
     for contract in contract_set:

@@ -5,7 +5,7 @@ import XCTest
 final class RecordingPermissionSetupStateTests: XCTestCase {
     private func info(
         microphone: String = "unknown", screen: String = "denied", helper: Bool = true,
-        busy: Bool? = false, contract: String = "1.1.0",
+        busy: Bool? = false, contract: String = "2.0.0",
         instanceID: String? = "00000000-0000-4000-8000-000000000001"
     ) throws -> ServerInfo {
         var capabilities: [String: Any] = [
@@ -94,7 +94,7 @@ final class RecordingPermissionSetupStateTests: XCTestCase {
     }
 
     func testOldAndUnknownMajorContractsKeepSetupUnavailable() throws {
-        for version in ["1.0.0", "2.0.0", "unrecognized"] {
+        for version in ["1.0.0", "1.1.0", "3.0.0", "unrecognized"] {
             var state = try connected(info(contract: version))
             XCTAssertFalse(state.supportsSetup)
             XCTAssertTrue(state.needsSetup)

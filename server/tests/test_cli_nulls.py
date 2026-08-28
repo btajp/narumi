@@ -16,7 +16,7 @@ from click.testing import CliRunner
 from narumi.contracts import ContractSet, load_contracts
 from narumi.gaia.settings import GaiaConnectionStore
 from narumi_server import cli_tools
-from narumi_server.cli_input import NullOption, build_tool_input
+from narumi_server.cli_input import NullOption, SecretStdinOption, build_tool_input
 
 URL = "http://127.0.0.1:4111/mcp"
 SECRET = "fake-cli-null-secret-90674"
@@ -29,8 +29,9 @@ def isolate_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv(name, raising=False)
 
 
-def invoke(cli: click.Group, args: list[str]):
-    return CliRunner().invoke(cli, ["--in-process", *args], catch_exceptions=False)
+def invoke(cli: click.Group, args: list[str], *, input: str | None = None, local: bool = True):
+    prefix = ["--in-process"] if local else []
+    return CliRunner().invoke(cli, [*prefix, *args], input=input, catch_exceptions=False)
 
 
 def probe_cli(
@@ -74,11 +75,17 @@ def test_real_contracts_get_clear_flags_only_for_nullable_top_level_properties()
         "set_gaia_connection": {"url", "api_key"},
         "set_profile": {"scope", "engagement"},
         "set_meeting_config": {"self_name", "new_scope"},
+        "set_provider_connection": {"api_key"},
+        "list_provider_models": {"cursor"},
     }
     for contract in load_contracts():
         inputs = build_tool_input(contract)
         assert set(inputs.null_options) == expected.get(contract.name, set())
-        primary = {option.name for option in inputs.options if not isinstance(option, NullOption)}
+        primary = {
+            option.name
+            for option in inputs.options
+            if not isinstance(option, (NullOption, SecretStdinOption))
+        }
         assert primary == set(contract.input_schema["properties"])
         flags = [
             flag for option in inputs.options for flag in (*option.opts, *option.secondary_opts)
@@ -260,15 +267,31 @@ def test_clear_flag_and_internal_name_collisions_do_not_shadow_contract_properti
     assert seen["arguments"] == {"clear_url": None}
 
 
-def test_gaia_clear_key_then_clear_url_through_regular_subcommand(tmp_path: Path):
-    cli = cli_tools.build_cli()
+@pytest.fixture
+def gaia_call(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> GaiaConnectionStore:
+    """Exercise nullable argument forwarding after replacing only the resident call boundary."""
     store = GaiaConnectionStore(tmp_path / "data" / "gaia.json", environ={})
+    contracts = load_contracts()
+
+    def call(state, tool, arguments):
+        assert state.mode != cli_tools.MODE_IN_PROCESS
+        contracts.validate_input(tool, arguments)
+        store.set(**{key: value for key, value in arguments.items() if key != "request_id"})
+        return {"connection": store.get()}, False
+
+    monkeypatch.setattr(cli_tools, "_call", call)
+    return store
+
+
+def test_gaia_clear_key_then_clear_url_through_regular_subcommand(gaia_call: GaiaConnectionStore):
+    cli = cli_tools.build_cli()
+    store = gaia_call
     store.set(url=URL, api_key=SECRET)
-    clear_key = invoke(cli, ["set-gaia-connection", "--clear-api-key"])
+    clear_key = invoke(cli, ["set-gaia-connection", "--clear-api-key"], local=False)
     assert clear_key.exit_code == 0, clear_key.stderr
     assert store.get() == {"url": URL, "has_api_key": False, "source": "saved"}
     store.set(api_key=SECRET)
-    clear_url = invoke(cli, ["set-gaia-connection", "--clear-url"])
+    clear_url = invoke(cli, ["set-gaia-connection", "--clear-url"], local=False)
     assert clear_url.exit_code == 0, clear_url.stderr
     assert store.get() == {"url": None, "has_api_key": False, "source": "saved"}
     assert json.loads(store.path.read_text())["api_key"] is None
@@ -296,18 +319,25 @@ def test_conflicting_secret_clear_requests_fail_without_leak_or_mutation(
     assert store.path.read_bytes() == previous
 
 
-def test_gaia_literal_null_key_is_a_key_and_literal_null_url_does_not_disable(tmp_path: Path):
-    store = GaiaConnectionStore(tmp_path / "data" / "gaia.json", environ={})
+def test_gaia_literal_null_key_is_a_key_and_literal_null_url_does_not_disable(
+    gaia_call: GaiaConnectionStore,
+):
+    store = gaia_call
     store.set(url=URL, api_key=SECRET)
     cli = cli_tools.build_cli()
-    assert invoke(cli, ["set-gaia-connection", "--api-key", "null"]).exit_code == 0
+    assert (
+        invoke(
+            cli, ["set-gaia-connection", "--api-key-stdin"], input="null\n", local=False
+        ).exit_code
+        == 0
+    )
     assert json.loads(store.path.read_text())["api_key"] == "null"
     assert store.get()["has_api_key"] is True
-    assert invoke(cli, ["set-gaia-connection", "--url", "null"]).exit_code == 2
+    assert invoke(cli, ["set-gaia-connection", "--url", "null"], local=False).exit_code == 2
     assert store.get()["url"] == URL
 
 
-def test_console_clear_flag_disables_saved_connection(tmp_path: Path):
+def test_console_clear_flag_cannot_mutate_credentials_in_process(tmp_path: Path):
     store = GaiaConnectionStore(tmp_path / "data" / "gaia.json", environ={})
     store.set(url=URL, api_key=SECRET)
     result = subprocess.run(
@@ -325,7 +355,7 @@ def test_console_clear_flag_disables_saved_connection(tmp_path: Path):
         timeout=15,
         check=False,
     )
-    assert result.returncode == 0
+    assert result.returncode == 2
     assert SECRET not in result.stdout + result.stderr
-    assert json.loads(result.stdout)["connection"]["url"] is None
-    assert store.get() == {"url": None, "has_api_key": False, "source": "saved"}
+    assert json.loads(result.stderr)["error"]["code"] == "authentication_required"
+    assert store.get() == {"url": URL, "has_api_key": True, "source": "saved"}

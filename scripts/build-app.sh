@@ -1,7 +1,7 @@
 #!/bin/bash
 # Use the macOS system shell independently of the user's package-manager PATH.
 # Build the Swift package in release mode and assemble dist/narumi.app
-# (menu bar UI + narumi-recorder + Sparkle.framework, optionally the bundled Python runtime).
+# (menu bar UI + recorder / Keychain helpers + Sparkle.framework, optionally Python).
 #
 # Usage: scripts/build-app.sh [options]
 #   --skip-build            app/.build/release の既存バイナリを再利用する
@@ -165,7 +165,7 @@ if [[ $SKIP_BUILD -eq 0 ]]; then
 fi
 
 BIN_DIR="$APP_DIR/.build/release"
-for bin in NarumiMenuBar narumi-recorder; do
+for bin in NarumiMenuBar narumi-recorder narumi-keychain; do
   [[ -x "$BIN_DIR/$bin" ]] \
     || fail "missing binary: $BIN_DIR/$bin (run without --skip-build)"
 done
@@ -175,8 +175,10 @@ rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
 cp "$BIN_DIR/NarumiMenuBar" "$BUNDLE/Contents/MacOS/NarumiMenuBar"
 cp "$BIN_DIR/narumi-recorder" "$BUNDLE/Contents/MacOS/narumi-recorder"
+cp "$BIN_DIR/narumi-keychain" "$BUNDLE/Contents/MacOS/narumi-keychain"
 cp "$APP_ICON" "$BUNDLE/Contents/Resources/AppIcon.icns"
-chmod 755 "$BUNDLE/Contents/MacOS/NarumiMenuBar" "$BUNDLE/Contents/MacOS/narumi-recorder"
+chmod 755 "$BUNDLE/Contents/MacOS/NarumiMenuBar" "$BUNDLE/Contents/MacOS/narumi-recorder" \
+  "$BUNDLE/Contents/MacOS/narumi-keychain"
 
 # --- Sparkle.framework ---------------------------------------------------------------------
 # SwiftPM の binaryTarget が展開する xcframework から macOS スライスをコピーする
@@ -256,7 +258,7 @@ if [[ $WITH_RUNTIME -eq 1 ]]; then
   echo "==> uv export (requirements.txt)"
   EXPORT_TMP="$(mktemp -d)"
   (cd "$ROOT" && uv export --frozen --no-dev --no-emit-workspace --format requirements-txt \
-    --package narumi-server > "$EXPORT_TMP/server.txt")
+    --package narumi-server --extra secure > "$EXPORT_TMP/server.txt")
   (cd "$ROOT" && uv export --frozen --no-dev --no-emit-workspace --format requirements-txt \
     --package narumi --extra whisper-mlx --extra claude --extra anthropic --extra html --extra slides \
     > "$EXPORT_TMP/pipeline.txt")
@@ -329,7 +331,7 @@ for path in sys.argv[1:3]:
 
 with open(sys.argv[3], "w", encoding="utf-8") as out:
     out.write("# Merged from `uv export --frozen --no-dev --no-emit-workspace` for\n")
-    out.write("# --package narumi-server and --package narumi --extra whisper-mlx --extra claude"
+    out.write("# --package narumi-server --extra secure and --package narumi --extra whisper-mlx --extra claude"
               " --extra anthropic --extra html --extra slides\n")
     for name in sorted(merged):
         pin, marker, hashes = merged[name]
@@ -461,10 +463,13 @@ if [[ -d "$SPARKLE_DST" ]]; then
   codesign "${SIGN_FLAGS[@]}" "$SPARKLE_DST/Versions/B/Updater.app"
   codesign "${SIGN_FLAGS[@]}" "$SPARKLE_DST"
 fi
-# Audio Input is needed only by the app and recorder, never by uv or Sparkle.
+# The Keychain helper keeps the default per-executable ACL and needs no audio access.
+codesign "${SIGN_FLAGS[@]}" "$BUNDLE/Contents/MacOS/narumi-keychain"
+# Audio Input is needed only by the app and recorder, never by the other helpers.
 codesign "${SIGN_FLAGS[@]}" --entitlements "$RECORDING_ENTITLEMENTS" \
   "$BUNDLE/Contents/MacOS/narumi-recorder"
 codesign "${SIGN_FLAGS[@]}" --entitlements "$RECORDING_ENTITLEMENTS" "$BUNDLE"
+codesign --verify --strict --verbose=1 "$BUNDLE/Contents/MacOS/narumi-keychain"
 for recording_code in "$BUNDLE" "$BUNDLE/Contents/MacOS/narumi-recorder"; do
   codesign --verify --strict --verbose=1 "$recording_code"
   codesign --display --entitlements - --xml "$recording_code" 2>/dev/null \

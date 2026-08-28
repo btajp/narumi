@@ -1,9 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "name": "narumi",
-  "contract_version": "1.1.0",
-  "description": "narumi MCP tool contracts v1. Each tool is defined in tools/<name>.json; shared types live in defs/common.json.",
-  "defs": ["defs/common.json"],
+  "contract_version": "2.0.0",
+  "description": "narumi MCP tool contracts v2 development version. Provider connections and model discovery are implemented first; workflow capabilities identify which later stages remain unavailable. Shared types live in defs/*.json.",
+  "defs": ["defs/common.json", "defs/providers.json", "defs/provider_connections.json", "defs/provider_models.json"],
   "tools": [
     "get_server_info",
     "configure_recording_permission",
@@ -32,6 +32,15 @@
     "rebuild_catalog",
     "get_gaia_connection",
     "set_gaia_connection",
-    "test_gaia_connection"
+    "test_gaia_connection",
+    "list_providers",
+    "list_provider_connections",
+    "set_provider_connection",
+    "delete_provider_connection",
+    "prepare_provider_runtime",
+    "authenticate_provider_connection",
+    "get_provider_auth_status",
+    "test_provider_connection",
+    "list_provider_models"
   ]
 }

@@ -83,6 +83,7 @@ def make_app(parent: Path, *, runtime: bool = True) -> Path:
     write_file(app / "Contents/PkgInfo", "APPL????")
     write_file(app / "Contents/MacOS/NarumiMenuBar", "fake menu app")
     write_file(app / "Contents/MacOS/narumi-recorder", "fake recorder")
+    write_file(app / "Contents/MacOS/narumi-keychain", "fake keychain helper")
     icon = b"icns" + struct.pack(">I", 16) + b"icp4" + struct.pack(">I", 8)
     write_file(app / "Contents/Resources/AppIcon.icns", icon)
     if runtime:

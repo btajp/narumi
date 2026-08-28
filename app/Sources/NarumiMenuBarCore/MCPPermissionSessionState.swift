@@ -1,5 +1,5 @@
-/// Permission setup capabilities belong to the MCP session that reported them.
-/// A replaced session must first be identified by an ordinary, empty server-info probe.
+/// All v2 capabilities belong to the authenticated MCP session that reported them.
+/// A replaced session permits only an empty server-info probe until compatibility is known.
 public struct MCPPermissionSessionState: Equatable, Sendable {
     public private(set) var generation: UInt64 = 0
     public private(set) var contractVersion: String?
@@ -29,11 +29,7 @@ public struct MCPPermissionSessionState: Equatable, Sendable {
     }
 
     public func allowsCall(tool: String, refreshingPermissions: Bool = false) -> Bool {
-        if tool == ToolCatalog.configureRecordingPermission
-            || (tool == ToolCatalog.getServerInfo && refreshingPermissions)
-        {
-            return RecordingPermissionContract.supportsSetup(contractVersion, serverInstanceID: serverInstanceID)
-        }
-        return true
+        if tool == ToolCatalog.getServerInfo && !refreshingPermissions { return true }
+        return RecordingPermissionContract.supportsSetup(contractVersion, serverInstanceID: serverInstanceID)
     }
 }

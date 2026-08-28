@@ -7,6 +7,7 @@ import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from narumi.catalog import Catalog
@@ -21,6 +22,11 @@ from narumi_server.idempotency import IdempotencyStore
 from narumi_server.jobs import JobManager
 from narumi_server.locks import MeetingLocks
 from narumi_server.recording import RecordingController
+
+if TYPE_CHECKING:
+    from narumi.providers.metadata import MetadataClient
+    from narumi.providers.secrets import SecretStore
+    from narumi.providers.service import ProviderService
 
 logger = logging.getLogger(__name__)
 
@@ -40,11 +46,14 @@ class ServerContext:
     """Saved meeting profiles (``<NARUMI_HOME>/profiles.json``); see ``narumi.profiles``."""
     gaia: GaiaConnectionStore
     """Dedicated Gaia connection settings; its credential is never part of a profile."""
+    providers: ProviderService | None = field(default=None, repr=False)
+    provider_secret_store: SecretStore | None = field(default=None, repr=False)
+    provider_metadata_client: MetadataClient | None = field(default=None, repr=False)
     transports: list[str] = field(default_factory=list)
     validate_output: bool = False
     handlers: Mapping[str, Handler] = field(default_factory=lambda: dict(HANDLERS))
     actor: str = DEFAULT_ACTOR
-    server_instance_id: str = field(default_factory=lambda: str(uuid4()), init=False)
+    server_instance_id: str = field(default_factory=lambda: str(uuid4()))
     """Opaque lifetime identity; never persisted or reused after a context restart."""
     idempotency: IdempotencyStore = field(init=False, repr=False)
     locks: MeetingLocks = field(default_factory=MeetingLocks, repr=False)
@@ -53,6 +62,17 @@ class ServerContext:
 
     def __post_init__(self) -> None:
         self.idempotency = IdempotencyStore(self.catalog)
+        if self.providers is None:
+            from narumi.providers.service import ProviderService
+
+            self.providers = ProviderService(
+                self.data_root,
+                secret_store=self.provider_secret_store,
+                metadata_client=self.provider_metadata_client,
+                contracts=self.contracts,
+                server_instance_id=self.server_instance_id,
+                submit_job=lambda fn: self.jobs.submit("provider_setup", None, fn),
+            )
 
     def close(self) -> None:
         """Finalize a running recording, stop jobs and close the catalog. Idempotent.
@@ -71,8 +91,13 @@ class ServerContext:
             return
         self._closed = True
         self.finalize_recording()
-        self.jobs.shutdown(wait=True)
-        self.catalog.close()
+        try:
+            self.providers.close()
+        finally:
+            try:
+                self.jobs.shutdown(wait=True)
+            finally:
+                self.catalog.close()
 
     def finalize_recording(self) -> None:
         if not self.recorder.is_active:
@@ -104,6 +129,10 @@ def build_context(
     validate_output: bool | None = None,
     max_workers: int = 1,
     handlers: Mapping[str, Handler] | None = None,
+    provider_service: ProviderService | None = None,
+    provider_secret_store: SecretStore | None = None,
+    provider_metadata_client: MetadataClient | None = None,
+    server_instance_id: str | None = None,
 ) -> ServerContext:
     """Assemble a :class:`ServerContext` from settings and the environment.
 
@@ -125,6 +154,10 @@ def build_context(
         recorder=recorder,
         profiles=ProfileStore(root / PROFILES_FILE),
         gaia=GaiaConnectionStore(root / GAIA_CONNECTION_FILE),
+        providers=provider_service,
+        provider_secret_store=provider_secret_store,
+        provider_metadata_client=provider_metadata_client,
+        server_instance_id=server_instance_id if server_instance_id is not None else str(uuid4()),
         transports=list(transports),
         validate_output=(
             validate_output_from_env() if validate_output is None else bool(validate_output)

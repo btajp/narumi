@@ -4,6 +4,20 @@ narumi（narumi.app / pipeline / server）の変更履歴。最新の版を先�
 `VERSION`・`pipeline/pyproject.toml`・`server/pyproject.toml` と最新見出しの版は常に一致させる
 （`scripts/check-version.sh` が検査し、`scripts/release-app.sh` がリリースノートとして抜粋する）。
 
+## 0.2.0 - 2026-08-29
+
+- 「AI 接続」画面に Anthropic API / Claude Agent SDK / ローカル Ollama の接続管理・認証確認・モデル候補の参照を追加
+- 接続管理の公開 MCP ツールを 9 個追加し、契約を 2.0.0・全 37 ツールへ更新
+- 専用の Keychain ヘルパーでプロバイダの API キーと常駐接続トークンを管理。Gaia のキー保存形式は変更しない
+- 常駐通信を証明書固定・クライアント認証付きの TLS に変更し、外部 MCP クライアント向けに stdio bridge を追加
+- CLI の秘密入力を非表示プロンプト / stdin に限定し、通信・認証エラー時の未認証接続や自動再送を拒否
+- プロバイダの既存依存を検査する準備ジョブと、認証・準備処理の状態確認・取消を追加。実行環境やモデル本体の新規ダウンロードは行わない
+- Claude Agent SDK は API キー方式の接続確認のみ。認証・履歴の隔離を確認できるまで生成を拒否
+- Anthropic の生成通信を公式 API に固定し、環境由来の追加ヘッダー・proxy・TLS 鍵ログと上流エラー本文の保存を防止
+- Ollama のクラウド転送を拒否し、確認したローカルモデルへの明示指定を必須化
+- 工程別モデル適用、Codex App Server / OpenAI による生成、OpenAI 音声認識、複数生成・統合は未対応
+- 接続管理は fake とローカル TLS で検証済み。実 API・実 Keychain・アプリ更新後の画面操作は未検証
+
 ## 0.1.4 - 2026-08-28
 
 - 初回インストール用の Developer ID 署名・Apple 公証済み DMG を追加

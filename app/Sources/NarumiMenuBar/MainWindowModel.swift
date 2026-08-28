@@ -23,6 +23,7 @@ final class MainWindowModel: ObservableObject {
     }
 
     let client: NarumiClient
+    let providerSettings: ProviderSettingsStore
     var hostActions = HostActions()
 
     // MARK: Sidebar
@@ -80,6 +81,7 @@ final class MainWindowModel: ObservableObject {
 
     init(client: NarumiClient) {
         self.client = client
+        providerSettings = ProviderSettingsStore(client: client)
     }
 
     // MARK: Polling lifecycle (owned by the window controller)

@@ -49,6 +49,17 @@ public enum ToolCatalog {
     public static let setGaiaConnection = "set_gaia_connection"
     public static let testGaiaConnection = "test_gaia_connection"
 
+    // Provider connections and model metadata (generation selections are separate).
+    public static let listProviders = "list_providers"
+    public static let listProviderConnections = "list_provider_connections"
+    public static let setProviderConnection = "set_provider_connection"
+    public static let deleteProviderConnection = "delete_provider_connection"
+    public static let prepareProviderRuntime = "prepare_provider_runtime"
+    public static let authenticateProviderConnection = "authenticate_provider_connection"
+    public static let getProviderAuthStatus = "get_provider_auth_status"
+    public static let testProviderConnection = "test_provider_connection"
+    public static let listProviderModels = "list_provider_models"
+
     // Diagnostics
     public static let getServerInfo = "get_server_info"
     public static let rebuildCatalog = "rebuild_catalog"
@@ -81,6 +92,15 @@ public enum ToolCatalog {
         getGaiaConnection,
         setGaiaConnection,
         testGaiaConnection,
+        listProviders,
+        listProviderConnections,
+        setProviderConnection,
+        deleteProviderConnection,
+        prepareProviderRuntime,
+        authenticateProviderConnection,
+        getProviderAuthStatus,
+        testProviderConnection,
+        listProviderModels,
         getServerInfo,
         rebuildCatalog,
     ]

@@ -1,0 +1,271 @@
+{
+  "name": "set_provider_connection",
+  "title": "Set provider connection",
+  "description": "Create or atomically update a provider connection without authenticating, fetching models or generating. New connections require provider_id, display_name and auth_method; connection_id and expected_revision must be omitted. Updates require connection_id and expected_revision and cannot change provider_id. Omitted mutable fields are retained; enabled defaults to true on creation. api_key is write-only: omit to retain, null to delete. A new API connection without a key is saved as unconfigured. New or changed credentials invalidate authentication and catalog checks. Endpoint or authentication changes never silently reuse credentials; incompatible, active or stale changes are rejected. API keys are accepted only through the authenticated transport and stored in the connection's SecretStore, never responses, logs, request caches or diagnostics. CLI secret input uses a hidden prompt or stdin, not ordinary argv or literal --json. The same request_id returns the original result, without repeating a secret mutation. On failure returns an error_envelope (isError=true) with code: invalid_argument, not_found, configuration_conflict, busy, authentication_required, internal. All provider operations require the authenticated resident server; no implicit in-process or unauthenticated HTTP fallback is allowed.",
+  "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "connection_id": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_connection_id"
+      },
+      "expected_revision": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_connection_revision"
+      },
+      "provider_id": {
+        "$ref": "../defs/providers.json#/$defs/provider_id"
+      },
+      "display_name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 160
+      },
+      "enabled": {
+        "type": "boolean",
+        "default": true
+      },
+      "endpoint": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048,
+        "pattern": "^https?://",
+        "description": "Official Anthropic connections use https://api.anthropic.com. Ollama accepts only numeric 127.0.0.0/8 or [::1] HTTP/HTTPS base URLs without userinfo, query or fragment; HTTPS requires normal certificate validation. DNS hostnames, redirects and proxies are not used."
+      },
+      "auth_method": {
+        "$ref": "../defs/providers.json#/$defs/provider_auth_method"
+      },
+      "api_key": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "minLength": 1,
+        "maxLength": 4096,
+        "writeOnly": true,
+        "description": "Connection-scoped API key. Omit to retain; null deletes it. Never use an argv option or put it into a literal --json argument."
+      },
+      "request_id": {
+        "$ref": "../defs/common.json#/$defs/request_id"
+      }
+    },
+    "required": [
+      "request_id"
+    ],
+    "additionalProperties": false,
+    "oneOf": [
+      {
+        "required": [
+          "provider_id",
+          "display_name",
+          "auth_method"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "connection_id"
+              ]
+            },
+            {
+              "required": [
+                "expected_revision"
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "required": [
+          "connection_id",
+          "expected_revision"
+        ],
+        "not": {
+          "required": [
+            "provider_id"
+          ]
+        },
+        "anyOf": [
+          {
+            "required": [
+              "display_name"
+            ]
+          },
+          {
+            "required": [
+              "enabled"
+            ]
+          },
+          {
+            "required": [
+              "endpoint"
+            ]
+          },
+          {
+            "required": [
+              "auth_method"
+            ]
+          },
+          {
+            "required": [
+              "api_key"
+            ]
+          }
+        ]
+      }
+    ],
+    "allOf": [
+      {
+        "if": {
+          "properties": {
+            "provider_id": {
+              "const": "ollama"
+            }
+          },
+          "required": [
+            "provider_id"
+          ]
+        },
+        "then": {
+          "properties": {
+            "auth_method": {
+              "const": "none"
+            },
+            "api_key": {
+              "type": "null"
+            },
+            "endpoint": {
+                "pattern": "^https?://(127(\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|\\[::1\\])(:[0-9]{1,5})?/?$"
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "properties": {
+            "provider_id": {
+              "enum": [
+                "anthropic-api",
+                "claude-agent-sdk"
+              ]
+            }
+          },
+          "required": [
+            "provider_id"
+          ]
+        },
+        "then": {
+          "properties": {
+            "auth_method": {
+              "const": "api_key"
+            },
+            "endpoint": {
+              "const": "https://api.anthropic.com"
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "properties": {
+            "auth_method": {
+              "const": "none"
+            }
+          },
+          "required": [
+            "auth_method"
+          ]
+        },
+        "then": {
+          "properties": {
+            "api_key": {
+              "type": "null"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "connection": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_connection"
+      }
+    },
+    "required": [
+      "connection"
+    ],
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {
+        "provider_id": "anthropic-api",
+        "display_name": "議事録 API",
+        "auth_method": "api_key",
+        "request_id": "provider-request-20260828-001"
+      },
+      {
+        "connection_id": "conn-0123456789ab",
+        "expected_revision": 1,
+        "api_key": "example-not-a-real-key",
+        "request_id": "provider-request-20260828-002"
+      },
+      {
+        "connection_id": "conn-0123456789ab",
+        "expected_revision": 2,
+        "api_key": null,
+        "enabled": false,
+        "request_id": "provider-request-20260828-003"
+      },
+      {
+        "provider_id": "ollama",
+        "display_name": "ローカル Ollama",
+        "auth_method": "none",
+        "endpoint": "http://127.0.0.1:11434",
+        "request_id": "provider-request-20260828-004"
+      }
+    ],
+    "output": [
+      {
+        "connection": {
+          "connection_id": "conn-0123456789ab",
+          "revision": 1,
+          "provider_id": "anthropic-api",
+          "display_name": "議事録 API",
+          "enabled": true,
+          "endpoint": "https://api.anthropic.com",
+          "auth_method": "api_key",
+          "credential_present": false,
+          "auth_state": "unconfigured",
+          "catalog_state": "unfetched",
+          "checked_at": null,
+          "active_auth": null,
+          "last_generation_state": "never"
+        }
+      },
+      {
+        "connection": {
+          "connection_id": "conn-0123456789ab",
+          "revision": 2,
+          "provider_id": "anthropic-api",
+          "display_name": "議事録 API",
+          "enabled": true,
+          "endpoint": "https://api.anthropic.com",
+          "auth_method": "api_key",
+          "credential_present": true,
+          "auth_state": "unverified",
+          "catalog_state": "unfetched",
+          "checked_at": null,
+          "active_auth": null,
+          "last_generation_state": "never"
+        }
+      }
+    ]
+  }
+}

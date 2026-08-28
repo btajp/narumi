@@ -31,6 +31,14 @@ def _cancelled_payload() -> dict[str, str]:
     return {"code": str(ErrorCode.CANCELLED), "message": CANCEL_MESSAGE}
 
 
+def _provider_setup_error(code: ErrorCode) -> NarumiError:
+    try:
+        safe_code = ErrorCode(code)
+    except (ValueError, TypeError):
+        safe_code = ErrorCode.INTERNAL
+    return NarumiError("Provider runtime preparation failed", code=safe_code)
+
+
 class JobProgress:
     """Progress sink handed to a job: ``progress("transcribe", 0.4)``.
 
@@ -131,6 +139,8 @@ class JobManager:
             self._cancel_events.pop(job_id, None)
 
     def _run(self, job_id: str, fn: JobFn) -> dict[str, Any]:
+        row = self.catalog.get_job(job_id)
+        confidential = row is not None and row["kind"] == "provider_setup"
         self.catalog.update_job(job_id, status="running")
         with self._lock:
             cancel_event = self._cancel_events.get(job_id)
@@ -145,14 +155,27 @@ class JobManager:
                 )
             payload = dict(result)
         except CancelledError as exc:
+            if confidential:
+                self.catalog.update_job(job_id, status="cancelled", error=_cancelled_payload())
+                raise CancelledError(CANCEL_MESSAGE) from None
             logger.info("job %s cancelled: %s", job_id, exc.message)
             self.catalog.update_job(job_id, status="cancelled", error=exc.to_payload()["error"])
             raise
         except NarumiError as exc:
+            if confidential:
+                error = _provider_setup_error(exc.code)
+                logger.warning("provider setup job %s failed: %s", job_id, error.code)
+                self.catalog.update_job(job_id, status="failed", error=error.to_payload()["error"])
+                raise error from None
             logger.warning("job %s failed: %s: %s", job_id, exc.code, exc.message)
             self.catalog.update_job(job_id, status="failed", error=exc.to_payload()["error"])
             raise
         except Exception as exc:
+            if confidential:
+                error = _provider_setup_error(ErrorCode.INTERNAL)
+                logger.error("provider setup job %s failed", job_id)
+                self.catalog.update_job(job_id, status="failed", error=error.to_payload()["error"])
+                raise error from None
             logger.error("job %s crashed:\n%s", job_id, traceback.format_exc())
             self.catalog.update_job(
                 job_id,

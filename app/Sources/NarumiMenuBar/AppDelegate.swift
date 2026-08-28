@@ -50,7 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let config = ServerConfig.resolve(
             storedRepoPath: UserDefaults.standard.string(forKey: ServerConfig.repoPathDefaultsKey))
         let client = MCPClient(
-            serverURL: config.serverURL, clientVersion: AppDelegate.appVersion,
+            config: config, clientVersion: AppDelegate.appVersion,
             jobRequestObserver: { [weak self] publication, count, pendingStop, jobIDs in
                 guard let self, publication > self.lastJobRequestPublication else { return }
                 self.lastJobRequestPublication = publication

@@ -1,7 +1,7 @@
 {
   "name": "get_server_info",
   "title": "Get server info",
-  "description": "Return the narumi server identity, version, capabilities and diagnostics. `capabilities` reports whether recording can be attempted on this machine (narumi-recorder binary present and microphone permission not known to be denied; `permissions` gives the state from `narumi-recorder check`), permission_setup_in_progress, the active transports, and registry names of installed engines, providers and exporters. `recording` and `permissions` use the same permission snapshot. Set refresh_permissions=true to bypass the short permission cache after returning from macOS settings; while a permission action is in progress, the current cached report may be returned instead and permission_setup_in_progress remains true. This read-only tool never triggers a permission prompt. `diagnostics` reports resolved ffmpeg / ffprobe binaries, data and meetings roots, catalog path, recorder path and loaded contracts directory. Call with empty arguments first to detect the contract version; refresh_permissions and configure_recording_permission require contract 1.1.0 or later in major 1. On failure returns an error_envelope (isError=true) with code: internal.",
+  "description": "Return the narumi server identity, version, capabilities and diagnostics. `capabilities` reports whether recording can be attempted on this machine (narumi-recorder binary present and microphone permission not known to be denied; `permissions` gives the state from `narumi-recorder check`), permission_setup_in_progress, the active transports, and registry names of installed engines, providers and exporters. `recording` and `permissions` use the same permission snapshot. Set refresh_permissions=true to bypass the short permission cache after returning from macOS settings; while a permission action is in progress, the current cached report may be returned instead and permission_setup_in_progress remains true. This read-only tool never triggers a permission prompt. `diagnostics` reports resolved ffmpeg / ffprobe binaries, data and meetings roots, catalog path, recorder path and loaded contracts directory. Call with empty arguments first to detect the contract version. Provider connection and model-discovery tools require major 2 and their workflow capability flags; stage model selection and ensemble generation remain unavailable in this development phase. secure_transport describes required protection, never trusted bootstrap pins or tokens. On failure returns an error_envelope (isError=true) with code: internal.",
   "annotations": {
     "readOnlyHint": true,
     "destructiveHint": false,
@@ -23,7 +23,7 @@
   },
   "outputSchema": {
     "type": "object",
-    "required": ["name", "server_version", "contract_version", "capabilities", "diagnostics"],
+    "required": ["name", "server_version", "contract_version", "capabilities", "diagnostics", "secure_transport"],
     "properties": {
       "name": {
         "type": "string",
@@ -44,6 +44,10 @@
         "description": "Semantic version of the tool contracts this server implements (contracts/manifest.json).",
         "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$"
       },
+      "secure_transport": {
+        "$ref": "../defs/providers.json#/$defs/secure_transport_metadata",
+        "description": "Required transport capabilities, not a source of trusted pins or authentication tokens. Network clients verify the owner-only bootstrap and TLS pin before trusting any server response."
+      },
       "capabilities": {
         "type": "object",
         "required": [
@@ -52,9 +56,14 @@
           "transcription_engines",
           "diarization_engines",
           "llm_providers",
-          "export_destinations"
+          "export_destinations",
+          "workflow"
         ],
         "properties": {
+          "workflow": {
+            "$ref": "../defs/providers.json#/$defs/provider_workflow_capabilities",
+            "description": "Implemented workflow operations, independent of provider registry names. This development phase supports connection management and model discovery, not per-stage selection or ensemble generation."
+          },
           "recording": {
             "type": "boolean",
             "description": "True when start_recording can be attempted: narumi-recorder found, its permission check succeeded and microphone access is not denied. Screen recording is not part of this flag because its denied status also covers never requested; see permissions for the raw state. configure_recording_permission lets clients request access explicitly before starting a recording."
@@ -172,10 +181,12 @@
     "output": [
       {
         "name": "narumi",
-        "server_version": "0.1.3",
+        "server_version": "0.1.4",
         "server_instance_id": "00000000-0000-4000-8000-000000000001",
-        "contract_version": "1.1.0",
+        "contract_version": "2.0.0",
+        "secure_transport": { "mode": "pinned_tls", "tls_required": true, "client_auth_required": true },
         "capabilities": {
+          "workflow": { "provider_connections": true, "provider_models": true, "stage_model_selection": false, "ensemble_generation": false },
           "recording": true,
           "permission_setup_in_progress": false,
           "permissions": { "screen_recording": "granted", "microphone": "unknown" },
@@ -197,10 +208,12 @@
       },
       {
         "name": "narumi",
-        "server_version": "0.1.3",
+        "server_version": "0.1.4",
         "server_instance_id": "00000000-0000-4000-8000-000000000002",
-        "contract_version": "1.1.0",
+        "contract_version": "2.0.0",
+        "secure_transport": { "mode": "stdio", "tls_required": true, "client_auth_required": true },
         "capabilities": {
+          "workflow": { "provider_connections": true, "provider_models": true, "stage_model_selection": false, "ensemble_generation": false },
           "recording": false,
           "permission_setup_in_progress": false,
           "transports": ["stdio"],

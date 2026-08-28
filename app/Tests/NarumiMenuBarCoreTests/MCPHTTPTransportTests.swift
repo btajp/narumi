@@ -1,160 +1,207 @@
 import Foundation
+import Security
 import XCTest
 
 @testable import NarumiMenuBarCore
 
 @MainActor
 final class MCPHTTPTransportTests: XCTestCase {
-    func testConfidentialEndpointPinsLocalhostAndAcceptsOnlyNumericLoopback() throws {
-        let cases = [
-            ("http://localhost:8765/mcp", "http://127.0.0.1:8765/mcp"),
-            ("http://LOCALHOST:8765/mcp", "http://127.0.0.1:8765/mcp"),
-            ("http://127.0.0.1:8765/mcp", "http://127.0.0.1:8765/mcp"),
-            ("http://127.2.3.4/mcp", "http://127.2.3.4/mcp"),
-            ("http://[::1]:8765/mcp", "http://[::1]:8765/mcp"),
-            ("http://[0:0:0:0:0:0:0:1]:8765/mcp", "http://[::1]:8765/mcp"),
-        ]
-        for (input, expected) in cases {
-            XCTAssertEqual(try MCPHTTPTransport.confidentialEndpoint(URL(string: input)).absoluteString, expected)
+    private let token = "narumi-public-test-token-never-production"
+
+    func testEndpointAcceptsOnlyExactNumericHTTPSLoopback() throws {
+        for input in ["https://127.0.0.1:8765/mcp", "https://[::1]:8765/mcp"] {
+            XCTAssertEqual(try MCPHTTPTransport.confidentialEndpoint(URL(string: input)).absoluteString, input)
         }
     }
 
-    func testConfidentialEndpointRejectsRemoteAndAmbiguousURLs() {
+    func testEndpointRejectsHTTPDNSRemoteAndAmbiguousURLsForEveryTool() throws {
         let rejected = [
-            "http://example.invalid/mcp", "https://127.0.0.1/mcp", "http://192.168.1.1/mcp",
-            "http://0.0.0.0/mcp", "http://localhost.example.invalid/mcp", "http://localhost./mcp",
-            "http://2130706433/mcp", "http://127.1/mcp", "http://127.000.0.1/mcp",
-            "http://[::ffff:127.0.0.1]/mcp", "http://[::]/mcp", "http://[::1%25lo0]/mcp",
-            "http://user:secret@127.0.0.1/mcp", "http://@127.0.0.1/mcp",
-            "http://127.0.0.1/mcp?token=secret", "http://127.0.0.1/mcp?",
-            "http://127.0.0.1/mcp#secret", "http://127.0.0.1/mcp#",
-            "http://127.0.0.1:0/mcp", "http://127.0.0.1:65536/mcp",
+            "http://127.0.0.1:8765/mcp", "https://localhost:8765/mcp", "https://127.0.0.1/mcp",
+            "https://example.invalid:8765/mcp", "https://192.168.1.1:8765/mcp",
+            "https://127.2.3.4:8765/mcp", "https://localhost.:8765/mcp",
+            "https://2130706433:8765/mcp", "https://127.1:8765/mcp", "https://127.000.0.1:8765/mcp",
+            "https://[::ffff:127.0.0.1]:8765/mcp", "https://[::]:8765/mcp",
+            "https://[0:0:0:0:0:0:0:1]:8765/mcp", "https://[::1%25lo0]:8765/mcp",
+            "https://user:secret@127.0.0.1:8765/mcp", "https://@127.0.0.1:8765/mcp",
+            "https://127.0.0.1:8765/mcp?token=secret", "https://127.0.0.1:8765/mcp?",
+            "https://127.0.0.1:8765/mcp#secret", "https://127.0.0.1:8765/mcp#",
+            "https://127.0.0.1:0/mcp", "https://127.0.0.1:65536/mcp",
+            "https://127.0.0.1:8765/mcp/", "https://127.0.0.1:8765/%6dcp",
         ]
         for value in rejected {
-            XCTAssertThrowsError(try MCPHTTPTransport.confidentialEndpoint(URL(string: value)), value) { error in
-                XCTAssertFalse(error.localizedDescription.contains(value))
-                XCTAssertFalse(error.localizedDescription.contains("secret"))
+            for tool in [ToolCatalog.getServerInfo, ToolCatalog.setProviderConnection] {
+                let request = try rpcRequest(URL(string: value)!, tool: tool)
+                XCTAssertThrowsError(try MCPHTTPTransport.requestPlan(for: request), value) { error in
+                    XCTAssertFalse(error.localizedDescription.contains(value))
+                    XCTAssertFalse(error.localizedDescription.contains("secret"))
+                }
             }
         }
         XCTAssertThrowsError(try MCPHTTPTransport.confidentialEndpoint(nil))
     }
 
-    func testConfidentialSessionDisablesManualAndAutomaticProxiesAndPersistentStores() {
-        let configuration = MCPHTTPTransport.confidentialConfiguration()
-        let proxies = configuration.connectionProxyDictionary
-        for name in ["HTTPEnable", "HTTPSEnable", "SOCKSEnable", "ProxyAutoConfigEnable", "ProxyAutoDiscoveryEnable"] {
-            XCTAssertEqual(proxies?[name] as? Int, 0, name)
+    func testEverySessionDisablesProxiesAndPersistentStores() {
+        for configuration in [MCPHTTPTransport.ordinaryConfiguration(), MCPHTTPTransport.permissionConfiguration(),
+            MCPHTTPTransport.confidentialConfiguration()] {
+            for name in ["HTTPEnable", "HTTPSEnable", "SOCKSEnable", "ProxyAutoConfigEnable", "ProxyAutoDiscoveryEnable"] {
+                XCTAssertEqual(configuration.connectionProxyDictionary?[name] as? Int, 0, name)
+            }
+            XCTAssertNil(configuration.httpCookieStorage)
+            XCTAssertFalse(configuration.httpShouldSetCookies)
+            XCTAssertNil(configuration.urlCredentialStorage)
+            XCTAssertNil(configuration.urlCache)
+            XCTAssertEqual(configuration.requestCachePolicy, .reloadIgnoringLocalCacheData)
         }
-        XCTAssertNil(configuration.httpCookieStorage)
-        XCTAssertFalse(configuration.httpShouldSetCookies)
-        XCTAssertNil(configuration.urlCredentialStorage)
-        XCTAssertNil(configuration.urlCache)
-        XCTAssertEqual(configuration.requestCachePolicy, .reloadIgnoringLocalCacheData)
     }
 
-    func testSecretToolIsDetectedFromActualRPCBodyWithoutCallerOptIn() throws {
-        let url = URL(string: "http://127.0.0.1:8765/mcp")!
+    func testSecretToolIsDetectedFromRPCBodyWithoutCallerOptIn() throws {
+        let secrets: Set<String> = [ToolCatalog.setGaiaConnection, ToolCatalog.setProviderConnection,
+            ToolCatalog.authenticateProviderConnection, ToolCatalog.deleteProviderConnection]
         for tool in ToolCatalog.allUsed {
-            let request = try rpcRequest(url, tool: tool)
-            XCTAssertEqual(MCPHTTPTransport.hasConfidentialBody(request), tool == ToolCatalog.setGaiaConnection)
-        }
-        // Clearing or preserving a key still belongs to the confidential operation.
-        var request = try rpcRequest(url)
-        request.httpBody = Data(#"{"method":"tools/call","params":{"name":"set_gaia_connection","arguments":{"api_key":null}}}"#.utf8)
-        XCTAssertTrue(MCPHTTPTransport.hasConfidentialBody(request))
-    }
-
-    func testActualSecretSendRejectsRemoteEndpointBeforeNetworkIO() async throws {
-        let request = try rpcRequest(URL(string: "http://example.invalid/mcp")!)
-        do {
-            _ = try await MCPHTTPTransport().data(for: request)
-            XCTFail("Secret-bearing request must be refused before networking")
-        } catch {
-            XCTAssertFalse(error.localizedDescription.contains("unit-test-only-secret"))
-            XCTAssertFalse(error.localizedDescription.contains("example.invalid"))
+            let request = try rpcRequest(URL(string: "https://127.0.0.1:8765/mcp")!, tool: tool)
+            XCTAssertEqual(MCPHTTPTransport.hasConfidentialBody(request), secrets.contains(tool), tool)
         }
     }
 
-    func testActualSecretSendPinsLocalhost() async throws {
-        let fixture = try LoopbackHTTPFixture()
+    func testActualTLSDiscoveryAndSecretRequestUsePinnedCertificateAndBearer() async throws {
+        let fixture = try LoopbackTLSFixture()
         defer { fixture.stop() }
-        let request = try rpcRequest(URL(string: "http://localhost:\(fixture.port)/mcp")!)
-        let (_, response) = try await MCPHTTPTransport().data(for: request)
-        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
-        let wire = try XCTUnwrap(fixture.requests.first)
-        XCTAssertTrue(wire.contains("Host: 127.0.0.1:\(fixture.port)"))
-        XCTAssertTrue(wire.contains("unit-test-only-secret"))
+        let transport = try makeTransport(url: fixture.url)
+        for tool in [ToolCatalog.getServerInfo, ToolCatalog.setProviderConnection] {
+            let (_, response) = try await transport.data(for: rpcRequest(fixture.url, tool: tool))
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        }
+        XCTAssertEqual(fixture.requests.count, 2)
+        for wire in fixture.requests {
+            XCTAssertTrue(wire.contains("Host: 127.0.0.1:\(fixture.port)"))
+            XCTAssertTrue(wire.contains("Authorization: Bearer \(token)"))
+        }
+        XCTAssertTrue(fixture.requests[1].contains("unit-test-only-secret"))
     }
 
-    func testActualSecretPOSTNeverFollows307Or308Redirects() async throws {
-        for status in [307, 308] {
-            let target = try LoopbackHTTPFixture()
+    func testFalseServerCertificateReceivesNeitherTokenNorSecretBody() async throws {
+        let fixture = try LoopbackTLSFixture()
+        defer { fixture.stop() }
+        var otherCertificate = LoopbackTLSCertificate.certificateDER
+        otherCertificate[otherCertificate.count - 1] ^= 1
+        let transport = try makeTransport(url: fixture.url, certificate: otherCertificate)
+        do {
+            _ = try await transport.data(for: rpcRequest(fixture.url))
+            XCTFail("A different certificate must fail before HTTP bytes are transmitted")
+        } catch {
+            XCTAssertEqual(error as? MCPConnectionError, .certificateMismatch)
+            XCTAssertFalse(error.localizedDescription.contains(token))
+        }
+        XCTAssertTrue(fixture.requests.isEmpty)
+    }
+
+    func testPlaintextAndUnpinnedAlternateEndpointFailBeforeNetworking() async throws {
+        let http = try LoopbackHTTPFixture()
+        defer { http.stop() }
+        let transport = try makeTransport(url: URL(string: "https://127.0.0.1:8765/mcp")!)
+        for url in [http.url, URL(string: "https://127.0.0.1:\(http.port)/mcp")!] {
+            do {
+                _ = try await transport.data(for: rpcRequest(url, tool: ToolCatalog.getServerInfo))
+                XCTFail("An unpinned endpoint must never be contacted")
+            } catch {
+                XCTAssertNotNil(error as? MCPConnectionError)
+            }
+        }
+        XCTAssertTrue(http.requests.isEmpty)
+    }
+
+    func testNoToolOrHandshakeFollowsRedirects() async throws {
+        for status in [302, 307, 308] {
+            let target = try LoopbackTLSFixture()
             defer { target.stop() }
-            let source = try LoopbackHTTPFixture(status: status, location: target.url.absoluteString)
+            let source = try LoopbackTLSFixture(status: status, location: target.url.absoluteString)
             defer { source.stop() }
-            let (_, response) = try await MCPHTTPTransport().data(for: rpcRequest(source.url))
+            let transport = try makeTransport(url: source.url)
+            for tool in [ToolCatalog.getServerInfo, ToolCatalog.setProviderConnection] {
+                let (_, response) = try await transport.data(for: rpcRequest(source.url, tool: tool))
+                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, status)
+            }
+            var initialization = URLRequest(url: source.url)
+            initialization.httpMethod = "POST"
+            initialization.httpBody = Data(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#.utf8)
+            let (_, response) = try await transport.data(for: initialization)
             XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, status)
-            XCTAssertEqual(source.requests.count, 1)
-            XCTAssertTrue(try XCTUnwrap(source.requests.first).contains("unit-test-only-secret"))
-            XCTAssertTrue(target.requests.isEmpty, "\(status) must not forward the secret body")
+            XCTAssertEqual(source.requests.count, 3)
+            XCTAssertTrue(target.requests.isEmpty)
         }
     }
 
-    func testOrdinaryToolKeepsExistingRedirectBehavior() async throws {
-        let target = try LoopbackHTTPFixture()
-        defer { target.stop() }
-        let source = try LoopbackHTTPFixture(status: 307, location: target.url.absoluteString)
-        defer { source.stop() }
-        let request = try rpcRequest(source.url, tool: ToolCatalog.getServerInfo)
-        let (_, response) = try await MCPHTTPTransport().data(for: request)
-        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
-        XCTAssertEqual(source.requests.count, 1)
-        XCTAssertEqual(target.requests.count, 1)
+    func testCallerCannotOverrideDestinationHeadersOrBearer() async throws {
+        let fixture = try LoopbackTLSFixture()
+        defer { fixture.stop() }
+        var request = try rpcRequest(fixture.url)
+        request.setValue("evil.invalid", forHTTPHeaderField: "Host")
+        request.setValue("https://evil.invalid", forHTTPHeaderField: "Origin")
+        request.setValue("caller-secret", forHTTPHeaderField: "Authorization")
+        request.setValue("caller-secret", forHTTPHeaderField: "Cookie")
+        request.setValue("caller-secret", forHTTPHeaderField: "Proxy-Authorization")
+        _ = try await makeTransport(url: fixture.url).data(for: request)
+        let wire = try XCTUnwrap(fixture.requests.first)
+        XCTAssertFalse(wire.contains("evil.invalid"))
+        XCTAssertFalse(wire.contains("caller-secret"))
+        XCTAssertTrue(wire.contains("Authorization: Bearer \(token)"))
     }
 
-    func testConfidentialHandshakeAlsoUsesTheProtectedTransport() async throws {
-        let target = try LoopbackHTTPFixture()
-        defer { target.stop() }
-        let source = try LoopbackHTTPFixture(status: 307, location: target.url.absoluteString)
-        defer { source.stop() }
-        var request = URLRequest(url: source.url)
-        request.httpMethod = "POST"
-        request.httpBody = Data(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#.utf8)
-        let (_, response) = try await MCPHTTPTransport().data(for: request, protectingSecrets: true)
-        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 307)
-        XCTAssertTrue(target.requests.isEmpty)
+    func testPinnedCertificateMustAlsoBeCurrentlyValid() throws {
+        let bootstrap = try makeBootstrap(url: URL(string: "https://127.0.0.1:8765/mcp")!)
+        let certificate = try XCTUnwrap(SecCertificateCreateWithData(nil, try bootstrap.certificateDER() as CFData))
+        var trust: SecTrust?
+        XCTAssertEqual(SecTrustCreateWithCertificates(certificate, SecPolicyCreateBasicX509(), &trust), errSecSuccess)
+        let evaluated = try XCTUnwrap(trust)
+        let delegate = MCPPinnedServerTrust(bootstrap: bootstrap)
+        XCTAssertTrue(delegate.accepts(evaluated))
+        SecTrustSetVerifyDate(evaluated, Date(timeIntervalSince1970: 7_258_118_400) as CFDate)
+        XCTAssertFalse(delegate.accepts(evaluated), "A matching pin must not bypass expiration")
     }
 
     func testOnlyKnownErrorCodesSurviveConfidentialFailures() {
-        XCTAssertEqual(MCPHTTPTransport.confidentialErrorCode("invalid_argument"), "invalid_argument")
-        XCTAssertEqual(MCPHTTPTransport.confidentialErrorCode("busy"), "busy")
+        for code in ["invalid_argument", "busy", "authentication_required", "configuration_conflict"] {
+            XCTAssertEqual(MCPHTTPTransport.confidentialErrorCode(code), code)
+        }
         XCTAssertEqual(MCPHTTPTransport.confidentialErrorCode(nil), "internal")
         XCTAssertEqual(MCPHTTPTransport.confidentialErrorCode("unit-test-only-secret"), "internal")
-        XCTAssertFalse(MCPHTTPTransport.confidentialErrorMessage.contains("unit-test-only-secret"))
     }
 
-    func testAppClientRoutesAllHTTPThroughTheTestedTransport() throws {
-        // The executable target is not linked into Core tests (it links Sparkle/AppKit).
-        // Keep a wiring guard in addition to the real HTTP tests above.
+    func testAppClientRoutesHTTPThroughAuthenticatedTransportAndChecksMetadataGate() throws {
         let app = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
         let source = try String(contentsOf: app.appendingPathComponent("Sources/NarumiMenuBar/MCPClient.swift"), encoding: .utf8)
-        XCTAssertTrue(source.contains("private let transport: MCPHTTPTransport"))
+        let connection = try String(
+            contentsOf: app.appendingPathComponent("Sources/NarumiMenuBar/MCPClient+Connection.swift"), encoding: .utf8)
         XCTAssertTrue(source.contains("try await transport.data(for: request, protectingSecrets: confidential)"))
         XCTAssertTrue(source.contains("MCPHTTPTransport.confidentialErrorCode(code)"))
-        XCTAssertTrue(source.contains("MCPHTTPTransport.confidentialErrorMessage"))
+        XCTAssertTrue(source.contains("[\"client_auth_required\"]?.boolValue == true"))
+        XCTAssertTrue(connection.contains("MCPServerBootstrapReader("))
+        XCTAssertTrue(connection.contains("KeychainHelperSecretReader("))
         XCTAssertFalse(source.contains("URLSession("))
     }
 
-    private func rpcRequest(_ url: URL, tool: String = ToolCatalog.setGaiaConnection) throws -> URLRequest {
+    private func makeBootstrap(url: URL, certificate: Data = LoopbackTLSCertificate.certificateDER) throws -> MCPServerBootstrap {
+        let instance = "00000000-0000-4000-8000-000000000001"
+        return MCPServerBootstrap(
+            serverInstanceID: instance, pid: 1, url: url,
+            certificateSHA256: MCPServerBootstrap.fingerprint(certificate),
+            certificatePEM: "-----BEGIN CERTIFICATE-----\n\(certificate.base64EncodedString())\n-----END CERTIFICATE-----\n",
+            tokenAccount: "transport:\(String(repeating: "a", count: 64)):\(instance)")
+    }
+
+    private func makeTransport(url: URL, certificate: Data = LoopbackTLSCertificate.certificateDER) throws -> MCPHTTPTransport {
+        try MCPHTTPTransport(connection: MCPServerConnection(bootstrap: makeBootstrap(url: url, certificate: certificate), token: token))
+    }
+
+    private func rpcRequest(_ url: URL, tool: String = ToolCatalog.setProviderConnection) throws -> URLRequest {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let arguments: [String: Any] = tool == ToolCatalog.setGaiaConnection
+        let arguments: [String: Any] = MCPHTTPTransport.isConfidentialTool(tool)
             ? ["api_key": "unit-test-only-secret", "request_id": "test-request-1234"] : [:]
         request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": ["name": tool, "arguments": arguments],
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": ["name": tool, "arguments": arguments],
         ])
         return request
     }

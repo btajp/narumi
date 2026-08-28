@@ -18,11 +18,12 @@ import anyio
 import mcp_types
 from mcp.server import Server, ServerRequestContext
 from narumi.contracts import ContractSet
-from narumi.errors import ContractMismatchError, ErrorCode, NarumiError
+from narumi.errors import AuthenticationRequiredError, ContractMismatchError, ErrorCode, NarumiError
 
 from narumi_server import __version__
 from narumi_server.context import ServerContext
 from narumi_server.handlers.common import Handler, jsonable
+from narumi_server.provider_tools import PROVIDER_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -75,13 +76,17 @@ def tool_definitions(contracts: ContractSet) -> list[mcp_types.Tool]:
 def dispatch(ctx: ServerContext, tool: str, arguments: Mapping[str, Any] | None) -> ToolOutcome:
     """Run one tool call end to end. Never raises: every failure is an error envelope."""
     contract = ctx.contracts.get(tool)
-    sensitive = tool in _GAIA_CONNECTION_TOOLS or (
-        contract is not None and contract.has_write_only_input
+    sensitive = (
+        tool in _GAIA_CONNECTION_TOOLS
+        or tool in PROVIDER_TOOLS
+        or (contract is not None and contract.has_write_only_input)
     )
     try:
         ctx.contracts.validate_input(tool, arguments)
         args = dict(arguments or {})
         contract = ctx.contracts[tool]
+        if contract.has_write_only_input and "streamable-http" not in ctx.transports:
+            raise AuthenticationRequiredError("Credentials require the authenticated server")
         handler = ctx.handlers.get(tool)
         if handler is None:
             raise ContractMismatchError(f"no handler for tool {tool!r}", details={"tool": tool})
@@ -96,7 +101,13 @@ def dispatch(ctx: ServerContext, tool: str, arguments: Mapping[str, Any] | None)
                 ctx.contracts.validate_output(tool, jsonable(dict(result)))
             return result
 
-        result = ctx.idempotency.run(contract, args, call_handler)
+        # Provider mutations keep their compare-and-set/replay ledger beside the connection
+        # files. A catalog replay must not bypass their argument and credential checks.
+        result = (
+            call_handler()
+            if tool in PROVIDER_TOOLS
+            else ctx.idempotency.run(contract, args, call_handler)
+        )
         if not isinstance(result, Mapping):
             raise ContractMismatchError(
                 f"handler for {tool!r} returned {type(result).__name__}, expected an object",
@@ -139,7 +150,21 @@ def _sensitive_error(code: ErrorCode, tool: str) -> dict[str, Any]:
         ErrorCode.INVALID_ARGUMENT: "Invalid connection settings or tool arguments",
         ErrorCode.ENGINE_UNAVAILABLE: "Gaia is unconfigured, unreachable, or authentication failed",
         ErrorCode.CONTRACT_MISMATCH: "Gaia connection tool or server response is incompatible",
+        ErrorCode.AUTHENTICATION_REQUIRED: "An authenticated resident connection is required",
     }
+    if tool in PROVIDER_TOOLS:
+        messages = {
+            ErrorCode.INVALID_ARGUMENT: "Invalid provider settings or tool arguments",
+            ErrorCode.NOT_FOUND: "The requested connection or operation was not found",
+            ErrorCode.BUSY: "The provider operation is still active",
+            ErrorCode.CANCELLED: "The provider operation was cancelled",
+            ErrorCode.CONFIGURATION_CONFLICT: "The connection changed; reload before saving",
+            ErrorCode.AUTHENTICATION_REQUIRED: "Provider or resident authentication is required",
+            ErrorCode.MODEL_UNAVAILABLE: "The requested model is unavailable",
+            ErrorCode.ENGINE_UNAVAILABLE: "The provider runtime or connection is unavailable",
+            ErrorCode.CONTRACT_MISMATCH: "The provider response does not match the contract",
+            ErrorCode.POLICY_VIOLATION: "The provider operation is not permitted",
+        }
     return {
         "error": {
             "code": str(code),

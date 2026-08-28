@@ -1,0 +1,80 @@
+{
+  "name": "prepare_provider_runtime",
+  "title": "Prepare provider runtime",
+  "description": "Prepare or update one fixed resource from the provider's approved runtime catalog after checking expected_catalog_revision. No arbitrary command, URL, path, global installer or model pull is accepted. Installed-runtime checks and connection-isolated runtime preparation are not permission to download unlisted resources. Missing dependencies, unknown digests for downloads, incompatible versions or unsafe SDK persistence remain unavailable with a safe reason. A provider has at most one active setup; an active runtime is not replaced. Return a provider_setup job; use get_job_status/cancel_job and list_providers.active_setup/last_setup. Repeating request_id returns the original job instead of downloading or preparing again. On failure returns an error_envelope (isError=true) with code: invalid_argument, not_found, configuration_conflict, busy, engine_unavailable, authentication_required, internal. All provider operations require the authenticated resident server; no implicit in-process or unauthenticated HTTP fallback is allowed.",
+  "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "provider_id": {
+        "$ref": "../defs/providers.json#/$defs/provider_id"
+      },
+      "resource_id": {
+        "$ref": "../defs/providers.json#/$defs/provider_resource_id"
+      },
+      "expected_catalog_revision": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "action": {
+        "type": "string",
+        "enum": [
+          "prepare",
+          "update"
+        ]
+      },
+      "request_id": {
+        "$ref": "../defs/common.json#/$defs/request_id"
+      }
+    },
+    "required": [
+      "provider_id",
+      "resource_id",
+      "expected_catalog_revision",
+      "action",
+      "request_id"
+    ],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "job_id": {
+        "$ref": "../defs/common.json#/$defs/job_id"
+      }
+    },
+    "required": [
+      "job_id"
+    ],
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {
+        "provider_id": "claude-agent-sdk",
+        "resource_id": "claude-sdk",
+        "expected_catalog_revision": "bundled-v1",
+        "action": "prepare",
+        "request_id": "provider-request-20260828-001"
+      },
+      {
+        "provider_id": "ollama",
+        "resource_id": "local-ollama",
+        "expected_catalog_revision": "bundled-v1",
+        "action": "update",
+        "request_id": "provider-runtime-request-002"
+      }
+    ],
+    "output": [
+      {
+        "job_id": "job-0123456789ab"
+      }
+    ]
+  }
+}

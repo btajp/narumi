@@ -44,8 +44,8 @@ def cli() -> click.Group:
     return cli_tools.build_cli()
 
 
-def invoke(cli: click.Group, args: list[str]) -> Result:
-    return CliRunner().invoke(cli, args, catch_exceptions=False)
+def invoke(cli: click.Group, args: list[str], *, input: str | None = None) -> Result:
+    return CliRunner().invoke(cli, args, input=input, catch_exceptions=False)
 
 
 def assert_private_error(result: Result, code: str = "invalid_argument") -> None:
@@ -99,7 +99,7 @@ def test_well_formed_json_with_invalid_secret_shapes_remains_private(
     [
         ["set-gaia-connection", "--api-key", SECRET, SECRET],
         ["set-gaia-connection", "--api-key", SECRET, "--" + SECRET],
-        ["set-gaia-connection", "--url", URL, "--api-key"],
+        ["set-gaia-connection", "--url", URL, "--api-key=" + SECRET],
         ["tool", "set_gaia_connection", "--json", VALID_JSON, SECRET],
         ["tool", "set_gaia_connection", "--json", VALID_JSON, "--" + SECRET],
         ["tool", "--json", VALID_JSON, "set-gaia-connection", "--" + SECRET],
@@ -177,27 +177,36 @@ def test_secret_tool_execution_failures_do_not_echo_credentials(
         return {"error": {"code": "internal", "message": SECRET, "details": {SECRET: SECRET}}}, True
 
     monkeypatch.setattr(cli_tools, "_call", fail)
-    result = invoke(cli, ["--in-process", "tool", "set_gaia_connection", "--json", VALID_JSON])
+    result = invoke(cli, ["tool", "set_gaia_connection", "--json-stdin"], input=VALID_JSON)
     assert_private_error(result, "internal")
 
 
 @pytest.mark.parametrize("generic", [False, True])
 def test_valid_secret_updates_still_succeed_without_echo(
-    cli: click.Group, tmp_path: Path, generic: bool
+    cli: click.Group, monkeypatch: pytest.MonkeyPatch, generic: bool
 ):
+    received: dict[str, Any] = {}
+
+    def call(state, tool, arguments):
+        assert state.confidential is True
+        load_contracts().validate_input(tool, arguments)
+        received.update(arguments)
+        return {"connection": {"url": URL, "has_api_key": True, "source": "saved"}}, False
+
+    monkeypatch.setattr(cli_tools, "_call", call)
     args = (
-        ["tool", "set_gaia_connection", "--json", VALID_JSON]
+        ["tool", "set_gaia_connection", "--json-stdin"]
         if generic
-        else ["set-gaia-connection", "--url", URL, "--api-key", SECRET]
+        else ["set-gaia-connection", "--url", URL, "--api-key-stdin"]
     )
-    result = invoke(cli, ["--in-process", "--raw", *args])
+    result = invoke(cli, ["--raw", *args], input=VALID_JSON if generic else SECRET + "\n")
     assert result.exit_code == 0
     assert SECRET not in result.output
     assert SECRET not in result.stderr
     assert json.loads(result.stdout) == {
         "connection": {"url": URL, "has_api_key": True, "source": "saved"}
     }
-    assert json.loads((tmp_path / "data" / "gaia.json").read_text())["api_key"] == SECRET
+    assert received["api_key"] == SECRET
 
 
 @pytest.mark.parametrize("payload", ['{"public": "' + PUBLIC + '"', json.dumps([PUBLIC])])

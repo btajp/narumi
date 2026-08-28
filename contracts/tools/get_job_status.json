@@ -1,7 +1,7 @@
 {
   "name": "get_job_status",
   "title": "Get job status",
-  "description": "Return the current state of a background job created by stop_recording (kind process), regenerate / register_context (kind regenerate) or export_minutes (kind export). `status` is queued / running / succeeded / failed / cancelled. While running, `progress` carries the current stage name and a 0..1 fraction. When succeeded, `result` holds the job output (process / regenerate: {meeting_id, minutes_version, stages, skipped, unresolved_speakers}; export: {destination, ref, minutes_version, at}). When failed, `error` holds the structured error (same codes as tool errors, e.g. policy_violation or engine_unavailable). Jobs are volatile: they are not rebuilt from bundles after a catalog rebuild. Read-only. On failure returns an error_envelope (isError=true) with code: not_found (unknown or expired job_id), invalid_argument, internal.",
+  "description": "Return the current state of a background job created by stop_recording (kind process), regenerate / register_context (kind regenerate) or export_minutes (kind export), or prepare_provider_runtime (kind provider_setup, no meeting). `status` is queued / running / succeeded / failed / cancelled. While running, `progress` carries the current stage name and a 0..1 fraction. When succeeded, `result` holds the job output (process / regenerate: {meeting_id, minutes_version, stages, skipped, unresolved_speakers}; export: {destination, ref, minutes_version, at}). When failed, `error` holds the structured error (same codes as tool errors, e.g. policy_violation or engine_unavailable). Jobs are volatile: they are not rebuilt from bundles after a catalog rebuild. Provider setup acceptance IDs and unresolved states are separately persisted in list_providers.runtime.active_setup/last_setup; a missing live job after restart is not proof of completion. Read-only. On failure returns an error_envelope (isError=true) with code: not_found (unknown or expired job_id), invalid_argument, internal.",
   "annotations": {
     "readOnlyHint": true,
     "destructiveHint": false,
@@ -13,7 +13,7 @@
     "properties": {
       "job_id": {
         "$ref": "../defs/common.json#/$defs/job_id",
-        "description": "Job id returned by stop_recording, regenerate, register_context or export_minutes."
+        "description": "Job id returned by stop_recording, regenerate, register_context, export_minutes or prepare_provider_runtime. provider_setup jobs are not associated with a meeting."
       }
     },
     "required": ["job_id"],

@@ -100,9 +100,10 @@ final class RecordingPermissionModelsTests: XCTestCase {
     func testSetupSupportRequiresKnownMajorAndMinimumSemanticVersion() {
         let cases: [(String?, Bool)] = [
             (nil, false), ("1.0.0", false), ("1.0.99", false), ("0.99.99", false),
-            ("1.1.0", true), ("1.1.1", true), ("1.2.0", true), ("1.10.0", true),
-            ("1.1.0-rc.1", false), ("1.1.1-rc.1", true), ("1.2.0-alpha", true),
-            ("2.0.0", false), ("2.1.0", false), ("99.99.99", false),
+            ("1.1.0", false), ("1.1.1", false), ("1.2.0", false), ("1.10.0", false),
+            ("2.0.0", true), ("2.0.1", true), ("2.1.0", true), ("2.10.0", true),
+            ("2.0.0-rc.1", false), ("2.0.1-rc.1", true), ("2.1.0-alpha", true),
+            ("3.0.0", false), ("3.1.0", false), ("99.99.99", false),
         ]
         for (version, supported) in cases {
             XCTAssertEqual(RecordingPermissionContract.supportsSetup(version), supported, version ?? "nil")
@@ -111,10 +112,10 @@ final class RecordingPermissionModelsTests: XCTestCase {
 
     func testMalformedContractVersionsNeverEnableSetup() {
         let versions = [
-            "", "1", "1.1", "1.1.0.0", "v1.1.0", " 1.1.0", "1.1.0\n", "1.1.x",
-            "01.1.0", "1.01.0", "1.1.00", "1.-1.0", "1.1.0-", "1.2.0-alpha..1",
-            "1.2.0-01", "1.2.0-.alpha", "1.2.0-alpha.", "1.2.0-alpha_1", "1.1.0+build.1",
-            "1.999999999999999999999999.0",
+            "", "2", "2.0", "2.0.0.0", "v2.0.0", " 2.0.0", "2.0.0\n", "2.0.x",
+            "02.0.0", "2.00.0", "2.0.00", "2.-1.0", "2.0.0-", "2.1.0-alpha..1",
+            "2.1.0-01", "2.1.0-.alpha", "2.1.0-alpha.", "2.1.0-alpha_1", "2.0.0+build.1",
+            "2.999999999999999999999999.0",
         ]
         for version in versions {
             XCTAssertFalse(RecordingPermissionContract.supportsSetup(version), version)
@@ -139,32 +140,32 @@ final class RecordingPermissionModelsTests: XCTestCase {
     }
 
     func testPermissionSupportRequiresBothVersionAndValidServerIdentity() {
-        XCTAssertTrue(RecordingPermissionContract.supportsSetup("1.1.0"))
-        XCTAssertFalse(RecordingPermissionContract.supportsSetup("1.1.0", serverInstanceID: nil))
-        XCTAssertFalse(RecordingPermissionContract.supportsSetup("1.1.0", serverInstanceID: "invalid"))
-        XCTAssertFalse(RecordingPermissionContract.supportsSetup("1.0.0", serverInstanceID: instanceID))
-        XCTAssertFalse(RecordingPermissionContract.supportsSetup("2.0.0", serverInstanceID: instanceID))
-        XCTAssertTrue(RecordingPermissionContract.supportsSetup("1.1.0", serverInstanceID: instanceID))
+        XCTAssertTrue(RecordingPermissionContract.supportsSetup("2.0.0"))
+        XCTAssertFalse(RecordingPermissionContract.supportsSetup("2.0.0", serverInstanceID: nil))
+        XCTAssertFalse(RecordingPermissionContract.supportsSetup("2.0.0", serverInstanceID: "invalid"))
+        XCTAssertFalse(RecordingPermissionContract.supportsSetup("1.1.0", serverInstanceID: instanceID))
+        XCTAssertFalse(RecordingPermissionContract.supportsSetup("3.0.0", serverInstanceID: instanceID))
+        XCTAssertTrue(RecordingPermissionContract.supportsSetup("2.0.0", serverInstanceID: instanceID))
     }
 
     func testServerInfoRefreshNeverSendsNewInputBeforeFeatureDetection() {
-        let unsupportedVersions: [String?] = [nil, "1.0.0", "2.0.0", "malformed"]
+        let unsupportedVersions: [String?] = [nil, "1.0.0", "1.1.0", "2.0.0-rc.1", "3.0.0", "malformed"]
         for version in unsupportedVersions {
             XCTAssertEqual(
                 RecordingPermissionContract.serverInfoArguments(
                     contractVersion: version, serverInstanceID: instanceID, refreshPermissions: true), [:])
         }
         XCTAssertEqual(
-            RecordingPermissionContract.serverInfoArguments(contractVersion: "1.1.0", refreshPermissions: true), [:])
+            RecordingPermissionContract.serverInfoArguments(contractVersion: "2.0.0", refreshPermissions: true), [:])
         XCTAssertEqual(
             RecordingPermissionContract.serverInfoArguments(
-                contractVersion: "1.1.0", serverInstanceID: "invalid", refreshPermissions: true), [:])
+                contractVersion: "2.0.0", serverInstanceID: "invalid", refreshPermissions: true), [:])
         XCTAssertEqual(
             RecordingPermissionContract.serverInfoArguments(
-                contractVersion: "1.1.0", serverInstanceID: instanceID, refreshPermissions: false), [:])
+                contractVersion: "2.0.0", serverInstanceID: instanceID, refreshPermissions: false), [:])
         XCTAssertEqual(
             RecordingPermissionContract.serverInfoArguments(
-                contractVersion: "1.1.0", serverInstanceID: instanceID, refreshPermissions: true),
+                contractVersion: "2.0.0", serverInstanceID: instanceID, refreshPermissions: true),
             ["refresh_permissions": true])
     }
 

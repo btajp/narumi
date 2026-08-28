@@ -35,6 +35,8 @@ final class RuntimeGuardsTests: XCTestCase {
         let paths = RuntimePaths(dataRoot: root)
         var first: RuntimeLease? = try RuntimeLease(paths: paths)
         XCTAssertNotNil(first)
+        let permissions = try FileManager.default.attributesOfItem(atPath: paths.root.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(permissions?.intValue, 0o700, "TLS bootstrap shares this owner-only runtime directory")
         XCTAssertThrowsError(try RuntimeLease(paths: paths))
         first = nil
         let next = try RuntimeLease(paths: paths)

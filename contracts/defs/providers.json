@@ -1,0 +1,368 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "narumi:defs/providers.json",
+  "title": "narumi providers contract definitions",
+  "$defs": {
+    "provider_id": {
+      "type": "string",
+      "enum": [
+        "anthropic-api",
+        "claude-agent-sdk",
+        "ollama"
+      ],
+      "description": "Provider adapters supported in this development contract. Codex and OpenAI adapters are not available yet."
+    },
+    "provider_role": {
+      "type": "string",
+      "enum": [
+        "transcription",
+        "diarization",
+        "llm"
+      ]
+    },
+    "provider_auth_method": {
+      "type": "string",
+      "enum": [
+        "api_key",
+        "none"
+      ],
+      "description": "Only approved authentication methods. Claude subscription login is not supported."
+    },
+    "provider_availability": {
+      "type": "string",
+      "enum": [
+        "available",
+        "not_prepared",
+        "unverified",
+        "authentication_required",
+        "unsupported",
+        "retired"
+      ]
+    },
+    "provider_reason": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 500,
+      "description": "Trusted public reason only; never an upstream exception, credential, local path or raw response."
+    },
+    "provider_resource_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9._-]{0,95}$",
+      "description": "Identifier from the provider's approved distribution catalog; not a URL, path or command."
+    },
+    "provider_setup_state": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "unknown"
+      ]
+    },
+    "provider_setup_operation": {
+      "type": "object",
+      "required": [
+        "job_id",
+        "start_request_id",
+        "resource_id",
+        "state"
+      ],
+      "properties": {
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "start_request_id": {
+          "$ref": "#/$defs/request_id"
+        },
+        "resource_id": {
+          "$ref": "#/$defs/provider_resource_id"
+        },
+        "state": {
+          "$ref": "#/$defs/provider_setup_state"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Non-secret lookup of an accepted setup operation. unknown preserves an unresolved operation across a restart."
+    },
+    "provider_runtime_resource": {
+      "type": "object",
+      "required": [
+        "resource_id",
+        "display_name",
+        "kind",
+        "version",
+        "source",
+        "download_host",
+        "sha256",
+        "license"
+      ],
+      "properties": {
+        "resource_id": {
+          "$ref": "#/$defs/provider_resource_id"
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "runtime",
+            "model"
+          ]
+        },
+        "version": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "bundled",
+            "installed",
+            "approved_download"
+          ]
+        },
+        "download_host": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 253,
+          "description": "Approved host shown before download; null for a bundled resource. No arbitrary download URL is accepted."
+        },
+        "sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "license": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        }
+      },
+      "additionalProperties": false,
+      "description": "Fixed catalog resource for an installed-runtime check, bundled preparation or approved download. Unknown installed-runtime metadata is null; downloads require a known digest and destination.",
+      "allOf": [
+        {
+          "if": { "properties": { "source": { "const": "approved_download" } }, "required": ["source"] },
+          "then": { "properties": { "sha256": { "type": "string" }, "download_host": { "type": "string" }, "version": { "type": "string" } } },
+          "else": { "properties": { "download_host": { "type": "null" } } }
+        }
+      ]
+    },
+    "provider_runtime": {
+      "type": "object",
+      "required": [
+        "state",
+        "version",
+        "catalog_revision",
+        "resources",
+        "active_setup",
+        "last_setup"
+      ],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "ready",
+            "not_prepared",
+            "preparing",
+            "unavailable",
+            "failed",
+            "unknown"
+          ]
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "catalog_revision": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/provider_runtime_resource"
+          }
+        },
+        "active_setup": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/provider_setup_operation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_setup": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/provider_setup_operation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "provider_descriptor": {
+      "type": "object",
+      "required": [
+        "provider_id",
+        "display_name",
+        "roles",
+        "auth_methods",
+        "availability",
+        "reason",
+        "runtime"
+      ],
+      "properties": {
+        "provider_id": {
+          "$ref": "#/$defs/provider_id"
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/provider_role"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "auth_methods": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/provider_auth_method"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "availability": {
+          "$ref": "#/$defs/provider_availability"
+        },
+        "reason": {
+          "$ref": "#/$defs/provider_reason"
+        },
+        "runtime": {
+          "$ref": "#/$defs/provider_runtime"
+        }
+      },
+      "additionalProperties": false,
+      "description": "An adapter's installed capabilities, not a claim that a connection or selected model can generate.",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "provider_id": {
+                "const": "ollama"
+              }
+            },
+            "required": [
+              "provider_id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "auth_methods": {
+                "const": [
+                  "none"
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "auth_methods": {
+                "const": [
+                  "api_key"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "provider_workflow_capabilities": {
+      "type": "object",
+      "required": [
+        "provider_connections",
+        "provider_models",
+        "stage_model_selection",
+        "ensemble_generation"
+      ],
+      "properties": {
+        "provider_connections": {
+          "type": "boolean",
+          "description": "Connection configuration, authentication and runtime setup tools are implemented."
+        },
+        "provider_models": {
+          "type": "boolean",
+          "description": "Model discovery and capability metadata are implemented, independently of stage selection."
+        },
+        "stage_model_selection": {
+          "type": "boolean",
+          "description": "Per-stage model selection and execution are implemented."
+        },
+        "ensemble_generation": {
+          "type": "boolean",
+          "description": "Independent drafts followed by synthesis are implemented."
+        }
+      },
+      "additionalProperties": false
+    },
+    "secure_transport_metadata": {
+      "type": "object",
+      "required": [
+        "mode",
+        "tls_required",
+        "client_auth_required"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "pinned_tls",
+            "stdio",
+            "unavailable"
+          ]
+        },
+        "tls_required": {
+          "type": "boolean",
+          "description": "TLS certificate pin verification is required for the network transport before sending any token or tool arguments."
+        },
+        "client_auth_required": {
+          "type": "boolean",
+          "description": "Authenticated local client identity is required for the network transport. Neither this metadata nor server_instance_id authenticates the server."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Public transport requirements only. Certificate pins come from the owner-only bootstrap, and client tokens come from Keychain, never this response."
+    }
+  }
+}

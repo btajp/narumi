@@ -1,3 +1,5 @@
+import builtins
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -86,15 +88,16 @@ def test_registry_names_and_profiles():
     assert provider_profile("none").data_destination == "local"
     assert provider_profile("fake").cost_class == "local"
     assert provider_profile("claude-agent-sdk") == CapabilityProfile(
-        vision=True,
+        vision=False,
         context_window=200_000,
-        cost_class="subscription",
+        cost_class="api",
         data_destination="anthropic",
-        tool_use=True,
+        tool_use=False,
         max_output_tokens=8192,
     )
     assert provider_profile("anthropic-api").cost_class == "api"
     assert provider_profile("anthropic-api").data_destination == "anthropic"
+    assert provider_profile("anthropic-api").tool_use is False
     assert provider_profile("ollama").data_destination == "local"
     with pytest.raises(NotFoundError):
         provider_profile("nope")
@@ -107,6 +110,20 @@ def test_available_providers_always_has_local_ones():
     assert names[:2] == ["none", "fake"]
     assert "ollama" in names
     assert set(names) <= set(provider_names())
+
+
+def test_anthropic_registry_does_not_require_or_import_generation_sdk(monkeypatch):
+    original_import = builtins.__import__
+
+    def without_sdk(name, *args, **kwargs):
+        assert not name.startswith("anthropic"), "generation SDK was imported"
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_sdk)
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fixture-registry-key-not-real")
+    assert "anthropic-api" in available_providers()
+    assert get_provider("anthropic-api").name == "anthropic-api"
 
 
 def test_get_provider_none_and_fake():
@@ -137,22 +154,29 @@ def test_select_provider_enforces_policy_without_instantiating(monkeypatch):
         select_provider(MeetingConfig(llm_provider="anthropic-api", external_send_policy="api_ok"))
 
 
-def test_select_provider_local_defaults():
+def test_select_provider_local_defaults(monkeypatch):
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
     assert select_provider(MeetingConfig()).name == "none"
     assert select_provider(MeetingConfig(llm_provider="fake")).name == "fake"
     assert select_provider(MeetingConfig(llm_provider="ollama")).name == "ollama"
 
 
-@pytest.mark.skipif("claude-agent-sdk" not in available_providers(), reason="sdk not installed")
-def test_claude_agent_sdk_provider_rejects_images(tmp_path: Path):
+def test_claude_agent_sdk_requires_api_policy_and_keeps_unverified_runtime_gated(tmp_path: Path):
+    with pytest.raises(PolicyViolationError):
+        select_provider(
+            MeetingConfig(llm_provider="claude-agent-sdk", external_send_policy="subscription_ok")
+        )
     provider = select_provider(
-        MeetingConfig(llm_provider="claude-agent-sdk", external_send_policy="subscription_ok")
+        MeetingConfig(llm_provider="claude-agent-sdk", external_send_policy="api_ok")
     )
     assert isinstance(provider, ClaudeAgentSDKProvider)
     image = tmp_path / "x.png"
     image.write_bytes(b"")
-    with pytest.raises(InvalidArgumentError):
+    with pytest.raises(EngineUnavailableError) as failure:
         provider.complete("describe", images=[image])
+    assert failure.value.details["reason"] == "sdk_authentication_and_history_isolation_unverified"
+    with pytest.raises(EngineUnavailableError):
+        provider.complete("Do not inherit user authentication or persist this prompt")
 
 
 # ------------------------------------------------------------------ fake
@@ -188,11 +212,43 @@ def test_fake_provider_ignores_headers_inside_data_blocks():
 
 
 # ------------------------------------------------------------------ ollama
+class FakeOllamaHTTP:
+    def __init__(self, *, remote=False, capabilities=None, failure=None):
+        self.remote = remote
+        self.capabilities = capabilities if capabilities is not None else ["completion", "vision"]
+        self.failure = failure
+        self.calls = []
+
+    def request(self, method, url, **kwargs):
+        self.calls.append({"method": method, "url": url, **kwargs})
+        if self.failure:
+            raise self.failure
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "model": "fixture:1",
+                        "name": "fixture:1",
+                        "digest": "a" * 64,
+                        "size": 1200,
+                        "details": {"format": "gguf"},
+                        "remote_host": "https://remote.example" if self.remote else "",
+                    }
+                ]
+            }
+        if url.endswith("/api/show"):
+            return {"details": {"format": "gguf"}, "capabilities": self.capabilities}
+        assert url.endswith("/api/generate"), "unexpected endpoint"
+        return {"response": " Fixture completion "}
+
+
 def test_ollama_connection_error_is_engine_unavailable():
-    provider = OllamaProvider(host="http://127.0.0.1:9", timeout=1.0)
+    http = FakeOllamaHTTP(failure=EngineUnavailableError("fixture connection failure"))
+    provider = OllamaProvider(model="fixture:1", host="http://127.0.0.1:11434", http=http)
     with pytest.raises(EngineUnavailableError) as info:
         provider.complete("hello")
     assert info.value.details["provider"] == "ollama"
+    assert len(http.calls) == 1
 
 
 def test_ollama_rejects_invalid_host(monkeypatch):
@@ -200,6 +256,54 @@ def test_ollama_rejects_invalid_host(monkeypatch):
     with pytest.raises(InvalidArgumentError):
         OllamaProvider()
     monkeypatch.setenv("OLLAMA_HOST", "http://localhost:11434/")
+    with pytest.raises(InvalidArgumentError):
+        OllamaProvider()
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434/")
     monkeypatch.setenv("NARUMI_OLLAMA_MODEL", "m:1")
     provider = OllamaProvider()
-    assert provider.host == "http://localhost:11434" and provider.model == "m:1"
+    assert provider.host == "http://127.0.0.1:11434" and provider.model == "m:1"
+
+
+def test_ollama_verifies_local_model_before_sending_prompt_and_pins_source(tmp_path: Path):
+    http = FakeOllamaHTTP()
+    provider = OllamaProvider(model="fixture:1", host="http://127.0.0.1:11434", http=http)
+    image = tmp_path / "image.png"
+    image.write_bytes(b"fixture image")
+    assert provider.complete("private prompt", system="system", images=[image], max_tokens=20) == (
+        "Fixture completion"
+    )
+    assert http.calls[0]["payload"] is None
+    assert http.calls[1]["payload"] == {"model": "fixture:1:local"}
+    assert http.calls[2]["payload"] == {
+        "model": "fixture:1:local",
+        "prompt": "private prompt",
+        "stream": False,
+        "system": "system",
+        "images": ["Zml4dHVyZSBpbWFnZQ=="],
+        "options": {"num_predict": 20},
+    }
+    assert all("private prompt" not in str(call) for call in http.calls[:2])
+
+
+def test_ollama_remote_alias_never_receives_prompt():
+    http = FakeOllamaHTTP(remote=True)
+    provider = OllamaProvider(model="fixture:1", host="http://127.0.0.1:11434", http=http)
+    with pytest.raises(EngineUnavailableError):
+        provider.complete("private prompt")
+    assert len(http.calls) == 1 and "private prompt" not in str(http.calls)
+
+
+def test_ollama_cloud_selector_fails_before_any_request():
+    http = FakeOllamaHTTP()
+    provider = OllamaProvider(model="fixture:cloud", host="http://127.0.0.1:11434", http=http)
+    with pytest.raises(EngineUnavailableError):
+        provider.complete("private prompt")
+    assert not http.calls
+
+
+def test_ollama_unsupported_images_are_rejected_before_reading_or_generation(tmp_path: Path):
+    http = FakeOllamaHTTP(capabilities=["completion"])
+    provider = OllamaProvider(model="fixture:1", host="http://127.0.0.1:11434", http=http)
+    with pytest.raises(InvalidArgumentError):
+        provider.complete("private prompt", images=[tmp_path / "does-not-exist.png"])
+    assert len(http.calls) == 2

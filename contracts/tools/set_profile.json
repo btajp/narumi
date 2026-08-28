@@ -65,7 +65,7 @@
           "transcription_engine": "mlx-whisper",
           "diarization_engine": "pyannote",
           "llm_provider": "claude-agent-sdk",
-          "external_send_policy": "subscription_ok",
+          "external_send_policy": "api_ok",
           "language": "ja",
           "self_name": "岡村"
         },
@@ -88,7 +88,7 @@
             "transcription_engine": "mlx-whisper",
             "diarization_engine": "pyannote",
             "llm_provider": "claude-agent-sdk",
-            "external_send_policy": "subscription_ok",
+            "external_send_policy": "api_ok",
             "language": "ja",
             "self_name": "岡村"
           },

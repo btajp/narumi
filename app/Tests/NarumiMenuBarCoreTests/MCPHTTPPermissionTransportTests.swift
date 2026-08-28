@@ -20,7 +20,7 @@ final class MCPHTTPPermissionTransportTests: XCTestCase {
         for tool in ToolCatalog.allUsed {
             let request = try rpcRequest(tool: tool)
             let plan = try MCPHTTPTransport.requestPlan(for: request)
-            let expectedRoute: MCPHTTPTransport.RequestRoute = tool == ToolCatalog.setGaiaConnection
+            let expectedRoute: MCPHTTPTransport.RequestRoute = MCPHTTPTransport.isConfidentialTool(tool)
                 ? .confidential : (tool == ToolCatalog.configureRecordingPermission ? .permissionSetup : .ordinary)
             XCTAssertEqual(plan.route, expectedRoute, tool)
             XCTAssertEqual(plan.request.timeoutInterval, tool == ToolCatalog.configureRecordingPermission ? 150 : 30)
@@ -51,7 +51,7 @@ final class MCPHTTPPermissionTransportTests: XCTestCase {
 
     func testExplicitSecretProtectionTakesPriorityOverPermissionRouting() throws {
         var request = try rpcRequest(tool: ToolCatalog.configureRecordingPermission)
-        request.url = URL(string: "http://localhost:8765/mcp")
+        request.url = URL(string: "https://127.0.0.1:8765/mcp")
         request.httpShouldHandleCookies = true
         let plan = try MCPHTTPTransport.requestPlan(for: request, protectingSecrets: true)
         XCTAssertEqual(plan.route, .confidential)
@@ -59,12 +59,12 @@ final class MCPHTTPPermissionTransportTests: XCTestCase {
         XCTAssertFalse(plan.request.httpShouldHandleCookies)
         XCTAssertEqual(plan.request.cachePolicy, .reloadIgnoringLocalCacheData)
         XCTAssertEqual(plan.request.timeoutInterval, 30)
-        request.url = URL(string: "http://example.invalid/mcp")
+        request.url = URL(string: "https://example.invalid:8765/mcp")
         XCTAssertThrowsError(try MCPHTTPTransport.requestPlan(for: request, protectingSecrets: true))
     }
 
     private func rpcRequest(tool: String) throws -> URLRequest {
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:8765/mcp")!, timeoutInterval: 30)
+        var request = URLRequest(url: URL(string: "https://127.0.0.1:8765/mcp")!, timeoutInterval: 30)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("permission-fixture", forHTTPHeaderField: "Mcp-Session-Id")

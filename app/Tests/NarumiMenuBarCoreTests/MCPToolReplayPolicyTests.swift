@@ -4,10 +4,17 @@ import XCTest
 @testable import NarumiMenuBarCore
 
 final class MCPToolReplayPolicyTests: XCTestCase {
-    func testPermissionSetupAndFreshProbeCannotRetrySession() {
-        for tool in ToolCatalog.allUsed {
+    func testOnlyKnownLocalReadsCanRetrySession() {
+        let reads: Set<String> = [
+            ToolCatalog.getServerInfo, ToolCatalog.getRecordingStatus, ToolCatalog.listMeetings,
+            ToolCatalog.searchTranscripts, ToolCatalog.getMeeting, ToolCatalog.getMinutes,
+            ToolCatalog.getTranscript, ToolCatalog.listExportDestinations, ToolCatalog.getJobStatus,
+            ToolCatalog.listProfiles, ToolCatalog.getProfile, ToolCatalog.getGaiaConnection,
+            ToolCatalog.listProviders, ToolCatalog.listProviderConnections, ToolCatalog.getProviderAuthStatus,
+        ]
+        for tool in ToolCatalog.allUsed + ["future_unknown_tool", "get_unknown_provider_data"] {
             for refreshing in [false, true] {
-                let expected = tool != ToolCatalog.configureRecordingPermission
+                let expected = reads.contains(tool)
                     && (tool != ToolCatalog.getServerInfo || !refreshing)
                 XCTAssertEqual(
                     MCPToolReplayPolicy.allowsSessionRetry(tool: tool, refreshingPermissions: refreshing),
@@ -22,6 +29,8 @@ final class MCPToolReplayPolicyTests: XCTestCase {
             (ToolCatalog.regenerate, false, false, true),
             (ToolCatalog.exportMinutes, nil, nil, true),
             (ToolCatalog.exportMinutes, false, false, true),
+            (ToolCatalog.prepareProviderRuntime, nil, nil, true),
+            (ToolCatalog.prepareProviderRuntime, false, false, true),
             (ToolCatalog.importRecording, nil, nil, true),
             (ToolCatalog.importRecording, true, false, true),
             (ToolCatalog.importRecording, false, true, false),
@@ -43,7 +52,7 @@ final class MCPToolReplayPolicyTests: XCTestCase {
     func testNonJobToolsNeverEnterRecoveryRegardlessOfFlags() {
         let jobTools: Set<String> = [
             ToolCatalog.regenerate, ToolCatalog.exportMinutes, ToolCatalog.importRecording,
-            ToolCatalog.stopRecording, ToolCatalog.registerContext,
+            ToolCatalog.stopRecording, ToolCatalog.registerContext, ToolCatalog.prepareProviderRuntime,
         ]
         let flags: [Bool?] = [nil, false, true]
         for tool in ToolCatalog.allUsed + ["future_unknown_tool"] where !jobTools.contains(tool) {
@@ -74,7 +83,7 @@ final class MCPToolReplayPolicyTests: XCTestCase {
     func testFreshPermissionProbeIsNotReplayedAfter404OrStatusTicks() {
         var client = FakeClient()
         let arguments = RecordingPermissionContract.serverInfoArguments(
-            contractVersion: "1.1.0", serverInstanceID: "00000000-0000-4000-8000-000000000001",
+            contractVersion: "2.0.0", serverInstanceID: "00000000-0000-4000-8000-000000000001",
             refreshPermissions: true)
         client.call(tool: ToolCatalog.getServerInfo, failure: .http404, arguments: arguments)
         for _ in 0..<100 {
@@ -84,6 +93,34 @@ final class MCPToolReplayPolicyTests: XCTestCase {
         XCTAssertEqual(client.sessionRetries, 0)
         XCTAssertEqual(client.pendingJobs, 0)
         XCTAssertEqual(client.sentArguments, [["refresh_permissions": true]])
+    }
+
+    func testProviderMutationsRefreshTestsAndSetupNeverAutomaticallyResend() {
+        let tools = [
+            ToolCatalog.setProviderConnection, ToolCatalog.deleteProviderConnection,
+            ToolCatalog.authenticateProviderConnection, ToolCatalog.testProviderConnection,
+            ToolCatalog.listProviderModels, ToolCatalog.prepareProviderRuntime, ToolCatalog.testGaiaConnection,
+        ]
+        for tool in tools {
+            for failure in FakeClient.Failure.allCases {
+                var client = FakeClient()
+                client.call(tool: tool, failure: failure)
+                for _ in 0..<100 { client.statusTick() }
+                XCTAssertEqual(client.sends, 1, tool)
+                XCTAssertEqual(client.sessionRetries, 0, tool)
+                XCTAssertEqual(client.pendingJobs, tool == ToolCatalog.prepareProviderRuntime ? 1 : 0, tool)
+            }
+        }
+    }
+
+    func testReadOnlyProviderDiscoveryKeepsSessionRetry() {
+        for tool in [ToolCatalog.listProviders, ToolCatalog.listProviderConnections, ToolCatalog.getProviderAuthStatus] {
+            var client = FakeClient()
+            client.call(tool: tool, failure: .http404)
+            XCTAssertEqual(client.sends, 2, tool)
+            XCTAssertEqual(client.sessionRetries, 1, tool)
+            XCTAssertEqual(client.pendingJobs, 0, tool)
+        }
     }
 
     func testNextEmptyProbeAndDiscoveredLegacySessionNeverResendRefreshInput() {

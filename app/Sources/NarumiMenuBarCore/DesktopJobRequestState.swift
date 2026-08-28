@@ -16,6 +16,7 @@ public struct DesktopJobRequestState: Equatable, Sendable {
         }
 
         public var canAutomaticallyRetry: Bool {
+            if tool == ToolCatalog.prepareProviderRuntime { return false }
             guard tool == ToolCatalog.exportMinutes else { return true }
             // The server caches successes, not failures. A synchronous exporter may
             // have written remotely before failing; only queued exports are replayed.
@@ -91,6 +92,19 @@ public struct DesktopJobRequestState: Equatable, Sendable {
         return true
     }
 
+    /// A read-only provider lookup can recover an accepted setup without rerunning it.
+    @discardableResult
+    public mutating func confirmProviderSetup(requestID: String, providerID: String, resourceID: String) -> Bool {
+        guard let index = pending.firstIndex(where: {
+            guard $0.request.requestID == requestID, $0.request.tool == ToolCatalog.prepareProviderRuntime,
+                let arguments = try? JSONSerialization.jsonObject(with: $0.request.arguments) as? [String: Any]
+            else { return false }
+            return arguments["provider_id"] as? String == providerID && arguments["resource_id"] as? String == resourceID
+        }) else { return false }
+        pending.remove(at: index)
+        return true
+    }
+
     /// Oldest unresolved request eligible for retry, in original registration order.
     /// Each request has at most one in-flight attempt; retry scheduling is external.
     public mutating func beginRetry() -> (request: Request, token: Token)? {
@@ -121,6 +135,9 @@ public struct DesktopJobRequestState: Equatable, Sendable {
     private static func isPreflightRejection(_ code: String?, tool: String) -> Bool {
         guard let code else { return false }
         switch tool {
+        case ToolCatalog.prepareProviderRuntime:
+            return ["invalid_argument", "not_found", "configuration_conflict", "busy",
+                "engine_unavailable", "authentication_required"].contains(code)
         case ToolCatalog.regenerate:
             return ["invalid_argument", "not_found", "busy", "scope_denied", "policy_violation",
                 "engine_unavailable"].contains(code)

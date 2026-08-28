@@ -1,0 +1,115 @@
+{
+  "name": "list_providers",
+  "title": "List providers",
+  "description": "List supported provider adapters, approved authentication methods and runtime readiness without contacting any provider. Only verified adapter capabilities are available; an installed provider name does not imply a ready connection, usable model or working generation. active_setup and last_setup preserve public job and start request IDs for setup recovery. On failure returns an error_envelope (isError=true) with code: authentication_required, internal. All provider operations require the authenticated resident server; no implicit in-process or unauthenticated HTTP fallback is allowed.",
+  "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "providers": {
+        "type": "array",
+        "items": {
+          "$ref": "../defs/providers.json#/$defs/provider_descriptor"
+        }
+      }
+    },
+    "required": [
+      "providers"
+    ],
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {},
+      {}
+    ],
+    "output": [
+      {
+        "providers": [
+          {
+            "provider_id": "anthropic-api",
+            "display_name": "Anthropic API",
+            "roles": [
+              "llm"
+            ],
+            "auth_methods": [
+              "api_key"
+            ],
+            "availability": "unverified",
+            "reason": "runtime_verification_pending",
+            "runtime": {
+              "state": "not_prepared",
+              "version": null,
+              "catalog_revision": "bundled-v1",
+              "resources": [],
+              "active_setup": null,
+              "last_setup": null
+            }
+          },
+          {
+            "provider_id": "claude-agent-sdk",
+            "display_name": "Claude Agent SDK",
+            "roles": [
+              "llm"
+            ],
+            "auth_methods": [
+              "api_key"
+            ],
+            "availability": "not_prepared",
+            "reason": "runtime_preparation_required",
+            "runtime": {
+              "state": "not_prepared",
+              "version": null,
+              "catalog_revision": "bundled-v1",
+              "resources": [
+                {
+                  "resource_id": "claude-sdk",
+                  "display_name": "Claude SDK runtime check",
+                  "kind": "runtime",
+                  "version": null,
+                  "source": "installed",
+                  "download_host": null,
+                  "sha256": null,
+                  "license": "Package license metadata"
+                }
+              ],
+              "active_setup": null,
+              "last_setup": null
+            }
+          },
+          {
+            "provider_id": "ollama",
+            "display_name": "Ollama",
+            "roles": [
+              "llm"
+            ],
+            "auth_methods": [
+              "none"
+            ],
+            "availability": "unverified",
+            "reason": "local_server_verification_required",
+            "runtime": {
+              "state": "not_prepared",
+              "version": null,
+              "catalog_revision": "bundled-v1",
+              "resources": [],
+              "active_setup": null,
+              "last_setup": null
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

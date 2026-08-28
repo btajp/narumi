@@ -1,0 +1,77 @@
+{
+  "name": "list_provider_connections",
+  "title": "List provider connections",
+  "description": "List saved non-secret provider connections, their configuration revisions and independent authentication, model-catalog and generation states. Disabled connections remain visible. No API key, token, digest, Keychain identifier, account history or external provider response is returned. This does not contact providers or read ambient credentials. On failure returns an error_envelope (isError=true) with code: authentication_required, internal. All provider operations require the authenticated resident server; no implicit in-process or unauthenticated HTTP fallback is allowed.",
+  "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "connections": {
+        "type": "array",
+        "items": {
+          "$ref": "../defs/provider_connections.json#/$defs/provider_connection"
+        }
+      }
+    },
+    "required": [
+      "connections"
+    ],
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {},
+      {}
+    ],
+    "output": [
+      {
+        "connections": [
+          {
+            "connection_id": "conn-0123456789ab",
+            "revision": 1,
+            "provider_id": "anthropic-api",
+            "display_name": "議事録 API",
+            "enabled": true,
+            "endpoint": "https://api.anthropic.com",
+            "auth_method": "api_key",
+            "credential_present": false,
+            "auth_state": "unconfigured",
+            "catalog_state": "unfetched",
+            "checked_at": null,
+            "active_auth": null,
+            "last_generation_state": "never"
+          },
+          {
+            "connection_id": "conn-abcdef012345",
+            "revision": 1,
+            "provider_id": "ollama",
+            "display_name": "ローカル Ollama",
+            "enabled": true,
+            "endpoint": "http://127.0.0.1:11434",
+            "auth_method": "none",
+            "credential_present": false,
+            "auth_state": "unverified",
+            "catalog_state": "unfetched",
+            "checked_at": null,
+            "active_auth": null,
+            "last_generation_state": "never"
+          }
+        ]
+      },
+      {
+        "connections": []
+      }
+    ]
+  }
+}

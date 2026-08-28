@@ -117,7 +117,7 @@ def test_real_hardened_signatures_embed_recording_entitlements(build_fixture):
         timeout=30,
     )
     assert compile_result.returncode == 0, compile_result.stderr
-    for name in ("NarumiMenuBar", "narumi-recorder"):
+    for name in ("NarumiMenuBar", "narumi-recorder", "narumi-keychain"):
         shutil.copyfile(executable, project / "app/.build/release" / name)
     # The synthetic Sparkle fixture is not Mach-O; fake tests cover its signing calls.
     (project / "app/.build/artifacts").rename(project / "unused-artifacts")

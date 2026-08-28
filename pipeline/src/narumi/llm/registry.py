@@ -31,7 +31,6 @@ _FACTORIES: dict[str, Callable[[], LLMProvider]] = {
 
 _IMPORT_REQUIREMENTS: dict[str, str] = {
     claude_agent.PROVIDER_NAME: "claude_agent_sdk",
-    anthropic_api.PROVIDER_NAME: "anthropic",
 }
 
 

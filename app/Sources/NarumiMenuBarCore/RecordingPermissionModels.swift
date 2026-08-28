@@ -53,7 +53,7 @@ public struct ConfigureRecordingPermissionResponse: Codable, Equatable, Sendable
     }
 }
 
-/// Feature detection for the additive permission setup contract, without probing a mutation.
+/// Contract v2 keeps permission setup but refuses v1 downgrade, including otherwise similar tools.
 public enum RecordingPermissionContract {
     public static func isValidServerInstanceID(_ serverInstanceID: String?) -> Bool {
         guard let serverInstanceID else { return false }
@@ -77,7 +77,7 @@ public enum RecordingPermissionContract {
         let components = core.split(separator: ".", omittingEmptySubsequences: false)
         guard components.count == 3,
             components.allSatisfy(isVersionNumber),
-            let major = Int(components[0]), major == 1,
+            let major = Int(components[0]), major == 2,
             let minor = Int(components[1]),
             let patch = Int(components[2])
         else { return false }
@@ -86,8 +86,8 @@ public enum RecordingPermissionContract {
             let identifiers = release[1].split(separator: ".", omittingEmptySubsequences: false)
             guard identifiers.allSatisfy(isPrereleaseIdentifier) else { return false }
         }
-        // A 1.1.0 prerelease is still older than the first supported stable contract.
-        return minor > 1 || (minor == 1 && (patch > 0 || release.count == 1))
+        // A 2.0.0 prerelease is older than the first authenticated resident-server contract.
+        return minor > 0 || patch > 0 || release.count == 1
     }
 
     public static func supportsSetup(_ contractVersion: String?, serverInstanceID: String?) -> Bool {

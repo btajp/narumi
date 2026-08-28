@@ -1,0 +1,265 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "narumi:defs/provider_connections.json",
+  "title": "narumi provider_connections contract definitions",
+  "$defs": {
+    "provider_connection_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^conn-[0-9a-f]{12,32}$",
+      "description": "Server-issued stable provider connection ID."
+    },
+    "provider_connection_revision": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Monotonic connection version used for compare-and-set updates."
+    },
+    "provider_auth_operation_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^auth-[0-9a-f]{12,32}$",
+      "description": "Server-issued authentication operation ID."
+    },
+    "provider_server_instance_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "provider_auth_operation_state": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "unknown"
+      ]
+    },
+    "provider_auth_state": {
+      "type": "string",
+      "enum": [
+        "unconfigured",
+        "unverified",
+        "authenticating",
+        "authenticated",
+        "failed",
+        "unknown"
+      ]
+    },
+    "provider_catalog_state": {
+      "type": "string",
+      "enum": [
+        "unfetched",
+        "ready",
+        "stale",
+        "failed",
+        "authentication_required"
+      ]
+    },
+    "provider_active_auth": {
+      "type": "object",
+      "required": [
+        "operation_id",
+        "start_request_id",
+        "server_instance_id",
+        "state"
+      ],
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/provider_auth_operation_id"
+        },
+        "start_request_id": {
+          "$ref": "#/$defs/request_id"
+        },
+        "server_instance_id": {
+          "$ref": "#/$defs/provider_server_instance_id"
+        },
+        "state": {
+          "$ref": "#/$defs/provider_auth_operation_state"
+        }
+      },
+      "additionalProperties": false,
+      "description": "The unresolved authentication operation, or null on the connection when none is active."
+    },
+    "provider_auth_operation": {
+      "type": "object",
+      "required": [
+        "operation_id",
+        "connection_id",
+        "connection_revision",
+        "server_instance_id",
+        "start_request_id",
+        "action",
+        "state",
+        "authorization_url",
+        "reason",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/provider_auth_operation_id"
+        },
+        "connection_id": {
+          "$ref": "#/$defs/provider_connection_id"
+        },
+        "connection_revision": {
+          "$ref": "#/$defs/provider_connection_revision"
+        },
+        "server_instance_id": {
+          "$ref": "#/$defs/provider_server_instance_id"
+        },
+        "start_request_id": {
+          "$ref": "#/$defs/request_id"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "start",
+            "cancel",
+            "logout"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/provider_auth_operation_state"
+        },
+        "authorization_url": {
+          "type": "null",
+          "description": "PR1 supports API keys and unauthenticated local Ollama only; no browser login URL is issued."
+        },
+        "reason": {
+          "$ref": "#/$defs/provider_reason"
+        },
+        "created_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Persisted public authentication operation. Starting again is never an implicit recovery action; query by the original start_request_id."
+    },
+    "provider_connection": {
+      "type": "object",
+      "required": [
+        "connection_id",
+        "revision",
+        "provider_id",
+        "display_name",
+        "enabled",
+        "endpoint",
+        "auth_method",
+        "credential_present",
+        "auth_state",
+        "catalog_state",
+        "checked_at",
+        "active_auth",
+        "last_generation_state"
+      ],
+      "properties": {
+        "connection_id": {
+          "$ref": "#/$defs/provider_connection_id"
+        },
+        "revision": {
+          "$ref": "#/$defs/provider_connection_revision"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/provider_id"
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "endpoint": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 2048,
+          "description": "Non-secret, validated destination. Official Anthropic endpoints are fixed; Ollama is restricted to loopback."
+        },
+        "auth_method": {
+          "$ref": "#/$defs/provider_auth_method"
+        },
+        "credential_present": {
+          "type": "boolean",
+          "description": "Presence only; no key, token, digest or internal SecretStore identifier is exposed."
+        },
+        "auth_state": {
+          "$ref": "#/$defs/provider_auth_state"
+        },
+        "catalog_state": {
+          "$ref": "#/$defs/provider_catalog_state"
+        },
+        "checked_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "active_auth": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/provider_active_auth"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_generation_state": {
+          "type": "string",
+          "enum": [
+            "never",
+            "succeeded",
+            "failed",
+            "cancelled",
+            "unknown"
+          ],
+          "description": "Generation outcome is independent of metadata connectivity and is never marked successful by a connection test."
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "provider_id": {
+                "const": "ollama"
+              }
+            },
+            "required": [
+              "provider_id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "auth_method": {
+                "const": "none"
+              },
+              "credential_present": {
+                "const": false
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "auth_method": {
+                "const": "api_key"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

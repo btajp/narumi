@@ -4,7 +4,7 @@ import XCTest
 
 final class ServerReadinessTests: XCTestCase {
     private let identity = BundledServerIdentity(
-        serverVersion: "2.0.0", contractVersion: "1.0.0",
+        serverVersion: "2.0.0", contractVersion: "2.0.0",
         recorder: URL(fileURLWithPath: "/Applications/narumi.app/Contents/MacOS/narumi-recorder"),
         contractsDirectory: URL(fileURLWithPath: "/Applications/narumi.app/Contents/Resources/runtime/contracts"),
         dataRoot: URL(fileURLWithPath: "/Users/tester/Library/Application Support/narumi"))
@@ -12,7 +12,10 @@ final class ServerReadinessTests: XCTestCase {
     private func response() throws -> ServerInfo {
         try JSONDecoder().decode(ServerInfo.self, from: Data("""
             {
-              "name": "narumi", "server_version": "2.0.0", "contract_version": "1.0.0",
+              "name": "narumi", "server_version": "2.0.0", "contract_version": "2.0.0",
+              "secure_transport": {
+                "mode": "pinned_tls", "tls_required": true, "client_auth_required": true
+              },
               "capabilities": {
                 "recording": false, "transports": ["streamable-http"],
                 "transcription_engines": ["fake"], "diarization_engines": ["none"],
@@ -38,7 +41,7 @@ final class ServerReadinessTests: XCTestCase {
         let mutations: [(String, (inout ServerInfo) -> Void)] = [
             ("name", { $0.name = "other" }),
             ("server_version", { $0.serverVersion = "1.0.0" }),
-            ("contract_version", { $0.contractVersion = "0.9.0" }),
+            ("contract_version", { $0.contractVersion = "2.1.0" }),
             ("recorder_path", { $0.diagnostics.recorderPath = nil }),
             ("recorder_path", { $0.diagnostics.recorderPath = "/old/dist/narumi.app/Contents/MacOS/narumi-recorder" }),
             ("recorder_path", { $0.diagnostics.recorderPath = "narumi-recorder" }),
@@ -50,6 +53,36 @@ final class ServerReadinessTests: XCTestCase {
             mutate(&info)
             XCTAssertThrowsError(try identity.validate(info)) { error in
                 XCTAssertEqual((error as? BundledServerIdentity.Mismatch)?.field, field)
+            }
+        }
+    }
+
+    func testUnsupportedContractCannotBeAdoptedEvenWhenBundleVersionMatches() throws {
+        for version in ["1.0.0", "1.1.0", "2.0.0-rc.1", "3.0.0", "malformed"] {
+            var info = try response()
+            info.contractVersion = version
+            var expected = identity
+            expected.contractVersion = version
+            XCTAssertThrowsError(try expected.validate(info), version) { error in
+                XCTAssertEqual(error as? MCPConnectionError, .incompatibleContract)
+            }
+        }
+    }
+
+    func testSecureTransportRequiresPinnedTLSAndClientAuthentication() throws {
+        let metadata: [SecureTransportMetadata?] = [
+            nil,
+            .init(mode: "stdio", tlsRequired: true, clientAuthRequired: true),
+            .init(mode: "http", tlsRequired: false, clientAuthRequired: false),
+            .init(mode: "pinned_tls", tlsRequired: false, clientAuthRequired: true),
+            .init(mode: "pinned_tls", tlsRequired: true, clientAuthRequired: false),
+            .init(mode: "unknown", tlsRequired: true, clientAuthRequired: true),
+        ]
+        for transport in metadata {
+            var info = try response()
+            info.secureTransport = transport
+            XCTAssertThrowsError(try identity.validate(info)) { error in
+                XCTAssertEqual(error as? MCPConnectionError, .incompatibleContract)
             }
         }
     }

@@ -25,9 +25,10 @@ from conftest import make_recorded_bundle
 from narumi.contracts import ContractSet, load_contracts
 from narumi_server import cli_tools
 from narumi_server.app import ToolOutcome, build_server
-from narumi_server.cli_input import NullOption
+from narumi_server.cli_input import NullOption, SecretStdinOption
 from narumi_server.context import ServerContext, build_context
 from narumi_server.handlers import HANDLERS
+from narumi_server.secure_transport import load_client_transport, prepare_server_transport
 from narumi_server.transports import build_http_app
 
 MEETING_A = "20260827T010000Z-0000000a"
@@ -65,7 +66,7 @@ def free_port() -> int:
 
 
 def unreachable_url() -> str:
-    return f"http://127.0.0.1:{free_port()}/mcp"
+    return f"https://127.0.0.1:{free_port()}/mcp"
 
 
 # ---------------------------------------------------------------------------- command generation
@@ -83,7 +84,9 @@ def test_options_cover_every_schema_property(cli: click.Group, contracts: Contra
         properties = set(contract.input_schema.get("properties", {}))
         assert properties <= set(options_of(command))
         assert {
-            option.name for option in command.params if not isinstance(option, NullOption)
+            option.name
+            for option in command.params
+            if not isinstance(option, (NullOption, SecretStdinOption))
         } == properties
 
 
@@ -248,7 +251,7 @@ def test_permission_setup_never_falls_back_in_process(
         pytest.fail("permission setup must not construct an in-process controller")
 
     monkeypatch.setattr(cli_tools, "build_context", unexpected_context)
-    prefix = ["--in-process"] if mode == "in-process" else ["--server-url", unreachable_url()]
+    prefix = ["--in-process"] if mode == "in-process" else []
     if generic:
         command = [
             "tool",
@@ -267,8 +270,14 @@ def test_permission_setup_never_falls_back_in_process(
     result = invoke(cli, [*prefix, *command])
     assert result.exit_code == 2 and not result.stdout
     envelope = json.loads(result.stderr)
-    assert envelope["error"]["code"] == "invalid_argument"
-    assert "resident narumi-server" in envelope["error"]["message"]
+    assert envelope["error"]["code"] == (
+        "invalid_argument" if mode == "in-process" else "engine_unavailable"
+    )
+    assert (
+        "resident narumi-server" in envelope["error"]["message"]
+        if mode == "in-process"
+        else ("bootstrap" in envelope["error"]["message"])
+    )
 
 
 def test_in_process_error_envelope_on_stderr(cli: click.Group, home: Path):
@@ -315,15 +324,21 @@ def test_require_server_fails_when_unreachable(cli: click.Group, home: Path):
     result = invoke(cli, ["--require-server", "--server-url", url, "list-meetings"])
     assert result.exit_code == 2
     envelope = json.loads(result.stderr)
-    assert envelope["error"]["code"] == "internal"
-    assert "not reachable" in envelope["error"]["message"]
-    assert envelope["error"]["details"]["server_url"] == url
+    assert envelope["error"]["code"] == "engine_unavailable"
+    assert "bootstrap" in envelope["error"]["message"]
 
 
 def test_auto_mode_falls_back_in_process(cli: click.Group, home: Path):
-    result = invoke(cli, ["--server-url", unreachable_url(), "list-meetings"])
+    result = invoke(cli, ["list-meetings"])
     assert result.exit_code == 0, result.stderr
     assert json.loads(result.stdout) == {"meetings": []}
+
+
+def test_explicit_server_url_never_falls_back_in_process(cli: click.Group, home: Path, monkeypatch):
+    monkeypatch.setattr(cli_tools, "_call_in_process", lambda *_a: pytest.fail("no fallback"))
+    result = invoke(cli, ["--server-url", unreachable_url(), "list-meetings"])
+    assert result.exit_code == 2
+    assert json.loads(result.stderr)["error"]["code"] == "engine_unavailable"
 
 
 def test_bad_server_url_is_invalid_argument(cli: click.Group, home: Path):
@@ -343,17 +358,51 @@ def _stub_handler(contract: Any):
 
 
 @pytest.fixture
-def http_url(home: Path, contracts: ContractSet):
-    """A real narumi-server on a loopback port (contract tools without handlers are stubbed)."""
+def http_url(home: Path, contracts: ContractSet, monkeypatch: pytest.MonkeyPatch):
+    """Real pinned TLS/MCP with an in-memory credential store; never access user Keychain."""
+
+    class MemorySecrets:
+        def __init__(self):
+            self.values = {}
+
+        def get(self, account):
+            return self.values.get(account)
+
+        def set(self, account, value):
+            self.values[account] = value
+
+        def delete(self, account):
+            self.values.pop(account, None)
+
+    secrets = MemorySecrets()
     handlers = dict(HANDLERS)
     for name in contracts.tool_names():
         handlers.setdefault(name, _stub_handler(contracts[name]))
-    context = build_context(home, transports=["streamable-http"], handlers=handlers)
+    context = build_context(
+        home, transports=["streamable-http"], handlers=handlers, provider_secret_store=secrets
+    )
     server = build_server(context)
-    app = build_http_app(server, host="127.0.0.1")
     port = free_port()
+    credentials = prepare_server_transport(
+        home, context.server_instance_id, port=port, secret_store=secrets
+    )
+    monkeypatch.setattr(
+        cli_tools,
+        "load_client_transport",
+        lambda root, **kwargs: load_client_transport(root, secret_store=secrets, **kwargs),
+    )
+    app = build_http_app(server, host="127.0.0.1", credentials=credentials)
     config = uvicorn.Config(
-        app, host="127.0.0.1", port=port, log_config=None, log_level="warning", access_log=False
+        app,
+        host="127.0.0.1",
+        port=port,
+        log_config=None,
+        log_level="warning",
+        access_log=False,
+        ssl_certfile=str(credentials.certificate_path),
+        ssl_keyfile=str(credentials.private_key_path),
+        proxy_headers=False,
+        forwarded_allow_ips="",
     )
     http_server = uvicorn.Server(config)
     thread = threading.Thread(target=http_server.run, name="uvicorn-cli-test", daemon=True)
@@ -364,11 +413,12 @@ def http_url(home: Path, contracts: ContractSet):
                 break
             time.sleep(0.05)
         assert http_server.started, "uvicorn did not start"
-        yield f"http://127.0.0.1:{port}/mcp"
+        yield credentials.url
     finally:
         http_server.should_exit = True
         thread.join(timeout=15)
         context.close()
+        credentials.close()
 
 
 def test_http_roundtrip(cli: click.Group, http_url: str):
@@ -409,3 +459,70 @@ def test_http_error_envelope(cli: click.Group, http_url: str):
     )
     assert result.exit_code == 2
     assert json.loads(result.stderr)["error"]["code"] == "invalid_argument"
+
+
+def test_provider_secret_lifecycle_over_real_authenticated_mcp(
+    cli: click.Group, http_url: str, home: Path, caplog: pytest.LogCaptureFixture
+):
+    secret = "fake-cli-integration-provider-key-60943"
+    prefix = ["--require-server", "--server-url", http_url]
+    create = [
+        *prefix,
+        "set-provider-connection",
+        "--provider-id",
+        "anthropic-api",
+        "--display-name",
+        "CLI provider",
+        "--auth-method",
+        "api_key",
+        "--api-key-stdin",
+        "--request-id",
+        "cli-provider-create-0001",
+    ]
+    created = CliRunner().invoke(cli, create, input=secret, catch_exceptions=False)
+    assert created.exit_code == 0, created.stderr
+    connection = json.loads(created.stdout)["connection"]
+    assert connection["credential_present"] is True
+    replay = CliRunner().invoke(cli, create, input=secret, catch_exceptions=False)
+    assert replay.exit_code == 0, replay.stderr
+    assert json.loads(replay.stdout) == json.loads(created.stdout)
+    listed = invoke(cli, [*prefix, "list-provider-connections"])
+    assert len(json.loads(listed.stdout)["connections"]) == 1
+    updated = invoke(
+        cli,
+        [
+            *prefix,
+            "set-provider-connection",
+            "--connection-id",
+            connection["connection_id"],
+            "--expected-revision",
+            str(connection["revision"]),
+            "--display-name",
+            "Renamed provider",
+        ],
+    )
+    assert updated.exit_code == 0, updated.stderr
+    retained = json.loads(updated.stdout)["connection"]
+    assert retained["credential_present"] is True
+    cleared = invoke(
+        cli,
+        [
+            *prefix,
+            "set-provider-connection",
+            "--connection-id",
+            connection["connection_id"],
+            "--expected-revision",
+            str(retained["revision"]),
+            "--clear-api-key",
+        ],
+    )
+    assert cleared.exit_code == 0, cleared.stderr
+    assert json.loads(cleared.stdout)["connection"]["credential_present"] is False
+    assert (
+        secret
+        not in created.output + replay.output + listed.output + updated.output + cleared.output
+    )
+    assert secret not in caplog.text
+    assert all(
+        secret.encode() not in path.read_bytes() for path in home.rglob("*") if path.is_file()
+    )

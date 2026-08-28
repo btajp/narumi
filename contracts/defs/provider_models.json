@@ -1,0 +1,288 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "narumi:defs/provider_models.json",
+  "title": "narumi provider_models contract definitions",
+  "$defs": {
+    "provider_model_parameter": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "string",
+            "integer",
+            "number",
+            "boolean"
+          ]
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "enum": {
+          "type": "array",
+          "items": {
+            "type": [
+              "string",
+              "number",
+              "boolean"
+            ]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "minimum": {
+          "type": "number"
+        },
+        "maximum": {
+          "type": "number"
+        },
+        "default": {
+          "type": [
+            "string",
+            "number",
+            "boolean"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "description": "A scalar generation parameter supported by the adapter. Arbitrary commands, URLs, credentials or nested runtime configuration are not parameters."
+    },
+    "provider_parameter_schema": {
+      "type": "object",
+      "required": [
+        "type",
+        "properties",
+        "required",
+        "additionalProperties"
+      ],
+      "properties": {
+        "type": {
+          "const": "object"
+        },
+        "properties": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "not": {
+              "enum": [
+                "api_key",
+                "token",
+                "url",
+                "endpoint",
+                "command",
+                "env",
+                "environment",
+                "path",
+                "headers",
+                "authorization"
+              ]
+            }
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/provider_model_parameter"
+          }
+        },
+        "required": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "additionalProperties": {
+          "const": false
+        }
+      },
+      "additionalProperties": false,
+      "description": "Closed parameter schema for the selected model. The server must also check adapter allowlists and required names."
+    },
+    "provider_model_billing": {
+      "type": "object",
+      "required": [
+        "kind",
+        "input_usd_per_million_tokens",
+        "output_usd_per_million_tokens",
+        "audio_usd_per_minute",
+        "fetched_at"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "local",
+            "api",
+            "subscription",
+            "unknown"
+          ],
+          "description": "Actual authentication's billing class; provider names do not determine subscription eligibility."
+        },
+        "input_usd_per_million_tokens": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "description": "Decimal USD value; null when not verified. Never infer zero from an unknown price."
+        },
+        "output_usd_per_million_tokens": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "description": "Decimal USD value; null when not verified. Never infer zero from an unknown price."
+        },
+        "audio_usd_per_minute": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "description": "Decimal USD value; null when not verified. Never infer zero from an unknown price."
+        },
+        "fetched_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "provider_model_descriptor": {
+      "type": "object",
+      "required": [
+        "model_id",
+        "display_name",
+        "resolved_revision",
+        "input_modalities",
+        "output_modalities",
+        "roles",
+        "timestamp_support",
+        "context_window",
+        "max_output_tokens",
+        "parameter_schema",
+        "availability",
+        "reason",
+        "source",
+        "fetched_at",
+        "billing"
+      ],
+      "properties": {
+        "model_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "Exact provider model identifier; not an automatically chosen alias."
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "resolved_revision": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "input_modalities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "text",
+              "image",
+              "audio"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "output_modalities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "text",
+              "image",
+              "audio"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/provider_role"
+          },
+          "uniqueItems": true
+        },
+        "timestamp_support": {
+          "type": "string",
+          "enum": [
+            "none",
+            "segment",
+            "word",
+            "diarized_segment"
+          ]
+        },
+        "context_window": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "max_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "parameter_schema": {
+          "$ref": "#/$defs/provider_parameter_schema"
+        },
+        "availability": {
+          "$ref": "#/$defs/provider_availability"
+        },
+        "reason": {
+          "$ref": "#/$defs/provider_reason"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "provider_api",
+            "runtime",
+            "local_catalog"
+          ]
+        },
+        "fetched_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "billing": {
+          "$ref": "#/$defs/provider_model_billing"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Intersection of provider metadata and verified runtime/adapter support. Unknown capabilities never mean available."
+    }
+  }
+}

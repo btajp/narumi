@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import getpass
 import json
+import sys
 import uuid
+import warnings
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,6 +24,7 @@ KIND_JSON = "json"
 KIND_FLEXIBLE = "flexible"
 _LOCAL_DEF_PREFIX = "#/$defs/"
 _JSON_TYPES = {"string", "integer", "number", "boolean", "object", "array", "null"}
+MAX_STDIN_CHARACTERS = 1_048_576
 
 
 class NullOption(click.Option):
@@ -36,12 +40,27 @@ class NullOption(click.Option):
         )
 
 
+class SecretStdinOption(click.Option):
+    """Read a write-only property from stdin without accepting an argv value."""
+
+    def __init__(self, prop: str, flag: str, name: str) -> None:
+        self.property_name = prop
+        super().__init__(
+            [flag, name],
+            is_flag=True,
+            default=False,
+            help=f"Read {_flag(prop)} from stdin; do not include the secret in the command line.",
+        )
+
+
 @dataclass(frozen=True)
 class ToolInput:
     options: list[click.Option]
     kinds: dict[str, str]
     null_options: dict[str, NullOption]
     required_nullable: frozenset[str]
+    secret_options: dict[str, SecretStdinOption]
+    required_secret: frozenset[str]
 
 
 def _flag(prop: str) -> str:
@@ -135,7 +154,10 @@ def _help_text(schema: dict[str, Any] | bool, defs: dict[str, Any], prop: str, k
 
 
 def _available_clear_flag(prop: str, occupied: set[str]) -> str:
-    preferred = "--clear-" + prop.replace("_", "-")
+    return _available_flag("--clear-" + prop.replace("_", "-"), occupied)
+
+
+def _available_flag(preferred: str, occupied: set[str]) -> str:
     if preferred not in occupied:
         return preferred
     fallback = preferred + "-value"
@@ -146,13 +168,68 @@ def _available_clear_flag(prop: str, occupied: set[str]) -> str:
     return candidate
 
 
+def _has_write_only(schema: Any, defs: dict[str, Any], seen: frozenset[str] = frozenset()) -> bool:
+    if isinstance(schema, list):
+        return any(_has_write_only(item, defs, seen) for item in schema)
+    if not isinstance(schema, dict):
+        return False
+    if schema.get("writeOnly") is True:
+        return True
+    ref = schema.get("$ref", "")
+    if isinstance(ref, str) and ref.startswith(_LOCAL_DEF_PREFIX):
+        name = ref.removeprefix(_LOCAL_DEF_PREFIX)
+        if name not in seen and _has_write_only(defs.get(name), defs, seen | {name}):
+            return True
+    return any(
+        _has_write_only(value, defs, seen)
+        for key, value in schema.items()
+        if key not in {"$ref", "$defs", "const", "enum", "default", "examples"}
+    )
+
+
+def contains_secret_value(contract: ToolContract, arguments: dict[str, Any]) -> bool:
+    """A literal JSON argument must not supply a write-only property or its container."""
+    schema = contract.input_schema
+    defs = schema.get("$defs", {})
+    return any(
+        arguments.get(prop) is not None and _has_write_only(prop_schema, defs)
+        for prop, prop_schema in schema.get("properties", {}).items()
+    )
+
+
+def secret_strings(contract: ToolContract, arguments: dict[str, Any]) -> tuple[str, ...]:
+    """Keep submitted secret strings only in memory to reject accidental response echoes."""
+
+    def strings(value: Any) -> list[str]:
+        found, pending = [], [value]
+        while pending:
+            item = pending.pop()
+            if isinstance(item, str) and item:
+                found.append(item)
+            elif isinstance(item, dict):
+                pending.extend(item.keys())
+                pending.extend(item.values())
+            elif isinstance(item, list):
+                pending.extend(item)
+        return found
+
+    schema = contract.input_schema
+    return tuple(
+        value
+        for prop, prop_schema in schema.get("properties", {}).items()
+        if _has_write_only(prop_schema, schema.get("$defs", {}))
+        for value in strings(arguments.get(prop))
+    )
+
+
 def build_tool_input(contract: ToolContract) -> ToolInput:
-    """Generate ordinary options and collision-safe null flags from the same contract."""
+    """Generate value, secret-prompt/stdin and null controls from the same contract."""
     schema = contract.input_schema
     properties: dict[str, Any] = schema.get("properties", {})
     required = set(schema.get("required", []))
     defs: dict[str, Any] = schema.get("$defs", {})
     nullable = {prop for prop, value in properties.items() if accepts_null(value, defs)}
+    secret = {prop for prop, value in properties.items() if _has_write_only(value, defs)}
     options: list[click.Option] = []
     kinds: dict[str, str] = {}
     for prop, prop_schema in properties.items():
@@ -163,7 +240,14 @@ def build_tool_input(contract: ToolContract) -> ToolInput:
             "help": _help_text(prop_schema, defs, prop, kind),
         }
         flag = _flag(prop)
-        if kind == KIND_BOOLEAN:
+        if prop in secret:
+            settings.update(
+                required=False,
+                default=False,
+                help=f"Prompt without echo for {prop}; omit to leave it unchanged.",
+            )
+            option = click.Option([flag], is_flag=True, **settings)
+        elif kind == KIND_BOOLEAN:
             option = click.Option([f"{flag}/--no-{prop.replace('_', '-')}"], **settings)
         elif kind == KIND_INTEGER:
             option = click.Option([flag], type=click.INT, **settings)
@@ -179,6 +263,19 @@ def build_tool_input(contract: ToolContract) -> ToolInput:
         flag for option in options for flag in (*option.opts, *option.secondary_opts)
     }
     occupied_names = set(properties) | {option.name for option in options}
+    secret_options: dict[str, SecretStdinOption] = {}
+    for index, prop in enumerate(properties):
+        if prop not in secret:
+            continue
+        flag = _available_flag(_flag(prop) + "-stdin", occupied_flags)
+        name = f"_narumi_stdin_{index}"
+        while name in occupied_names:
+            name = "_" + name
+        option = SecretStdinOption(prop, flag, name)
+        secret_options[prop] = option
+        options.append(option)
+        occupied_flags.add(flag)
+        occupied_names.add(name)
     null_options: dict[str, NullOption] = {}
     for index, prop in enumerate(properties):
         if prop not in nullable:
@@ -199,6 +296,8 @@ def build_tool_input(contract: ToolContract) -> ToolInput:
         kinds=kinds,
         null_options=null_options,
         required_nullable=frozenset((required & nullable) - {"request_id"}),
+        secret_options=secret_options,
+        required_secret=frozenset(required & secret),
     )
 
 
@@ -227,13 +326,62 @@ def _parse_flexible_option(value: str) -> Any:
     return value if parsed is None else parsed
 
 
+def read_stdin() -> str:
+    """Read a bounded document without copying it to argv, the environment or a file."""
+    stream = sys.stdin
+    if stream.isatty():
+        raise InvalidArgumentError("Use a hidden prompt for interactive secret input")
+    try:
+        value = stream.read(MAX_STDIN_CHARACTERS + 1)
+    except (OSError, UnicodeError):
+        raise InvalidArgumentError("Could not read stdin") from None
+    except (EOFError, KeyboardInterrupt):
+        raise InvalidArgumentError("stdin input was cancelled") from None
+    if len(value) > MAX_STDIN_CHARACTERS:
+        raise InvalidArgumentError("stdin exceeds the input size limit")
+    return value
+
+
+def _read_secret(prop: str, *, from_stdin: bool) -> str:
+    if from_stdin:
+        value = read_stdin()
+        if value.endswith("\r\n"):
+            value = value[:-2]
+        elif value.endswith("\n"):
+            value = value[:-1]
+    else:
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", getpass.GetPassWarning)
+                value = click.prompt(prop, hide_input=True, err=True, type=str)
+        except getpass.GetPassWarning:
+            raise InvalidArgumentError("Terminal echo could not be disabled; use stdin") from None
+        except (click.Abort, EOFError, KeyboardInterrupt):
+            raise InvalidArgumentError("Secret input was cancelled") from None
+    if not value:
+        raise InvalidArgumentError("Secret input must not be empty")
+    return value
+
+
 def collect_args(contract: ToolContract, spec: ToolInput, kwargs: dict[str, Any]) -> dict[str, Any]:
     """Assemble only real properties; omission, literal text and explicit null stay distinct."""
+    if sum(bool(kwargs.get(option.name)) for option in spec.secret_options.values()) > 1:
+        raise InvalidArgumentError("Only one secret property can read stdin; use --json-stdin")
     args: dict[str, Any] = {}
     for prop, kind in spec.kinds.items():
         value = kwargs.get(prop)
         null_option = spec.null_options.get(prop)
         clear = null_option is not None and kwargs.get(null_option.name, False)
+        secret_option = spec.secret_options.get(prop)
+        if secret_option is not None:
+            prompt, from_stdin = bool(value), bool(kwargs.get(secret_option.name))
+            if sum((prompt, from_stdin, bool(clear))) > 1:
+                raise InvalidArgumentError(
+                    "Secret prompt, stdin and clearing are mutually exclusive"
+                )
+            value = _read_secret(prop, from_stdin=from_stdin) if prompt or from_stdin else None
+            if value is None and not clear and prop in spec.required_secret:
+                raise InvalidArgumentError(f"{_flag(prop)} or {secret_option.opts[0]} is required")
         if clear:
             if value is not None:
                 raise InvalidArgumentError(
