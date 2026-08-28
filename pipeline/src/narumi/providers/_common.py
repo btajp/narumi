@@ -11,7 +11,14 @@ from narumi.errors import BusyError, ConfigurationConflictError, NotFoundError
 PROVIDERS = {
     "anthropic-api": "Anthropic API",
     "claude-agent-sdk": "Claude Agent SDK",
+    "codex-app-server": "Codex App Server",
     "ollama": "Ollama",
+}
+AUTH_METHODS = {
+    "anthropic-api": "api_key",
+    "claude-agent-sdk": "api_key",
+    "codex-app-server": "chatgpt",
+    "ollama": "none",
 }
 CONNECTION_FIELDS = (
     "connection_id",
@@ -92,7 +99,13 @@ def cancel_auth(document: dict[str, Any], record: dict[str, Any], reason: str) -
         return
     operation = document["auth_operations"].get(active["operation_id"])
     if operation is not None and operation["state"] in ("pending", "unknown"):
-        operation.update(state="cancelled", reason=reason, updated_at=timestamp())
+        operation.update(
+            state="cancelled",
+            authorization_url=None,
+            user_code=None,
+            reason=reason,
+            updated_at=timestamp(),
+        )
     record["active_auth"] = None
     record["auth_state"] = (
         "unverified"

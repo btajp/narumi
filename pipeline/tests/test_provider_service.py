@@ -6,17 +6,19 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from narumi.contracts.loader import load_contracts
-from narumi.errors import ConfigurationConflictError, InvalidArgumentError, NarumiError
+from narumi.errors import BusyError, ConfigurationConflictError, InvalidArgumentError, NarumiError
 from narumi.providers.service import ProviderService
 
 from .provider_fakes import (
     INSTANCE_ONE,
     INSTANCE_TWO,
+    FakeCodexBackend,
     FakeMetadata,
     FakeRuntimeInspector,
     ManualExecutor,
     MemorySecretStore,
     create_connection,
+    prepared_codex_connection,
 )
 
 
@@ -35,6 +37,7 @@ def service(tmp_path, effects):
         auth_executor=executor,
         server_instance_id=INSTANCE_ONE,
         runtime_inspector=FakeRuntimeInspector(),
+        codex_backend=FakeCodexBackend(),
     )
     yield instance
     instance.close()
@@ -48,10 +51,12 @@ def test_lists_do_not_access_secrets_or_network(service, effects):
     assert {item["provider_id"] for item in providers["providers"]} == {
         "anthropic-api",
         "claude-agent-sdk",
+        "codex-app-server",
         "ollama",
     }
     assert service.list_connections() == {"connections": []}
     assert secrets.calls == metadata.calls == []
+    assert service.codex_backend.calls == []
 
 
 def test_connection_replay_survives_restart_and_does_not_write_secret_twice(
@@ -451,3 +456,337 @@ def test_explicit_save_recovery_does_not_repeat_failed_creation(
     assert recovered["connection"]["credential_present"] is True
     assert len(restarted.list_connections()["connections"]) == 1
     restarted.close()
+
+
+def test_codex_connection_saves_without_credentials_or_external_effects(service, effects):
+    record = create_connection(service, provider_id="codex-app-server")
+    assert record["endpoint"] == "https://chatgpt.com"
+    assert record["auth_method"] == "chatgpt"
+    assert record["credential_present"] is False
+    assert record["auth_state"] == "unconfigured"
+    assert service.codex_backend.calls == effects[0].calls == effects[1].calls == []
+    tested = service.test_connection(
+        {"connection_id": record["connection_id"], "expected_revision": 1}
+    )
+    assert tested["connected"] is False
+    assert tested["reason"] == "credential_required"
+    assert service.codex_backend.calls == []
+    load_contracts().validate_output("set_provider_connection", {"connection": record})
+
+
+@pytest.mark.parametrize("key", [None, "fixture-secret"])
+def test_codex_update_rejects_even_null_api_key_before_keychain_access(service, effects, key):
+    record = create_connection(service, provider_id="codex-app-server")
+    with pytest.raises(InvalidArgumentError):
+        service.set_connection(
+            {
+                "connection_id": record["connection_id"],
+                "expected_revision": 1,
+                "api_key": key,
+                "request_id": "reject-codex-api-key",
+            }
+        )
+    assert effects[0].calls == service.codex_backend.calls == []
+    assert service.list_connections()["connections"][0]["revision"] == 1
+    assert "fixture-secret" not in service.store.path.read_text()
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"endpoint": "https://example.com"},
+        {"endpoint": "https://api.openai.com"},
+        {"auth_method": "api_key"},
+    ],
+)
+def test_codex_connection_cannot_change_to_custom_endpoint_or_api_auth(service, update):
+    record = create_connection(service, provider_id="codex-app-server")
+    with pytest.raises(InvalidArgumentError):
+        service.set_connection(
+            {
+                "connection_id": record["connection_id"],
+                "expected_revision": 1,
+                "request_id": "reject-codex-endpoint",
+                **update,
+            }
+        )
+    assert service.codex_backend.calls == []
+
+
+def test_codex_metadata_uses_only_authenticated_backend_and_never_marks_generation(
+    service, effects
+):
+    record = prepared_codex_connection(service)
+    result = service.test_connection(
+        {"connection_id": record["connection_id"], "expected_revision": 1}
+    )
+    assert result["connected"] is True
+    assert result["connection"]["last_generation_state"] == "never"
+    models = service.list_models({"connection_id": record["connection_id"]})
+    assert models["models"] == service.codex_backend.models
+    assert effects[0].calls == effects[1].calls == []
+    assert service.codex_backend.calls == [("list_models", record["connection_id"])]
+    document = service.store.read()
+    assert (
+        document["catalogs"][record["connection_id"]]["runtime_catalog_revision"]
+        == (document["runtimes"][record["provider_id"]]["catalog_revision"])
+    )
+    load_contracts().validate_output("list_provider_models", models)
+
+
+def test_codex_missing_session_invalidates_presence_and_requires_explicit_login(service):
+    record = prepared_codex_connection(service)
+    service.codex_backend.authenticated.clear()
+    args = {"connection_id": record["connection_id"], "expected_revision": 1}
+    result = service.test_connection(args)
+    assert result["reason"] == "credential_rejected"
+    assert result["connection"]["credential_present"] is False
+    assert result["connection"]["catalog_state"] == "authentication_required"
+    service.test_connection(args)
+    assert service.codex_backend.calls == [("list_models", record["connection_id"])]
+
+
+def test_codex_stale_runtime_prevents_metadata_request(service):
+    record = prepared_codex_connection(service)
+    service.codex_backend.version = "2.0.0"
+    result = service.test_connection(
+        {"connection_id": record["connection_id"], "expected_revision": 1}
+    )
+    assert result["reason"] == "runtime_preparation_required"
+    assert result["connection"]["catalog_state"] == "stale"
+    assert service.codex_backend.calls == []
+
+
+def test_codex_metadata_rejects_credential_like_payload(service):
+    record = prepared_codex_connection(service)
+    service.codex_backend.models[0]["display_name"] = "Bearer fixture-secret"
+    result = service.test_connection(
+        {"connection_id": record["connection_id"], "expected_revision": 1}
+    )
+    assert result["connected"] is False
+    assert "fixture-secret" not in service.store.path.read_text()
+
+
+def test_codex_delete_cleans_only_selected_session_and_replays(service):
+    first = prepared_codex_connection(service, request_id="codex-one")
+    second = prepared_codex_connection(service, request_id="codex-two")
+    args = {
+        "connection_id": first["connection_id"],
+        "expected_revision": 1,
+        "confirm": True,
+        "request_id": "delete-codex-one",
+    }
+    assert service.delete_connection(args) == service.delete_connection(args)
+    assert service.codex_backend.authenticated == {second["connection_id"]}
+    assert service.codex_backend.calls == [("logout", first["connection_id"])]
+    assert service.store.read()["checks"] == {}
+
+
+def test_codex_failed_cleanup_leaves_session_unreachable_and_does_not_retry(service):
+    record = prepared_codex_connection(service)
+    backend = service.codex_backend
+    backend.error = RuntimeError("fixture-secret /private/fixture-session")
+    args = {
+        "connection_id": record["connection_id"],
+        "expected_revision": 1,
+        "confirm": True,
+        "request_id": "delete-codex-failure",
+    }
+    with pytest.raises(NarumiError, match="removed securely"):
+        service.delete_connection(args)
+    saved = service.list_connections()["connections"][0]
+    assert saved["credential_present"] is False
+    assert saved["enabled"] is False
+    assert saved["revision"] == 2
+    with pytest.raises(NarumiError):
+        service.delete_connection(args)
+    assert backend.calls == [("logout", record["connection_id"])]
+    assert "fixture-secret" not in service.store.path.read_text()
+    backend.error = None
+    service.delete_connection(
+        {**args, "expected_revision": 2, "request_id": "explicit-delete-repair"}
+    )
+    assert service.list_connections()["connections"] == []
+
+
+def test_codex_generation_lease_allows_disable_but_blocks_logout_and_mutation(service):
+    record = prepared_codex_connection(service)
+    with service.store.transaction() as document:
+        document["checks"][record["provider_id"]] = {
+            "token": "generation-fixture",
+            "connection_id": record["connection_id"],
+            "server_instance_id": service.server_instance_id,
+            "kind": "generation",
+        }
+    for action in ("start", "logout"):
+        with pytest.raises(BusyError):
+            service.authenticate(
+                {
+                    "connection_id": record["connection_id"],
+                    "expected_revision": 1,
+                    "action": action,
+                    "request_id": "auth-during-generation-" + action,
+                }
+            )
+    with pytest.raises(BusyError):
+        service.set_connection(
+            {
+                "connection_id": record["connection_id"],
+                "expected_revision": 1,
+                "display_name": "Not allowed",
+                "request_id": "rename-during-generation",
+            }
+        )
+    disabled = service.set_connection(
+        {
+            "connection_id": record["connection_id"],
+            "expected_revision": 1,
+            "enabled": False,
+            "request_id": "disable-during-generation",
+        }
+    )["connection"]
+    assert disabled["enabled"] is False
+    assert service.store.read()["checks"][record["provider_id"]]["token"] == "generation-fixture"
+    assert service.codex_backend.calls == []
+
+
+@pytest.mark.parametrize("interruption", ["close", "restart"])
+def test_codex_metadata_result_after_shutdown_or_restart_is_discarded(
+    service, effects, monkeypatch, interruption
+):
+    record = prepared_codex_connection(service)
+    backend = service.codex_backend
+    initial_catalog = service.store.read()["catalogs"][record["connection_id"]]
+    entered, release = threading.Event(), threading.Event()
+    fetch = backend.list_models
+
+    def blocked(connection_id):
+        entered.set()
+        assert release.wait(5)
+        return fetch(connection_id)
+
+    monkeypatch.setattr(backend, "list_models", blocked)
+    reopened = None
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        result = pool.submit(
+            service.test_connection,
+            {
+                "connection_id": record["connection_id"],
+                "expected_revision": 1,
+            },
+        )
+        try:
+            assert entered.wait(3)
+            if interruption == "close":
+                service.close()
+            else:
+                reopened = ProviderService(
+                    service.root,
+                    secret_store=effects[0],
+                    codex_backend=FakeCodexBackend(),
+                    auth_executor=ManualExecutor(),
+                    server_instance_id=INSTANCE_TWO,
+                )
+        finally:
+            release.set()
+        with pytest.raises(ConfigurationConflictError):
+            result.result(timeout=3)
+    assert service.store.read()["catalogs"][record["connection_id"]] == initial_catalog
+    if reopened is not None:
+        reopened.close()
+
+
+def test_lazy_codex_backend_is_closed_when_shutdown_overlaps_construction(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    entered, release = threading.Event(), threading.Event()
+    backend = FakeCodexBackend()
+
+    def construct(_root):
+        entered.set()
+        assert release.wait(5)
+        return backend
+
+    monkeypatch.setitem(
+        sys.modules, "narumi.providers.codex", SimpleNamespace(CodexBackend=construct)
+    )
+    service = ProviderService(
+        tmp_path, secret_store=MemorySecretStore(), auth_executor=ManualExecutor()
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        construction = pool.submit(lambda: service.codex_backend)
+        assert entered.wait(3)
+        closure = pool.submit(service.close)
+        try:
+            assert service.closed.wait(3)
+            assert not closure.done()
+        finally:
+            release.set()
+        construction.result(timeout=3)
+        closure.result(timeout=3)
+    assert backend.calls == [("close",)]
+
+
+def test_failed_codex_delete_commit_releases_cleanup_lease_for_explicit_repair(
+    service, monkeypatch
+):
+    record = prepared_codex_connection(service)
+    original = service.store.commit
+    writes = []
+
+    def fail_final_once(document):
+        writes.append(1)
+        if len(writes) == 3:
+            raise NarumiError("fixture-secret")
+        original(document)
+
+    monkeypatch.setattr(service.store, "commit", fail_final_once)
+    args = {
+        "connection_id": record["connection_id"],
+        "expected_revision": 1,
+        "confirm": True,
+        "request_id": "delete-codex-final-write-failure",
+    }
+    with pytest.raises(NarumiError, match="could not be confirmed"):
+        service.delete_connection(args)
+    assert service.store.read()["checks"] == {}
+    saved = service.list_connections()["connections"][0]
+    assert saved["credential_present"] is False
+    assert saved["enabled"] is False
+    assert "fixture-secret" not in service.store.path.read_text()
+    service.delete_connection(
+        {**args, "expected_revision": 2, "request_id": "explicit-delete-after-write-failure"}
+    )
+    assert service.list_connections()["connections"] == []
+
+
+@pytest.mark.parametrize("instance_id", [INSTANCE_ONE, INSTANCE_TWO])
+def test_nonowner_context_preserves_resident_generation_lease(service, instance_id):
+    record = prepared_codex_connection(service)
+    with service.store.transaction() as document:
+        document["checks"][record["provider_id"]] = {
+            "token": "active-generation",
+            "kind": "generation",
+            "connection_id": record["connection_id"],
+            "server_instance_id": INSTANCE_ONE,
+        }
+    before = service.store.path.read_bytes()
+    observer = ProviderService(
+        service.root,
+        recover=False,
+        server_instance_id=instance_id,
+        secret_store=MemorySecretStore(),
+        auth_executor=ManualExecutor(),
+    )
+    observer.close()
+    assert service.store.path.read_bytes() == before
+    with pytest.raises(BusyError):
+        service.set_connection(
+            {
+                "connection_id": record["connection_id"],
+                "expected_revision": 1,
+                "display_name": "Blocked during generation",
+                "request_id": "blocked-after-observer",
+            }
+        )

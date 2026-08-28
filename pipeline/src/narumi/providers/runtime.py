@@ -13,7 +13,7 @@ from narumi.errors import (
     EngineUnavailableError,
     InvalidArgumentError,
 )
-from narumi.providers._common import PROVIDERS, check_provider_idle, public_runtime
+from narumi.providers._common import AUTH_METHODS, PROVIDERS, check_provider_idle, public_runtime
 from narumi.providers._runtime_lease import RuntimeLease
 from narumi.providers.runtime_catalog import RuntimeInspector
 
@@ -40,7 +40,11 @@ class RuntimePreparation:
         self._lock = threading.RLock()
 
     def _current(self, provider_id: str, document: dict[str, Any]) -> dict[str, Any]:
-        resource = self.inspector.resource(provider_id)
+        resource = (
+            self.service.codex_backend.resource()
+            if provider_id == "codex-app-server"
+            else self.inspector.resource(provider_id)
+        )
         revision = self.inspector.catalog_revision(resource)
         saved = document["runtimes"].get(provider_id, {})
         state = saved.get("state", "not_prepared")
@@ -75,7 +79,7 @@ class RuntimePreparation:
                     "provider_id": provider_id,
                     "display_name": display_name,
                     "roles": ["llm"],
-                    "auth_methods": ["none" if provider_id == "ollama" else "api_key"],
+                    "auth_methods": [AUTH_METHODS[provider_id]],
                     "availability": availability,
                     "reason": reason,
                     "runtime": public_runtime(runtime),
@@ -218,7 +222,10 @@ class RuntimePreparation:
                     raise CancelledError("Provider preparation was cancelled")
                 active["state"] = "running"
             progress("verify_runtime_catalog", 0.1)
-            self.inspector.prepare(service.root, provider_id, resource, progress)
+            if provider_id == "codex-app-server":
+                service.codex_backend.prepare(resource, progress)
+            else:
+                self.inspector.prepare(service.root, provider_id, resource, progress)
             if progress.cancelled or service.closed.is_set():
                 raise CancelledError("Provider preparation was cancelled")
             self._finish(provider_id, job_id, "succeeded", "ready", None)
@@ -268,6 +275,18 @@ class RuntimePreparation:
                     state=runtime_state,
                     reason=reason,
                 )
+                if provider_id == "codex-app-server" and runtime_state == "ready":
+                    for record in document["connections"].values():
+                        cached = document["catalogs"].get(record["connection_id"])
+                        if (
+                            record["provider_id"] == provider_id
+                            and cached is not None
+                            and (
+                                cached.get("runtime_catalog_revision")
+                                != runtime["catalog_revision"]
+                            )
+                        ):
+                            record["catalog_state"] = "stale"
 
     def observe_job(self, job_id: str, status: str) -> None:
         if status not in ("cancelled", "failed"):

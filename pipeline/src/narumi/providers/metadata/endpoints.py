@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from narumi.errors import InvalidArgumentError
 
 ANTHROPIC_ENDPOINT = "https://api.anthropic.com"
+CODEX_ENDPOINT = "https://chatgpt.com"
 OLLAMA_ENDPOINT = "http://127.0.0.1:11434"
 
 
@@ -17,6 +18,7 @@ def validate_endpoint(provider_id: str, value: str) -> str:
     if not isinstance(provider_id, str) or provider_id not in {
         "anthropic-api",
         "claude-agent-sdk",
+        "codex-app-server",
         "ollama",
     }:
         raise InvalidArgumentError("Unsupported provider", details={"reason": "invalid_provider"})
@@ -45,9 +47,10 @@ def validate_endpoint(provider_id: str, value: str) -> str:
     ):
         _invalid_endpoint()
     if provider_id != "ollama":
-        if parsed.scheme != "https" or hostname != "api.anthropic.com" or port not in {None, 443}:
+        host = "chatgpt.com" if provider_id == "codex-app-server" else "api.anthropic.com"
+        if parsed.scheme != "https" or hostname != host or port not in {None, 443}:
             _invalid_endpoint()
-        return ANTHROPIC_ENDPOINT
+        return CODEX_ENDPOINT if provider_id == "codex-app-server" else ANTHROPIC_ENDPOINT
     if "%" in hostname:
         _invalid_endpoint()
     try:
