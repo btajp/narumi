@@ -9,19 +9,10 @@ import pytest
 from jsonschema import Draft202012Validator, ValidationError
 from narumi.contracts import ContractSet, load_contracts
 from narumi.errors import ContractMismatchError, InvalidArgumentError
-from narumi.models import MeetingConfig
-from pydantic import ValidationError as ModelValidationError
 
 CONNECTION_ID = "conn-0123456789ab"
 OPERATION_ID = "auth-0123456789ab"
 REQUEST_ID = "provider-contract-request-001"
-MEETING_ID = "20260827T030500Z-a1b2c3d4"
-MINUTES_MODEL = {
-    "provider": "codex-app-server",
-    "connection_id": "conn-0123456789ab",
-    "connection_revision": 1,
-    "model_id": "fixture-text-model",
-}
 AUTHORIZATION_URL = "https://auth.openai.com/codex/device"
 USER_CODE = "ABCD-EFGH"
 CREATE = {
@@ -43,7 +34,7 @@ def contracts() -> ContractSet:
 
 
 @pytest.mark.parametrize(
-    "provider", ["anthropic-api", "claude-agent-sdk", "codex-app-server", "ollama"]
+    "provider", ["anthropic-api", "claude-agent-sdk", "codex-app-server", "ollama", "openai-api"]
 )
 def test_new_connection_can_be_saved_before_authentication(
     contracts: ContractSet, provider: str
@@ -109,7 +100,6 @@ def test_connection_update_supports_key_retention_deletion_and_disable(
 @pytest.mark.parametrize(
     "changes",
     [
-        {"provider_id": "openai-api"},
         {"provider_id": "codex-app-server"},
         {"provider_id": "arbitrary-provider"},
         {"provider_id": "ollama"},
@@ -131,6 +121,70 @@ def test_new_connection_rejects_unimplemented_or_ambiguous_configuration(
 ) -> None:
     with pytest.raises(InvalidArgumentError):
         contracts.validate_input("set_provider_connection", {**CREATE, **changes})
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"auth_method": "chatgpt"},
+        {"auth_method": "none"},
+        {"endpoint": "https://api.openai.com/v1"},
+        {"endpoint": "https://api.openai.com/"},
+        {"endpoint": "http://api.openai.com"},
+        {"endpoint": "https://api.openai.com.evil.example"},
+        {"endpoint": "https://api.openai.com?api_key=example"},
+        {"endpoint": "https://example@api.openai.com"},
+        {"organization": "unapproved-override"},
+        {"project": "unapproved-override"},
+    ],
+)
+def test_openai_connections_require_api_key_auth_and_the_fixed_endpoint(
+    contracts: ContractSet, changes: dict[str, Any]
+) -> None:
+    with pytest.raises(InvalidArgumentError):
+        contracts.validate_input(
+            "set_provider_connection", {**CREATE, "provider_id": "openai-api", **changes}
+        )
+
+
+@pytest.mark.parametrize("key", [None, "example-not-a-real-key"])
+def test_openai_connection_can_save_without_authenticating(
+    contracts: ContractSet, key: str | None
+) -> None:
+    contracts.validate_input(
+        "set_provider_connection",
+        {
+            **CREATE,
+            "provider_id": "openai-api",
+            "endpoint": "https://api.openai.com",
+            "api_key": key,
+        },
+    )
+
+
+def test_openai_public_connection_and_runtime_metadata(contracts: ContractSet) -> None:
+    connection = deepcopy(contracts["set_provider_connection"].output_examples[0]["connection"])
+    connection.update(
+        provider_id="openai-api", endpoint="https://api.openai.com", auth_method="api_key"
+    )
+    contracts.validate_output("set_provider_connection", {"connection": connection})
+    connection["endpoint"] = "https://api.anthropic.com"
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("set_provider_connection", {"connection": connection})
+
+    descriptor = deepcopy(contracts["list_providers"].output_examples[0]["providers"][0])
+    descriptor.update(provider_id="openai-api", auth_methods=["api_key"])
+    contracts.validate_output("list_providers", {"providers": [descriptor]})
+    descriptor["auth_methods"] = ["chatgpt"]
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("list_providers", {"providers": [descriptor]})
+    descriptor.update(auth_methods=["api_key"], roles=["transcription"])
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("list_providers", {"providers": [descriptor]})
+
+    preparation = deepcopy(contracts["prepare_provider_runtime"].input_examples[0])
+    preparation.update(provider_id="openai-api", resource_id="openai-client")
+    contracts.validate_input("prepare_provider_runtime", preparation)
 
 
 @pytest.mark.parametrize(
@@ -433,6 +487,23 @@ def test_codex_model_catalog_accepts_official_reasoning_values(contracts: Contra
         {"availability": "probably_available"},
         {"source": "ambient_environment"},
         {"billing": {"kind": "free"}},
+        {"availability_expires_on": 0},
+        {"availability_expires_on": False},
+        {"availability_expires_on": 1.5},
+        {"availability_expires_on": ""},
+        {"availability_expires_on": "later"},
+        {"availability_expires_on": "2026-9-30"},
+        {"availability_expires_on": "20260930"},
+        {"availability_expires_on": "2026-09-30\n"},
+        {"availability_expires_on": "2026-09-30T00:00:00Z"},
+        {"availability_expires_on": "2026-09-30T00:00:00"},
+        {"availability_expires_on": "2026-09-31"},
+        {"availability_expires_on": "2026-02-29"},
+        {"availability_expires_on": "2026-13-01"},
+        {"availability_expires_on": "0000-01-01"},
+        {"availability_expires_on": []},
+        {"availability_expires_on": {}},
+        {"availability_expires_at": "2026-09-30T00:00:00Z"},
     ],
 )
 def test_model_metadata_rejects_unknown_or_invalid_capabilities(
@@ -442,6 +513,17 @@ def test_model_metadata_rejects_unknown_or_invalid_capabilities(
     payload["models"][0].update(changes)
     with pytest.raises(ContractMismatchError):
         contracts.validate_output("list_provider_models", payload)
+
+
+@pytest.mark.parametrize("end_date", [None, "2026-08-01", "2026-09-30", "2028-02-29"])
+def test_model_availability_end_date_is_optional_and_not_compared_by_schema(
+    contracts: ContractSet, end_date: str | None
+) -> None:
+    payload = deepcopy(contracts["list_provider_models"].output_examples[0])
+    payload["models"][0]["availability_expires_on"] = end_date
+    contracts.validate_output("list_provider_models", payload)
+    del payload["models"][0]["availability_expires_on"]
+    contracts.validate_output("list_provider_models", payload)
 
 
 @pytest.mark.parametrize(
@@ -477,7 +559,7 @@ def test_download_catalog_requires_verified_digest_and_destination(contracts: Co
     validator.validate(resource)
 
 
-def test_v2_server_metadata_requires_workflow_and_transport_disclosure(
+def test_server_metadata_requires_workflow_and_transport_disclosure(
     contracts: ContractSet,
 ) -> None:
     payload = deepcopy(contracts["get_server_info"].output_examples[0])
@@ -490,156 +572,31 @@ def test_v2_server_metadata_requires_workflow_and_transport_disclosure(
         contracts.validate_output("get_server_info", payload)
 
 
-@pytest.mark.parametrize("selection", [None, MINUTES_MODEL])
-def test_minutes_model_is_shared_across_meeting_and_profile_tools(
-    contracts: ContractSet, selection: dict[str, Any] | None
-) -> None:
-    for tool in ("set_meeting_config", "set_profile", "start_recording", "import_recording"):
-        args = dict(contracts[tool].input_examples[0])
-        if tool == "set_meeting_config":
-            args.update(minutes_model=selection, external_send_policy="subscription_ok")
-        else:
-            args["config"] = {"minutes_model": selection, "external_send_policy": "subscription_ok"}
-        contracts.validate_input(tool, args)
-    for tool in (
-        "get_meeting",
-        "set_meeting_config",
-        "get_profile",
-        "set_profile",
-        "list_profiles",
-    ):
-        payload = deepcopy(contracts[tool].output_examples[0])
-        if tool == "list_profiles":
-            config = payload["profiles"][0]["config"]
-        elif "profile" in payload:
-            config = payload["profile"]["config"]
-        else:
-            config = payload["config"]
-        config.update(minutes_model=selection, external_send_policy="subscription_ok")
-        contracts.validate_output(tool, payload)
-
-
-def test_minutes_model_defaults_preserve_legacy_provider_and_roundtrip(
-    contracts: ContractSet,
-) -> None:
-    assert MeetingConfig().minutes_model is None
-    assert MeetingConfig(minutes_model=None).minutes_model is None
-    config = MeetingConfig.model_validate(
-        {"llm_provider": "ollama", "minutes_model": MINUTES_MODEL}
-    )
-    assert config.llm_provider == "ollama"
-    assert config.minutes_model is not None
-    assert config.minutes_model.model_dump() == {
-        **MINUTES_MODEL,
-        "parameters": {},
-        "cache_epoch": 0,
-    }
-    Draft202012Validator(contracts.schema_for_def("meeting_config")).validate(config.model_dump())
-    with_parameters = {
-        **MINUTES_MODEL,
-        "parameters": {"reasoning_effort": "high"},
-        "cache_epoch": 2,
-    }
-    config = MeetingConfig.model_validate({"minutes_model": with_parameters})
-    assert config.minutes_model is not None
-    assert config.minutes_model.model_dump() == with_parameters
+def test_server_metadata_declares_explicit_minutes_providers(contracts: ContractSet) -> None:
+    payload = deepcopy(contracts["get_server_info"].output_examples[0])
+    contracts.validate_output("get_server_info", payload)
+    payload["capabilities"]["minutes_model_providers"] = []
+    contracts.validate_output("get_server_info", payload)
+    del payload["capabilities"]["minutes_model_providers"]
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("get_server_info", payload)
 
 
 @pytest.mark.parametrize(
-    "changes",
+    "providers",
     [
-        {"provider": "openai-api"},
-        {"provider": "ollama"},
-        {"provider": "none"},
-        {"connection_id": "../other"},
-        {"connection_revision": 0},
-        {"connection_revision": True},
-        {"connection_revision": "1"},
-        {"model_id": ""},
-        {"model_id": "x" * 257},
-        {"model_id": None},
-        {"cache_epoch": -1},
-        {"cache_epoch": True},
-        {"cache_epoch": "0"},
-        {"parameters": None},
-        {"parameters": {"reasoning_effort": None}},
-        {"parameters": {"reasoning_effort": ""}},
-        {"parameters": {"reasoning_effort": 1}},
-        {"parameters": {"reasoning_effort": "high\ncommand"}},
-        {"parameters": {"endpoint": "https://unapproved.example"}},
-        {"parameters": {"api_key": "example-not-a-real-key"}},
-        {"parameters": {"path": "/tmp/runtime"}},
-        {"parameters": {"max_tokens": 10}},
-        {"api_key": "example-not-a-real-key"},
-        {"endpoint": "https://unapproved.example"},
-        {"command": "installer"},
-    ],
-)
-def test_minutes_model_rejects_unsupported_or_secret_configuration(
-    contracts: ContractSet, changes: dict[str, Any]
-) -> None:
-    selection = {**MINUTES_MODEL, **changes}
-    with pytest.raises(InvalidArgumentError):
-        contracts.validate_input(
-            "set_meeting_config",
-            {"meeting_id": MEETING_ID, "request_id": REQUEST_ID, "minutes_model": selection},
-        )
-    with pytest.raises(ModelValidationError):
-        MeetingConfig.model_validate({"minutes_model": selection})
-
-
-@pytest.mark.parametrize("field", list(MINUTES_MODEL))
-def test_minutes_model_requires_explicit_provider_connection_revision_and_model(
-    contracts: ContractSet, field: str
-) -> None:
-    selection = {key: value for key, value in MINUTES_MODEL.items() if key != field}
-    with pytest.raises(InvalidArgumentError):
-        contracts.validate_input(
-            "set_meeting_config",
-            {"meeting_id": MEETING_ID, "request_id": REQUEST_ID, "minutes_model": selection},
-        )
-    with pytest.raises(ModelValidationError):
-        MeetingConfig.model_validate({"minutes_model": selection})
-
-
-@pytest.mark.parametrize("tool", ["regenerate", "register_context"])
-def test_generation_entry_points_accept_confirmed_full_config(
-    contracts: ContractSet, tool: str
-) -> None:
-    args = deepcopy(contracts[tool].input_examples[0])
-    if tool == "register_context":
-        args["auto_regenerate"] = True
-    config = MeetingConfig.model_validate(
-        {"minutes_model": MINUTES_MODEL, "external_send_policy": "subscription_ok"}
-    ).model_dump()
-    contracts.validate_input(tool, {**args, "expected_config": config})
-    config["minutes_model"] = None
-    contracts.validate_input(tool, {**args, "expected_config": config})
-    # Whether omission is safe depends on saved state, which the server checks under its lock.
-    contracts.validate_input(tool, args)
-    if tool == "register_context":
-        args["auto_regenerate"] = False
-        contracts.validate_input(tool, args)
-        contracts.validate_input(tool, {**args, "expected_config": config})
-
-
-@pytest.mark.parametrize("tool", ["regenerate", "register_context"])
-@pytest.mark.parametrize(
-    "expected_config",
-    [
+        ["codex-app-server", "codex-app-server"],
+        ["claude-agent-sdk"],
+        ["unknown-provider"],
+        ["fake"],
+        "openai-api",
         None,
-        "current",
-        [],
-        {"external_send_policy": "unrestricted"},
-        {"api_key": "example-not-a-real-key"},
-        {"minutes_model": {**MINUTES_MODEL, "parameters": {"path": "/tmp/runtime"}}},
-        {"minutes_model": {**MINUTES_MODEL, "connection_revision": 0}},
-        {"minutes_model": {**MINUTES_MODEL, "model_id": None}},
     ],
 )
-def test_generation_entry_points_reject_invalid_config_snapshots(
-    contracts: ContractSet, tool: str, expected_config: Any
+def test_minutes_provider_capabilities_are_a_closed_unique_list(
+    contracts: ContractSet, providers: Any
 ) -> None:
-    args = contracts[tool].input_examples[0]
-    with pytest.raises(InvalidArgumentError):
-        contracts.validate_input(tool, {**args, "expected_config": expected_config})
+    payload = deepcopy(contracts["get_server_info"].output_examples[0])
+    payload["capabilities"]["minutes_model_providers"] = providers
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("get_server_info", payload)

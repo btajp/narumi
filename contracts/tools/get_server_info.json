@@ -56,13 +56,14 @@
           "transcription_engines",
           "diarization_engines",
           "llm_providers",
+          "minutes_model_providers",
           "export_destinations",
           "workflow"
         ],
         "properties": {
           "workflow": {
             "$ref": "../defs/providers.json#/$defs/provider_workflow_capabilities",
-            "description": "Implemented workflow operations, independent of provider registry names. This development phase supports connection management and model discovery, not per-stage selection or ensemble generation."
+            "description": "Implemented workflow operations, independent of connection readiness. Text minutes selection is supported for adapters listed in minutes_model_providers; all-stage selection and ensemble generation are not supported."
           },
           "recording": {
             "type": "boolean",
@@ -94,6 +95,12 @@
             "type": "array",
             "description": "Registry names usable as llm_provider (e.g. none, fake, claude-agent-sdk, anthropic-api, ollama).",
             "items": { "type": "string", "minLength": 1 }
+          },
+          "minutes_model_providers": {
+            "type": "array",
+            "items": { "$ref": "../defs/provider_models.json#/$defs/minutes_model_provider" },
+            "uniqueItems": true,
+            "description": "Adapters implemented for explicit text-only minutes_model selection, independent of whether a connection is authenticated, prepared or has available models. An empty array means this server cannot execute explicit minutes models. Claude Agent SDK generation is excluded. UI and CLI must also validate connection, catalog and policy before selection or generation."
           },
           "export_destinations": {
             "type": "array",
@@ -177,28 +184,74 @@
     "additionalProperties": false
   },
   "examples": {
-    "input": [{}, { "refresh_permissions": true }],
+    "input": [
+      {},
+      {
+        "refresh_permissions": true
+      }
+    ],
     "output": [
       {
         "name": "narumi",
         "server_version": "0.1.4",
         "server_instance_id": "00000000-0000-4000-8000-000000000001",
-        "contract_version": "3.0.0",
-        "secure_transport": { "mode": "pinned_tls", "tls_required": true, "client_auth_required": true },
+        "contract_version": "4.0.0",
+        "secure_transport": {
+          "mode": "pinned_tls",
+          "tls_required": true,
+          "client_auth_required": true
+        },
         "capabilities": {
-          "workflow": { "provider_connections": true, "provider_models": true, "stage_model_selection": false, "ensemble_generation": false },
+          "workflow": {
+            "provider_connections": true,
+            "provider_models": true,
+            "stage_model_selection": true,
+            "ensemble_generation": false
+          },
           "recording": true,
           "permission_setup_in_progress": false,
-          "permissions": { "screen_recording": "granted", "microphone": "unknown" },
-          "transports": ["streamable-http"],
-          "transcription_engines": ["auto", "fake", "mlx-whisper", "faster-whisper"],
-          "diarization_engines": ["none", "fake"],
-          "llm_providers": ["none", "fake", "claude-agent-sdk"],
-          "export_destinations": ["markdown", "html"]
+          "permissions": {
+            "screen_recording": "granted",
+            "microphone": "unknown"
+          },
+          "transports": [
+            "streamable-http"
+          ],
+          "transcription_engines": [
+            "auto",
+            "fake",
+            "mlx-whisper",
+            "faster-whisper"
+          ],
+          "diarization_engines": [
+            "none",
+            "fake"
+          ],
+          "llm_providers": [
+            "none",
+            "fake",
+            "claude-agent-sdk"
+          ],
+          "export_destinations": [
+            "markdown",
+            "html"
+          ],
+          "minutes_model_providers": [
+            "codex-app-server",
+            "anthropic-api",
+            "ollama",
+            "openai-api"
+          ]
         },
         "diagnostics": {
-          "ffmpeg": { "path": "/opt/homebrew/bin/ffmpeg", "version": "7.1.1" },
-          "ffprobe": { "path": "/opt/homebrew/bin/ffprobe", "version": "7.1.1" },
+          "ffmpeg": {
+            "path": "/opt/homebrew/bin/ffmpeg",
+            "version": "7.1.1"
+          },
+          "ffprobe": {
+            "path": "/opt/homebrew/bin/ffprobe",
+            "version": "7.1.1"
+          },
           "data_root": "/Users/me/Library/Application Support/narumi",
           "meetings_root": "/Users/me/Library/Application Support/narumi/meetings",
           "catalog_path": "/Users/me/Library/Application Support/narumi/narumi.db",
@@ -210,17 +263,46 @@
         "name": "narumi",
         "server_version": "0.1.4",
         "server_instance_id": "00000000-0000-4000-8000-000000000002",
-        "contract_version": "3.0.0",
-        "secure_transport": { "mode": "stdio", "tls_required": true, "client_auth_required": true },
+        "contract_version": "4.0.0",
+        "secure_transport": {
+          "mode": "stdio",
+          "tls_required": true,
+          "client_auth_required": true
+        },
         "capabilities": {
-          "workflow": { "provider_connections": true, "provider_models": true, "stage_model_selection": false, "ensemble_generation": false },
+          "workflow": {
+            "provider_connections": true,
+            "provider_models": true,
+            "stage_model_selection": true,
+            "ensemble_generation": false
+          },
           "recording": false,
           "permission_setup_in_progress": false,
-          "transports": ["stdio"],
-          "transcription_engines": ["auto", "fake"],
-          "diarization_engines": ["none", "fake"],
-          "llm_providers": ["none", "fake"],
-          "export_destinations": ["markdown", "html"]
+          "transports": [
+            "stdio"
+          ],
+          "transcription_engines": [
+            "auto",
+            "fake"
+          ],
+          "diarization_engines": [
+            "none",
+            "fake"
+          ],
+          "llm_providers": [
+            "none",
+            "fake"
+          ],
+          "export_destinations": [
+            "markdown",
+            "html"
+          ],
+          "minutes_model_providers": [
+            "codex-app-server",
+            "anthropic-api",
+            "ollama",
+            "openai-api"
+          ]
         },
         "diagnostics": {
           "ffmpeg": null,

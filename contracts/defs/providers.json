@@ -9,9 +9,10 @@
         "anthropic-api",
         "claude-agent-sdk",
         "codex-app-server",
+        "openai-api",
         "ollama"
       ],
-      "description": "Supported provider adapters. Codex App Server supports explicit text minutes generation; the OpenAI API adapter is not available yet."
+      "description": "Supported connection adapters. Explicit text minutes generation supports Codex App Server, Anthropic API, OpenAI API and verified local Ollama; Claude Agent SDK generation is not available."
     },
     "provider_role": {
       "type": "string",
@@ -280,6 +281,15 @@
       "allOf": [
         {
           "if": {
+            "properties": { "provider_id": { "const": "openai-api" } },
+            "required": ["provider_id"]
+          },
+          "then": {
+            "properties": { "auth_methods": { "const": ["api_key"] }, "roles": { "const": ["llm"] } }
+          }
+        },
+        {
+          "if": {
             "properties": {
               "provider_id": {
                 "const": "ollama"
@@ -332,7 +342,7 @@
         },
         "stage_model_selection": {
           "type": "boolean",
-          "description": "Explicit model selection and execution are implemented for at least one stage. Currently minutes_model selects one Codex App Server model for text minutes only; other stages keep llm_provider."
+          "description": "Explicit model selection and execution are implemented for text minutes only. Supported adapters are listed in capabilities.minutes_model_providers; other stages keep llm_provider. This flag does not imply ensemble or all-stage model selection."
         },
         "ensemble_generation": {
           "type": "boolean",

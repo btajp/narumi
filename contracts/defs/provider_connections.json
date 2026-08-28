@@ -211,7 +211,7 @@
           ],
           "minLength": 1,
           "maxLength": 2048,
-          "description": "Non-secret, validated destination. Official Anthropic and Codex destinations are fixed; Ollama is restricted to loopback."
+          "description": "Non-secret, validated destination. Official Anthropic, OpenAI API and Codex destinations are fixed; Ollama is restricted to numeric loopback."
         },
         "auth_method": {
           "$ref": "#/$defs/provider_auth_method"
@@ -260,6 +260,18 @@
       },
       "additionalProperties": false,
       "allOf": [
+        {
+          "if": {
+            "properties": { "provider_id": { "const": "openai-api" } },
+            "required": ["provider_id"]
+          },
+          "then": {
+            "properties": {
+              "auth_method": { "const": "api_key" },
+              "endpoint": { "const": "https://api.openai.com" }
+            }
+          }
+        },
         {
           "if": {
             "properties": {
