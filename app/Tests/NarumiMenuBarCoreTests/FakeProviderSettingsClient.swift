@@ -16,6 +16,8 @@ actor FakeProviderSettingsClient: ProviderSettingsClient {
         var setupRejection: ProviderSettingsFailure?
         var loseSaveResponse = false
         var failKeychainAfterMetadata = false
+        var authorizationURL: ProviderAuthorizationURL?
+        var authLookupReason: String?
     }
 
     var connections: [ProviderConnection]
@@ -44,7 +46,9 @@ actor FakeProviderSettingsClient: ProviderSettingsClient {
         self.providers = providers
         self.scenario = scenario
         if let active = connections.first?.activeAuth {
-            authOperation = ProviderSettingsFixtures.auth(requestID: active.startRequestID, state: active.state)
+            authOperation = ProviderSettingsFixtures.auth(
+                requestID: active.startRequestID, state: active.state,
+                connectionID: connections[0].connectionID, connectionRevision: connections[0].revision)
         }
         savedSetup = providers.first?.runtime.activeSetup ?? providers.first?.runtime.lastSetup
     }
@@ -124,11 +128,19 @@ actor FakeProviderSettingsClient: ProviderSettingsClient {
     func authenticateProviderConnection(_ request: AuthenticateProviderConnectionRequest) async throws -> ProviderAuthResponse {
         authRequests.append(request)
         if let rejection = scenario.authRejection { throw rejection }
+        guard let connection = connections.first(where: { $0.connectionID == request.connectionID }) else {
+            throw ProviderSettingsFailure(.notFound)
+        }
         if request.action == .cancel, let previous = authOperation {
             authOperation = ProviderSettingsFixtures.auth(
-                requestID: previous.startRequestID, state: .cancelled, action: previous.action)
+                requestID: previous.startRequestID, state: .cancelled, action: previous.action,
+                connectionID: previous.connectionID, connectionRevision: previous.connectionRevision)
         } else {
-            authOperation = ProviderSettingsFixtures.auth(requestID: request.requestID, action: request.action)
+            authOperation = ProviderSettingsFixtures.auth(
+                requestID: request.requestID, action: request.action,
+                connectionID: request.connectionID,
+                connectionRevision: connection.revision + (request.action == .logout ? 1 : 0),
+                authorizationURL: request.action == .start ? scenario.authorizationURL : nil)
         }
         let operation = authOperation!
         applyAuthState(operation)
@@ -143,7 +155,10 @@ actor FakeProviderSettingsClient: ProviderSettingsClient {
             throw ProviderSettingsFailure(.notFound)
         }
         let operation = ProviderSettingsFixtures.auth(
-            requestID: previous.startRequestID, state: scenario.authLookupState, action: previous.action)
+            requestID: previous.startRequestID, state: scenario.authLookupState, action: previous.action,
+            connectionID: previous.connectionID, connectionRevision: previous.connectionRevision,
+            authorizationURL: scenario.authLookupState == .pending ? scenario.authorizationURL : nil,
+            reason: scenario.authLookupReason)
         authOperation = operation
         applyAuthState(operation)
         return ProviderAuthResponse(operation: operation)
@@ -151,15 +166,21 @@ actor FakeProviderSettingsClient: ProviderSettingsClient {
 
     func testProviderConnection(_ request: TestProviderConnectionRequest) async throws -> ProviderConnectionTestResult {
         testRequests.append(request)
-        let connection = ProviderSettingsFixtures.changed(connections[0], authState: .authenticated, catalogState: .ready)
-        connections = [connection]
+        guard let index = connections.firstIndex(where: { $0.connectionID == request.connectionID }) else {
+            throw ProviderSettingsFailure(.notFound)
+        }
+        let connection = ProviderSettingsFixtures.changed(connections[index], authState: .authenticated, catalogState: .ready)
+        connections[index] = connection
         return ProviderConnectionTestResult(connection: connection, connected: true, reason: nil)
     }
 
     func listProviderModels(_ request: ListProviderModelsRequest) async throws -> ListProviderModelsResponse {
         modelRequests.append(request)
+        guard let connection = connections.first(where: { $0.connectionID == request.connectionID }) else {
+            throw ProviderSettingsFailure(.notFound)
+        }
         return ListProviderModelsResponse(
-            connectionID: request.connectionID, connectionRevision: scenario.modelRevision ?? connections[0].revision,
+            connectionID: request.connectionID, connectionRevision: scenario.modelRevision ?? connection.revision,
             models: [ProviderSettingsFixtures.model()], nextCursor: nil, catalogState: .ready,
             fetchedAt: ProviderSettingsFixtures.timestamp)
     }
@@ -188,13 +209,30 @@ actor FakeProviderSettingsClient: ProviderSettingsClient {
     }
 
     private func applyAuthState(_ operation: ProviderAuthOperation) {
-        guard let connection = connections.first else { return }
+        guard let index = connections.firstIndex(where: { $0.connectionID == operation.connectionID }) else { return }
+        let connection = connections[index]
         let active: ProviderActiveAuth? = operation.state == .pending || operation.state == .unknown
             ? ProviderSettingsFixtures.activeAuth(requestID: operation.startRequestID, state: operation.state) : nil
-        let authState: ProviderAuthState = operation.state == .succeeded ? .authenticated : .authenticating
-        connections = [ProviderSettingsFixtures.changed(
-            connection, credential: operation.action == .logout && operation.state == .succeeded ? false : nil,
-            authState: authState, activeAuth: active)]
+        let authState: ProviderAuthState
+        if operation.state == .succeeded {
+            authState = operation.action == .logout ? .unconfigured : .authenticated
+        } else {
+            switch operation.state {
+            case .unknown: authState = .unknown
+            case .failed: authState = .failed
+            case .cancelled: authState = .unconfigured
+            default: authState = .authenticating
+            }
+        }
+        let credential: Bool?
+        if operation.action == .logout && (operation.state == .succeeded || connection.authMethod == .chatgpt) {
+            credential = false
+        } else {
+            credential = operation.state == .succeeded && connection.authMethod == .chatgpt ? true : nil
+        }
+        connections[index] = ProviderSettingsFixtures.changed(
+            connection, revision: operation.connectionRevision, credential: credential,
+            authState: authState, activeAuth: active)
     }
 
     private func applySetupState(providerID: ProviderID) {

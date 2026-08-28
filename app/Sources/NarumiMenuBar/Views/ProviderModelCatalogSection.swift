@@ -19,7 +19,7 @@ struct ProviderModelCatalogSection: View {
                     LabeledContent("取得時刻", value: store.catalogFetchedAt ?? "未取得")
                 }
                 if store.models.isEmpty {
-                    Text("モデル候補は表示されていません。API キーや接続先を確認し、必要な場合だけ候補を更新してください。")
+                    Text("モデル候補は表示されていません。ログイン・API キー・接続先を確認し、必要な場合だけ候補を更新してください。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 ForEach(store.models, id: \.modelID) { model in
@@ -63,7 +63,7 @@ private struct ProviderModelCandidateRow: View {
                     Text("確認済みパラメータ: " + model.parameterSchema.properties.keys.sorted().joined(separator: "、"))
                         .font(.caption)
                 }
-                Text("この一覧は候補情報です。工程別のモデル選択・パラメータ設定・生成は、後続の実装で対応します。")
+                Text("この一覧は候補情報です。Codex のモデルは会議の「設定」またはプロファイルの「議事録の生成方法」で選択して保存します。接続だけでは会議に適用しません。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             .font(.caption)

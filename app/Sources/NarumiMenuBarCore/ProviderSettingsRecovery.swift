@@ -8,7 +8,12 @@ public struct ProviderSettingsRecovery: Equatable, Sendable {
         public let startRequestID: String
         public fileprivate(set) var operationID: String?
         public fileprivate(set) var serverInstanceID: String?
+        public fileprivate(set) var connectionRevision: Int?
+        public fileprivate(set) var action: ProviderAuthAction?
         public fileprivate(set) var state: ProviderAuthOperationState
+        public fileprivate(set) var authorizationURL: ProviderAuthorizationURL?
+        public fileprivate(set) var userCode: ProviderUserCode?
+        public fileprivate(set) var reasonMessage: String?
 
         public var unresolved: Bool { state == .pending || state == .unknown }
     }
@@ -33,10 +38,14 @@ public struct ProviderSettingsRecovery: Equatable, Sendable {
             || setups.values.contains { $0.state == .queued || $0.state == .running }
     }
 
-    public mutating func beginAuthentication(connectionID: String, requestID: String) -> Bool {
+    public mutating func beginAuthentication(
+        connectionID: String, requestID: String, connectionRevision: Int? = nil,
+        action: ProviderAuthAction? = nil
+    ) -> Bool {
         guard authentications[connectionID]?.unresolved != true else { return false }
         authentications[connectionID] = Authentication(
-            connectionID: connectionID, startRequestID: requestID, state: .pending)
+            connectionID: connectionID, startRequestID: requestID,
+            connectionRevision: connectionRevision, action: action, state: .pending)
         return true
     }
 
@@ -44,25 +53,42 @@ public struct ProviderSettingsRecovery: Equatable, Sendable {
     public mutating func receive(_ operation: ProviderAuthOperation) -> Bool {
         guard var pending = authentications[operation.connectionID],
             pending.startRequestID == operation.startRequestID else { return false }
-        if let instance = pending.serverInstanceID, instance != operation.serverInstanceID {
-            pending.state = .unknown
-            authentications[operation.connectionID] = pending
-            return false
-        }
-        if let operationID = pending.operationID, operationID != operation.operationID {
-            pending.state = .unknown
-            authentications[operation.connectionID] = pending
+        guard (pending.serverInstanceID == nil || pending.serverInstanceID == operation.serverInstanceID),
+            (pending.operationID == nil || pending.operationID == operation.operationID),
+            (pending.connectionRevision == nil || pending.connectionRevision == operation.connectionRevision),
+            (pending.action == nil || pending.action == operation.action),
+            (operation.authorizationURL == nil) == (operation.userCode == nil),
+            operation.authorizationURL == nil || (operation.action == .start && operation.state == .pending) else {
+            authenticationUnconfirmed(connectionID: operation.connectionID)
             return false
         }
         pending.operationID = operation.operationID
         pending.serverInstanceID = operation.serverInstanceID
+        pending.connectionRevision = operation.connectionRevision
+        pending.action = operation.action
         pending.state = operation.state
+        pending.authorizationURL = operation.state == .pending ? operation.authorizationURL : nil
+        pending.userCode = operation.state == .pending ? operation.userCode : nil
+        pending.reasonMessage = ProviderDisplay.reason(operation.reason)
         authentications[operation.connectionID] = pending
         return true
     }
 
     public mutating func authenticationUnconfirmed(connectionID: String) {
         authentications[connectionID]?.state = .unknown
+        clearAuthorizationChallenge(connectionID: connectionID)
+        authentications[connectionID]?.reasonMessage = nil
+    }
+
+    public mutating func clearAuthorizationChallenges() {
+        for connectionID in Array(authentications.keys) {
+            clearAuthorizationChallenge(connectionID: connectionID)
+        }
+    }
+
+    private mutating func clearAuthorizationChallenge(connectionID: String) {
+        authentications[connectionID]?.authorizationURL = nil
+        authentications[connectionID]?.userCode = nil
     }
 
     public mutating func authenticationRejected(connectionID: String, requestID: String) {
@@ -102,19 +128,42 @@ public struct ProviderSettingsRecovery: Equatable, Sendable {
     }
 
     public mutating func observe(connections: [ProviderConnection]) {
+        let connectionIDs = Set(connections.map(\.connectionID))
+        for connectionID in Array(authentications.keys) where !connectionIDs.contains(connectionID) {
+            clearAuthorizationChallenge(connectionID: connectionID)
+        }
         for connection in connections {
-            guard let active = connection.activeAuth else { continue }
-            if let pending = authentications[connection.connectionID], pending.unresolved {
-                guard pending.startRequestID == active.startRequestID else { continue }
+            guard let active = connection.activeAuth else {
+                clearAuthorizationChallenge(connectionID: connection.connectionID)
+                continue
+            }
+            if var pending = authentications[connection.connectionID], pending.unresolved {
+                guard pending.startRequestID == active.startRequestID else {
+                    clearAuthorizationChallenge(connectionID: connection.connectionID)
+                    continue
+                }
                 guard pending.serverInstanceID == nil || pending.serverInstanceID == active.serverInstanceID,
-                    pending.operationID == nil || pending.operationID == active.operationID else {
+                    pending.operationID == nil || pending.operationID == active.operationID,
+                    pending.connectionRevision == nil || pending.connectionRevision == connection.revision else {
                     authenticationUnconfirmed(connectionID: connection.connectionID)
                     continue
                 }
+                pending.operationID = active.operationID
+                pending.serverInstanceID = active.serverInstanceID
+                pending.connectionRevision = connection.revision
+                if active.state != pending.state { pending.reasonMessage = nil }
+                pending.state = active.state
+                if active.state != .pending {
+                    pending.authorizationURL = nil
+                    pending.userCode = nil
+                }
+                authentications[connection.connectionID] = pending
+                continue
             }
             authentications[connection.connectionID] = Authentication(
                 connectionID: connection.connectionID, startRequestID: active.startRequestID,
-                operationID: active.operationID, serverInstanceID: active.serverInstanceID, state: active.state)
+                operationID: active.operationID, serverInstanceID: active.serverInstanceID,
+                connectionRevision: connection.revision, state: active.state)
         }
         // An absent active_auth must not resolve a lost receipt or a restarted operation.
     }

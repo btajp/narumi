@@ -12,6 +12,7 @@ struct SettingsTabView: View {
     @State private var discardSystem = false
     @State private var showDiscardConfirm = false
     @State private var showDeleteConfirm = false
+    @State private var saving = false
 
     var body: some View {
         Form {
@@ -46,48 +47,25 @@ struct SettingsTabView: View {
     @ViewBuilder
     private var configSection: some View {
         Section("会議設定（保存後、反映には再生成が必要）") {
-            capabilityPicker("文字起こしエンジン", selection: $form.transcriptionEngine,
-                             options: capabilities?.transcriptionEngines ?? [])
-            capabilityPicker("話者分離エンジン", selection: $form.diarizationEngine,
-                             options: capabilities?.diarizationEngines ?? [])
-            capabilityPicker("LLM プロバイダ", selection: $form.llmProvider,
-                             options: capabilities?.llmProviders ?? [])
-            Picker("外部送信ポリシー", selection: $form.externalSendPolicy) {
-                Text("（変更しない）").tag("")
-                Text("local_only — ローカル完結").tag("local_only")
-                Text("subscription_ok — サブスク LLM 可").tag("subscription_ok")
-                Text("api_ok — 従量 API も可").tag("api_ok")
-            }
-            TextField("言語（ja / en など）", text: $form.language)
-            TextField("自分の名前（マイク話者の表示名）", text: $form.selfName)
-            VStack(alignment: .leading) {
-                Text("語彙ヒント（1 行 1 語）")
-                TextEditor(text: $form.vocabHintsText)
-                    .font(.body)
-                    .frame(minHeight: 70)
-                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3)))
-            }
+            ProcessingConfigurationFields(
+                form: $form.processing, capabilities: capabilities, catalog: model.minutesModelCatalog)
             TextField("scope（空 = scope なし）", text: $form.scopeText)
-            Button("保存") {
+            Button(saving ? "保存中…" : "保存") {
+                let draft = form
+                saving = true
                 Task {
-                    await model.saveMeetingConfig(form)
-                    loadedMeetingID = nil
-                    syncForm()
+                    if await model.saveMeetingConfig(draft) {
+                        loadedMeetingID = nil
+                        syncForm()
+                    }
+                    saving = false
                 }
             }
+            .disabled(saving || (form.processing.minutesModel.mode == .codex
+                && (model.minutesModelCatalog.isLoading
+                    || model.minutesModelCatalog.validationMessage(for: form.processing) != nil)))
         }
-    }
-
-    private func capabilityPicker(_ title: String, selection: Binding<String>, options: [String]) -> some View {
-        Picker(title, selection: selection) {
-            Text("（変更しない）").tag("")
-            // Keep a stored value visible even when the running server no longer offers it.
-            let values = options.contains(selection.wrappedValue) || selection.wrappedValue.isEmpty
-                ? options : options + [selection.wrappedValue]
-            ForEach(values, id: \.self) { option in
-                Text(option).tag(option)
-            }
-        }
+        .disabled(saving)
     }
 
     @ViewBuilder

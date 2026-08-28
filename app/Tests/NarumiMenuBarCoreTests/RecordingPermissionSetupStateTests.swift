@@ -83,18 +83,21 @@ final class RecordingPermissionSetupStateTests: XCTestCase {
     }
 
     func testDeniedMicrophoneUsesSettingsWhileScreenStillAllowsRequest() throws {
-        let state = try connected(info(microphone: "denied", screen: "denied"))
-        XCTAssertEqual(state.permissionState(.microphone), .notGranted)
-        XCTAssertEqual(state.permissionState(.screenRecording), .notGranted)
-        XCTAssertFalse(state.canRequest(.microphone))
-        XCTAssertTrue(state.canOpenSettings(.microphone))
-        XCTAssertTrue(state.canRequest(.screenRecording))
-        XCTAssertTrue(state.needsSetup)
-        XCTAssertFalse(state.ready)
+        for version in ["2.0.0", "3.0.0"] {
+            let state = try connected(info(microphone: "denied", screen: "denied", contract: version))
+            XCTAssertTrue(state.supportsSetup)
+            XCTAssertEqual(state.permissionState(.microphone), .notGranted)
+            XCTAssertEqual(state.permissionState(.screenRecording), .notGranted)
+            XCTAssertFalse(state.canRequest(.microphone))
+            XCTAssertTrue(state.canOpenSettings(.microphone))
+            XCTAssertTrue(state.canRequest(.screenRecording))
+            XCTAssertTrue(state.needsSetup)
+            XCTAssertFalse(state.ready)
+        }
     }
 
     func testOldAndUnknownMajorContractsKeepSetupUnavailable() throws {
-        for version in ["1.0.0", "1.1.0", "3.0.0", "unrecognized"] {
+        for version in ["1.0.0", "1.1.0", "4.0.0", "unrecognized"] {
             var state = try connected(info(contract: version))
             XCTAssertFalse(state.supportsSetup)
             XCTAssertTrue(state.needsSetup)

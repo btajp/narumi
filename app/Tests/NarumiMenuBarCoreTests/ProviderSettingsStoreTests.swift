@@ -256,4 +256,98 @@ final class ProviderSettingsStoreTests: XCTestCase {
         XCTAssertEqual(cancelled, [setup.jobID])
         XCTAssertEqual(store.recovery.setups[.anthropicAPI]?.state, .cancelled)
     }
+
+    func testCodexCanLoginWithoutAPIKeyButCannotQueryModelsBeforeLogin() async throws {
+        let url = try XCTUnwrap(ProviderAuthorizationURL(ProviderSettingsFixtures.authorizationURL()))
+        let client = FakeProviderSettingsClient(
+            connections: [ProviderSettingsFixtures.connection(providerID: .codexAppServer, credential: false, authState: .unconfigured)],
+            providers: [ProviderSettingsFixtures.provider(providerID: .codexAppServer)],
+            scenario: .init(authorizationURL: url))
+        let store = ProviderSettingsStore(client: client)
+        await store.load()
+        XCTAssertTrue(store.canAuthenticate)
+        XCTAssertFalse(store.canTest)
+        await store.testConnection()
+        await store.loadModels(refresh: true)
+        let prematureTests = await client.testRequests
+        let prematureModels = await client.modelRequests
+        XCTAssertTrue(prematureTests.isEmpty)
+        XCTAssertTrue(prematureModels.isEmpty)
+
+        await store.startAuthentication()
+        XCTAssertEqual(store.pendingAuthentication?.state, .pending)
+        XCTAssertEqual(store.browserAuthorizationURL, url.browserURL)
+        XCTAssertFalse(store.canAuthenticate)
+        XCTAssertFalse(store.canTest)
+        await store.refreshOperations()
+        XCTAssertEqual(store.pendingAuthentication?.state, .succeeded)
+        XCTAssertNil(store.browserAuthorizationURL)
+        XCTAssertTrue(store.selectedConnection?.credentialPresent ?? false)
+        XCTAssertTrue(store.canTest)
+        XCTAssertEqual(store.selectedConnection?.catalogState, .unfetched)
+        await store.loadModels(refresh: true)
+        XCTAssertFalse(store.models.isEmpty)
+        XCTAssertEqual(store.selectedConnection?.lastGenerationState, .never)
+        let starts = await client.authRequests
+        let models = await client.modelRequests
+        let saves = await client.saveRequests
+        XCTAssertEqual(starts.count, 1)
+        XCTAssertEqual(models.map(\.refresh), [true])
+        XCTAssertTrue(saves.isEmpty)
+    }
+
+    func testCodexLoginRequiresPreparedRuntime() async {
+        for state in [ProviderRuntimeState.notPrepared, .preparing, .failed, .unknown] {
+            let client = FakeProviderSettingsClient(
+                connections: [ProviderSettingsFixtures.connection(providerID: .codexAppServer, credential: false)],
+                providers: [ProviderSettingsFixtures.provider(providerID: .codexAppServer, state: state)])
+            let store = ProviderSettingsStore(client: client)
+            await store.load()
+            XCTAssertFalse(store.canAuthenticate, state.rawValue)
+            await store.startAuthentication()
+            let requests = await client.authRequests
+            XCTAssertTrue(requests.isEmpty, state.rawValue)
+        }
+    }
+
+    func testCreatingCodexConnectionDoesNotLoginOrSaveAnAPIKey() async {
+        let client = FakeProviderSettingsClient(
+            connections: [], providers: [ProviderSettingsFixtures.provider(providerID: .codexAppServer)])
+        let store = ProviderSettingsStore(client: client)
+        await store.load()
+        store.editor.displayName = "Meeting Codex"
+        await store.save()
+        XCTAssertEqual(store.selectedConnection?.providerID, .codexAppServer)
+        XCTAssertEqual(store.selectedConnection?.authMethod, .chatgpt)
+        XCTAssertFalse(store.selectedConnection?.credentialPresent ?? true)
+        XCTAssertTrue(store.canAuthenticate)
+        XCTAssertFalse(store.canTest)
+        let saves = await client.saveRequests
+        let starts = await client.authRequests
+        XCTAssertEqual(saves.first?.apiKey, .unchanged)
+        XCTAssertTrue(starts.isEmpty)
+    }
+
+    func testCodexLogoutOnlyChangesTheSelectedConnectionAndPreservesRevisionReceipt() async {
+        let codex = ProviderSettingsFixtures.connection(providerID: .codexAppServer, authState: .authenticated)
+        let other = ProviderSettingsFixtures.connection(connectionID: "conn-abcdef012345", name: "Other connection")
+        let client = FakeProviderSettingsClient(
+            connections: [codex, other], providers: [ProviderSettingsFixtures.provider(providerID: .codexAppServer)])
+        let store = ProviderSettingsStore(client: client)
+        await store.load()
+        XCTAssertTrue(store.canLogout)
+        await store.logout()
+        XCTAssertEqual(store.pendingAuthentication?.action, .logout)
+        XCTAssertEqual(store.pendingAuthentication?.connectionRevision, codex.revision + 1)
+        XCTAssertNil(store.browserAuthorizationURL)
+        XCTAssertFalse(store.notice?.contains("ログインを開始") ?? true)
+        XCTAssertFalse(store.notice?.contains("認証情報を削除しました") ?? true)
+        await store.refreshOperations()
+        XCTAssertEqual(store.pendingAuthentication?.state, .succeeded)
+        XCTAssertFalse(store.selectedConnection?.credentialPresent ?? true)
+        XCTAssertEqual(store.connections.first(where: { $0.connectionID == other.connectionID }), other)
+        let requests = await client.authRequests
+        XCTAssertEqual(requests.map(\.connectionID), [codex.connectionID])
+        XCTAssertEqual(requests.map(\.action), [.logout])
+    }
 }

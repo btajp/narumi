@@ -177,7 +177,12 @@ struct NarumiClient: Sendable {
         return try await call(ToolCatalog.getTranscript, args)
     }
 
-    func regenerate(meetingID: String, scope: String?, force: Bool, reason: String?) async throws -> RegenerateResponse {
+    func regenerate(
+        meetingID: String, scope: String?, force: Bool, reason: String?, expectedConfig: MeetingConfig? = nil
+    ) async throws -> RegenerateResponse {
+        guard !force || expectedConfig?.minutesModel == nil else {
+            throw ToolFailure(code: "invalid_argument", message: "Codex の新しい試行は会議設定で試行番号を増やして保存してください。")
+        }
         var args: [String: JSONNode] = [
             "meeting_id": .string(meetingID),
             "request_id": Self.requestID(),
@@ -190,6 +195,11 @@ struct NarumiClient: Sendable {
         }
         if let reason, !reason.isEmpty {
             args["reason"] = .string(reason)
+        }
+        // Contract 2 servers have no expected_config. A contract 3 server rejects a concurrent
+        // legacy -> Codex switch because its saved Codex config requires this confirmation.
+        if let expectedConfig, expectedConfig.minutesModel != nil {
+            args["expected_config"] = .object(try Self.arguments(expectedConfig))
         }
         return try await call(ToolCatalog.regenerate, args)
     }
@@ -204,7 +214,7 @@ struct NarumiClient: Sendable {
 
     func registerContext(
         meetingID: String, scope: String?, sourceType: String, payload: ContextPayload,
-        label: String?, autoRegenerate: Bool
+        label: String?, autoRegenerate: Bool, expectedConfig: MeetingConfig? = nil
     ) async throws -> RegisterContextResponse {
         var args: [String: JSONNode] = [
             "meeting_id": .string(meetingID),
@@ -224,6 +234,9 @@ struct NarumiClient: Sendable {
         }
         if autoRegenerate {
             args["auto_regenerate"] = .bool(true)
+            if let expectedConfig, expectedConfig.minutesModel != nil {
+                args["expected_config"] = .object(try Self.arguments(expectedConfig))
+            }
         }
         return try await call(ToolCatalog.registerContext, args)
     }

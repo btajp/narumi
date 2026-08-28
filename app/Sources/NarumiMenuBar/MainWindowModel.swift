@@ -24,6 +24,7 @@ final class MainWindowModel: ObservableObject {
 
     let client: NarumiClient
     let providerSettings: ProviderSettingsStore
+    let minutesModelCatalog: MinutesModelCatalogStore
     var hostActions = HostActions()
 
     // MARK: Sidebar
@@ -82,6 +83,7 @@ final class MainWindowModel: ObservableObject {
     init(client: NarumiClient) {
         self.client = client
         providerSettings = ProviderSettingsStore(client: client)
+        minutesModelCatalog = MinutesModelCatalogStore(client: client)
     }
 
     // MARK: Polling lifecycle (owned by the window controller)
@@ -101,6 +103,7 @@ final class MainWindowModel: ObservableObject {
             readyRefreshTask?.cancel()
             readyRefreshTask = nil
             jobState.invalidateRefresh()
+            minutesModelCatalog.invalidate()
             loadedServerGeneration = nil
             serverInfo = nil
             profilesList = nil
@@ -380,8 +383,10 @@ final class MainWindowModel: ObservableObject {
 
     // MARK: Minutes actions
 
-    func regenerate(force: Bool, reason: String) async {
-        guard let meetingID = selectedMeetingID else {
+    func regenerate(
+        force: Bool, reason: String, expectedConfig: MeetingConfig? = nil, expectedMeetingID: String? = nil
+    ) async {
+        guard let meetingID = selectedMeetingID, expectedMeetingID == nil || expectedMeetingID == meetingID else {
             return
         }
         beginJobRequest()
@@ -389,7 +394,7 @@ final class MainWindowModel: ObservableObject {
         do {
             let response = try await client.regenerate(
                 meetingID: meetingID, scope: scopeFor(meetingID: meetingID), force: force,
-                reason: reason.trimmingCharacters(in: .whitespaces))
+                reason: reason.trimmingCharacters(in: .whitespaces), expectedConfig: expectedConfig)
             track(jobID: response.jobID)
             showToast("再生成ジョブを開始しました (\(response.jobID))")
         } catch {
@@ -459,8 +464,10 @@ final class MainWindowModel: ObservableObject {
         ]
     }
 
-    func registerContext(_ form: ContextForm) async -> Bool {
-        guard let meetingID = selectedMeetingID else {
+    func registerContext(
+        _ form: ContextForm, expectedConfig: MeetingConfig? = nil, expectedMeetingID: String? = nil
+    ) async -> Bool {
+        guard let meetingID = selectedMeetingID, expectedMeetingID == nil || expectedMeetingID == meetingID else {
             return false
         }
         let payload: NarumiClient.ContextPayload
@@ -493,7 +500,7 @@ final class MainWindowModel: ObservableObject {
             let response = try await client.registerContext(
                 meetingID: meetingID, scope: scopeFor(meetingID: meetingID),
                 sourceType: form.sourceType, payload: payload, label: form.label,
-                autoRegenerate: form.autoRegenerate)
+                autoRegenerate: form.autoRegenerate, expectedConfig: expectedConfig)
             if let jobID = response.jobID {
                 track(jobID: jobID)
             }
@@ -507,73 +514,6 @@ final class MainWindowModel: ObservableObject {
     }
 
     // MARK: Settings actions
-
-    struct MeetingConfigForm {
-        var transcriptionEngine = ""
-        var diarizationEngine = ""
-        var llmProvider = ""
-        var externalSendPolicy = ""
-        var language = ""
-        var selfName = ""
-        var vocabHintsText = ""
-        var scopeText = ""
-
-        init() {}
-
-        init(detail: MeetingDetail) {
-            transcriptionEngine = detail.config.transcriptionEngine ?? ""
-            diarizationEngine = detail.config.diarizationEngine ?? ""
-            llmProvider = detail.config.llmProvider ?? ""
-            externalSendPolicy = detail.config.externalSendPolicy ?? ""
-            language = detail.config.language ?? ""
-            selfName = detail.config.selfName ?? ""
-            vocabHintsText = (detail.config.vocabHints ?? []).joined(separator: "\n")
-            scopeText = detail.meeting.scope ?? ""
-        }
-
-        var vocabHints: [String] {
-            vocabHintsText.split(whereSeparator: \.isNewline)
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
-        }
-    }
-
-    func saveMeetingConfig(_ form: MeetingConfigForm) async {
-        guard let meetingID = selectedMeetingID, let detail else {
-            return
-        }
-        var updates: [String: JSONNode] = [:]
-        if !form.transcriptionEngine.isEmpty {
-            updates["transcription_engine"] = .string(form.transcriptionEngine)
-        }
-        if !form.diarizationEngine.isEmpty {
-            updates["diarization_engine"] = .string(form.diarizationEngine)
-        }
-        if !form.llmProvider.isEmpty {
-            updates["llm_provider"] = .string(form.llmProvider)
-        }
-        if !form.externalSendPolicy.isEmpty {
-            updates["external_send_policy"] = .string(form.externalSendPolicy)
-        }
-        if !form.language.isEmpty {
-            updates["language"] = .string(form.language)
-        }
-        let selfName = form.selfName.trimmingCharacters(in: .whitespaces)
-        updates["self_name"] = selfName.isEmpty ? .null : .string(selfName)
-        updates["vocab_hints"] = .array(form.vocabHints.map(JSONNode.string))
-        let newScope = form.scopeText.trimmingCharacters(in: .whitespaces)
-        if newScope != (detail.meeting.scope ?? "") {
-            updates["new_scope"] = newScope.isEmpty ? .null : .string(newScope)
-        }
-        do {
-            _ = try await client.setMeetingConfig(
-                meetingID: meetingID, scope: detail.meeting.scope, updates: updates)
-            showToast("会議設定を保存しました（反映には再生成が必要です）")
-            await loadDetail()
-        } catch {
-            report(error, title: "会議設定を保存できません")
-        }
-    }
 
     func discardTracks(_ tracks: [String]) async {
         guard let meetingID = selectedMeetingID, !tracks.isEmpty else {
@@ -653,122 +593,6 @@ final class MainWindowModel: ObservableObject {
         } catch {
             report(error, title: "取り込みできません")
             return false
-        }
-    }
-
-    // MARK: Profiles
-
-    struct ProfileForm {
-        var name = ""
-        var transcriptionEngine = ""
-        var diarizationEngine = ""
-        var llmProvider = ""
-        var externalSendPolicy = ""
-        var language = ""
-        var selfName = ""
-        var vocabHintsText = ""
-        var scope = ""
-        var engagement = ""
-        var exportDestinations: Set<String> = []
-        var makeDefault = false
-        var isNew = true
-
-        init() {}
-
-        init(profile: Profile) {
-            name = profile.name
-            transcriptionEngine = profile.config.transcriptionEngine ?? ""
-            diarizationEngine = profile.config.diarizationEngine ?? ""
-            llmProvider = profile.config.llmProvider ?? ""
-            externalSendPolicy = profile.config.externalSendPolicy ?? ""
-            language = profile.config.language ?? ""
-            selfName = profile.config.selfName ?? ""
-            vocabHintsText = (profile.config.vocabHints ?? []).joined(separator: "\n")
-            scope = profile.scope ?? ""
-            engagement = profile.engagement ?? ""
-            exportDestinations = Set(profile.exportDestinations)
-            makeDefault = profile.isDefault
-            isNew = false
-        }
-
-        var vocabHints: [String] {
-            vocabHintsText.split(whereSeparator: \.isNewline)
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
-        }
-    }
-
-    func reloadProfiles() async {
-        do {
-            profilesList = try await client.profiles()
-        } catch {
-            report(error, title: "プロファイルを読み込めません")
-        }
-    }
-
-    /// Fresh copy for the editor (get_profile; the row list may be a stale 5 s poll).
-    func editProfile(name: String) async -> ProfileForm? {
-        do {
-            return ProfileForm(profile: try await client.profile(name: name))
-        } catch {
-            report(error, title: "プロファイルを読み込めません")
-            return nil
-        }
-    }
-
-    func saveProfile(_ form: ProfileForm) async -> Bool {
-        let name = form.name.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty else {
-            alert = AlertContent(title: "プロファイルを保存できません", message: "名前を入力してください。")
-            return false
-        }
-        var config: [String: JSONNode] = [:]
-        if !form.transcriptionEngine.isEmpty {
-            config["transcription_engine"] = .string(form.transcriptionEngine)
-        }
-        if !form.diarizationEngine.isEmpty {
-            config["diarization_engine"] = .string(form.diarizationEngine)
-        }
-        if !form.llmProvider.isEmpty {
-            config["llm_provider"] = .string(form.llmProvider)
-        }
-        if !form.externalSendPolicy.isEmpty {
-            config["external_send_policy"] = .string(form.externalSendPolicy)
-        }
-        if !form.language.isEmpty {
-            config["language"] = .string(form.language)
-        }
-        let selfName = form.selfName.trimmingCharacters(in: .whitespaces)
-        config["self_name"] = selfName.isEmpty ? .null : .string(selfName)
-        config["vocab_hints"] = .array(form.vocabHints.map(JSONNode.string))
-
-        var updates: [String: JSONNode] = ["config": .object(config)]
-        let scope = form.scope.trimmingCharacters(in: .whitespaces)
-        updates["scope"] = scope.isEmpty ? .null : .string(scope)
-        let engagement = form.engagement.trimmingCharacters(in: .whitespaces)
-        updates["engagement"] = engagement.isEmpty ? .null : .string(engagement)
-        updates["export_destinations"] = .array(form.exportDestinations.sorted().map(JSONNode.string))
-        if form.makeDefault {
-            updates["make_default"] = .bool(true)
-        }
-        do {
-            _ = try await client.setProfile(name: name, updates: updates)
-            showToast("プロファイルを保存しました: \(name)")
-            await reloadProfiles()
-            return true
-        } catch {
-            report(error, title: "プロファイルを保存できません")
-            return false
-        }
-    }
-
-    func deleteProfile(name: String) async {
-        do {
-            _ = try await client.deleteProfile(name: name)
-            showToast("プロファイルを削除しました: \(name)")
-            await reloadProfiles()
-        } catch {
-            report(error, title: "プロファイルを削除できません")
         }
     }
 

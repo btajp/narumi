@@ -2,14 +2,13 @@ import Foundation
 
 extension ProviderSettingsStore {
     public func startAuthentication() async {
-        guard canTest else { return }
+        guard canAuthenticate else { return }
         await performAuthentication(.start)
     }
 
     /// The caller confirms removal of this connection's credential before invoking logout.
     public func logout() async {
-        guard canUseSavedConnection, selectedConnection?.credentialPresent == true,
-            pendingAuthentication?.unresolved != true else { return }
+        guard canLogout else { return }
         await performAuthentication(.logout)
     }
 
@@ -154,7 +153,10 @@ extension ProviderSettingsStore {
     private func performAuthentication(_ action: ProviderAuthAction) async {
         guard let connection = selectedConnection, let token = begin(.authenticating) else { return }
         let requestID = UUID().uuidString
-        guard recovery.beginAuthentication(connectionID: connection.connectionID, requestID: requestID) else {
+        guard recovery.beginAuthentication(
+            connectionID: connection.connectionID, requestID: requestID,
+            connectionRevision: connection.revision + (action == .logout ? 1 : 0), action: action
+        ) else {
             finish(token)
             return
         }
@@ -165,14 +167,23 @@ extension ProviderSettingsStore {
                 connectionID: connection.connectionID, expectedRevision: connection.revision,
                 action: action, requestID: requestID))
             guard isCurrent(token) else { return }
-            guard response.operation.action == action, recovery.receive(response.operation) else {
+            guard response.operation.connectionID == connection.connectionID,
+                response.operation.action == action,
+                response.operation.authorizationURL == nil || connection.providerID == .codexAppServer,
+                recovery.receive(response.operation) else {
                 throw ProviderSettingsFailure(.protocolError)
             }
             accepted = true
             try await refreshSnapshot(token: token)
-            notice = action == .logout && response.operation.state == .succeeded
-                ? "この接続専用の認証情報を削除しました。ほかの接続には影響しません。"
-                : "認証操作の状態を取得しました。議事録生成は実行していません。"
+            if action == .logout && response.operation.state == .succeeded {
+                notice = "この接続専用の認証情報を削除しました。ほかの接続には影響しません。"
+            } else if action == .logout {
+                notice = "ログアウト操作の状態を取得しました。認証情報の削除が完了したかは、操作の状態を確認してください。"
+            } else if connection.providerID == .codexAppServer && response.operation.state == .pending {
+                notice = "デバイスログインを開始しました。確認コードが表示されたら「ブラウザで続ける」から入力・承認してください。会議データは送信していません。"
+            } else {
+                notice = "認証操作の状態を取得しました。議事録生成は実行していません。"
+            }
             finish(token)
         } catch {
             guard isCurrent(token) else { return }
@@ -197,7 +208,10 @@ extension ProviderSettingsStore {
         let response = try await client.providerAuthStatus(GetProviderAuthStatusRequest(
             connectionID: pending.connectionID, startRequestID: pending.startRequestID))
         guard isCurrent(token) else { return }
-        guard recovery.receive(response.operation) else { throw ProviderSettingsFailure(.protocolError) }
+        let provider = connections.first(where: { $0.connectionID == pending.connectionID })?.providerID
+        guard response.operation.connectionID == pending.connectionID,
+            response.operation.authorizationURL == nil || provider == .codexAppServer,
+            recovery.receive(response.operation) else { throw ProviderSettingsFailure(.protocolError) }
     }
 
     private func publicFailure(_ error: Error) -> ProviderSettingsFailure {

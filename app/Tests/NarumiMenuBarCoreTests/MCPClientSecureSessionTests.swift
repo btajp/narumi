@@ -16,7 +16,7 @@ final class MCPClientSecureSessionTests: XCTestCase {
         let coreFiles = try FileManager.default.contentsOfDirectory(at: core, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "swift" }.sorted { $0.path < $1.path }
         let executable = root.appendingPathComponent("fixture")
-        let appSources = ["MCPClient.swift", "MCPClient+Connection.swift", "MCPClient+JobRecovery.swift", "JSONNode.swift"]
+        let appSources = ["MCPClient.swift", "MCPClient+Connection.swift", "MCPClient+JobRecovery.swift", "JSONNode.swift", "NarumiClient.swift"]
             .map { app.appendingPathComponent("Sources/NarumiMenuBar/\($0)").path }
         let compiler = Process()
         compiler.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
@@ -38,6 +38,8 @@ final class MCPClientSecureSessionTests: XCTestCase {
             "false_client_auth_rejected", "wrong_instance_rejected", "secret_not_replayed",
             "setup_reconciled_without_replay", "readonly_reconnect", "rpc_error_redacted",
             "malformed_response_redacted", "invalid_config_rejected",
+            "codex_expected_config_sent", "codex_force_rejected", "context_expected_config_sent",
+            "non_generating_context_omits_config", "legacy_generation_omits_new_config_field",
         ])
         for (name, passed) in checks { XCTAssertTrue(passed, name) }
     }

@@ -4,6 +4,15 @@ public enum ProviderID: String, Codable, CaseIterable, Sendable {
     case anthropicAPI = "anthropic-api"
     case claudeAgentSDK = "claude-agent-sdk"
     case ollama
+    case codexAppServer = "codex-app-server"
+
+    public var supportedAuthMethod: ProviderAuthMethod {
+        switch self {
+        case .anthropicAPI, .claudeAgentSDK: return .apiKey
+        case .ollama: return .none
+        case .codexAppServer: return .chatgpt
+        }
+    }
 }
 
 public enum ProviderRole: String, Codable, CaseIterable, Sendable {
@@ -13,6 +22,7 @@ public enum ProviderRole: String, Codable, CaseIterable, Sendable {
 public enum ProviderAuthMethod: String, Codable, CaseIterable, Sendable {
     case apiKey = "api_key"
     case none
+    case chatgpt
 }
 
 public enum ProviderAvailability: String, Codable, CaseIterable, Sendable {
@@ -205,7 +215,7 @@ public struct ProviderDescriptor: Decodable, Equatable, Sendable {
         reason = try container.decode(String?.self, forKey: .reason)
         runtime = try container.decode(ProviderRuntime.self, forKey: .runtime)
         guard !roles.isEmpty, Set(roles).count == roles.count,
-            authMethods == (providerID == .ollama ? [.none] : [.apiKey])
+            authMethods == [providerID.supportedAuthMethod]
         else {
             throw DecodingError.dataCorruptedError(
                 forKey: .authMethods, in: container,

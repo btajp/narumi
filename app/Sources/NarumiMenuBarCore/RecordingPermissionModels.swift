@@ -77,7 +77,7 @@ public enum RecordingPermissionContract {
         let components = core.split(separator: ".", omittingEmptySubsequences: false)
         guard components.count == 3,
             components.allSatisfy(isVersionNumber),
-            let major = Int(components[0]), major == 2,
+            let major = Int(components[0]), (2...3).contains(major),
             let minor = Int(components[1]),
             let patch = Int(components[2])
         else { return false }
@@ -86,7 +86,7 @@ public enum RecordingPermissionContract {
             let identifiers = release[1].split(separator: ".", omittingEmptySubsequences: false)
             guard identifiers.allSatisfy(isPrereleaseIdentifier) else { return false }
         }
-        // A 2.0.0 prerelease is older than the first authenticated resident-server contract.
+        // Only released baselines of the supported authenticated contracts are accepted.
         return minor > 0 || patch > 0 || release.count == 1
     }
 

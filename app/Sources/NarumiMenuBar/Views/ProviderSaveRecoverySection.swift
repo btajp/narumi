@@ -15,7 +15,7 @@ struct ProviderSaveRecoverySection: View {
                 Text("前回の保存結果が不明なため、新しい保存要求を止めています。保存済み接続の確認、または前回と同じ要求の明示的な再試行で復旧できます。")
                     .font(.callout)
                 Button("保存済み接続を再読み込み") { Task { await store.load(discardEdits: true) } }
-                Text("再読み込みは設定の参照だけです。保存・API キーの書き込みは行いません。")
+                Text("再読み込みは設定の参照だけです。保存・認証情報の書き込みは行いません。")
                     .font(.caption).foregroundStyle(.secondary)
                 if store.canAdoptSavedConnectionForRecovery, let connection = store.selectedConnection {
                     VStack(alignment: .leading, spacing: 5) {
@@ -24,13 +24,13 @@ struct ProviderSaveRecoverySection: View {
                         LabeledContent("接続 ID", value: connection.connectionID)
                         LabeledContent("現在の版", value: String(connection.revision))
                         LabeledContent("接続先", value: connection.endpoint ?? "未設定")
-                        LabeledContent("API キー", value: connection.credentialPresent ? "設定済み（再表示不可）" : "未設定")
+                        LabeledContent("認証情報", value: connection.credentialPresent ? "設定済み（再表示不可）" : "未設定")
                         Button("この接続を確認して再編集…") {
                             adoption = connection
                             confirmAdoption = true
                         }
                     }
-                    Text("現在の設定を採用して再編集できますが、前回の保存・キー更新の成功は確定しません。名前や接続先が一致しても自動で採用しません。左の一覧で別の候補を選べます。")
+                    Text("現在の設定を採用して再編集できますが、前回の保存・認証情報の更新の成功は確定しません。名前や接続先が一致しても自動で採用しません。左の一覧で別の候補を選べます。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if store.canDiscardMissingConnectionChange {
@@ -54,7 +54,9 @@ struct ProviderSaveRecoverySection: View {
                                 Text("前回のキーは保持していません。同じキーを再入力してください。入力は送信前・失敗時・画面を閉じる際に消去します。")
                                     .font(.caption).foregroundStyle(.secondary)
                             } else {
-                                Text("この要求の再確認に API キー入力は不要です。前回と同じキーの保持・削除指定を使います。")
+                                Text(summary.providerID == .codexAppServer
+                                    ? "API キー入力は不要です。前回と同じ接続設定だけを確認・保存し、ログイン操作は再送しません。"
+                                    : "この要求の再確認に API キー入力は不要です。前回と同じキーの保持・削除指定を使います。")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                             Button("同じ保存を再確認・再試行…") { confirmRetry = true }
@@ -88,7 +90,7 @@ struct ProviderSaveRecoverySection: View {
                 Button("キャンセル", role: .cancel) { adoption = nil }
             } message: {
                 if let adoption {
-                    Text("「\(adoption.displayName)」の現在の版 \(adoption.revision)・接続先・キーの有無を確認してください。未保存の入力を破棄してこの接続の編集に戻ります。前回の保存は再送せず、その成功も確定しません。")
+                    Text("「\(adoption.displayName)」の現在の版 \(adoption.revision)・接続先・認証情報の有無を確認してください。未保存の入力を破棄してこの接続の編集に戻ります。前回の保存は再送せず、その成功も確定しません。")
                 }
             }
             .confirmationDialog("存在しない接続への未確認の編集を破棄しますか？", isPresented: $confirmDiscard, titleVisibility: .visible) {

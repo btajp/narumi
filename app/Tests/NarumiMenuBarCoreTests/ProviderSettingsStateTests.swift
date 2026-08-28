@@ -48,6 +48,29 @@ final class ProviderSettingsStateTests: XCTestCase {
         XCTAssertEqual(request.apiKey, .unchanged)
     }
 
+    func testCodexEditorSavesWithoutAPIKeyAndCannotOverrideItsDestination() throws {
+        var editor = ProviderConnectionSettings()
+        editor.apiKey = "fixture-anthropic-key"
+        editor.selectProvider(.codexAppServer)
+        XCTAssertEqual(editor.apiKey, "")
+        XCTAssertFalse(editor.usesAPIKey)
+        XCTAssertEqual(editor.endpoint, "https://chatgpt.com")
+        editor.displayName = "Meeting Codex"
+        editor.endpoint = "https://example.invalid"
+        XCTAssertTrue(editor.canSave)
+        let request = try XCTUnwrap(editor.takeSaveRequest())
+        XCTAssertEqual(request.providerID, .codexAppServer)
+        XCTAssertEqual(request.authMethod, .chatgpt)
+        XCTAssertEqual(request.endpoint, "https://chatgpt.com")
+        XCTAssertEqual(request.apiKey, .unchanged)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as? [String: Any])
+        XCTAssertNil(object["api_key"])
+        editor.adopt(ProviderSettingsFixtures.connection(providerID: .codexAppServer, credential: false))
+        editor.setClearAPIKey(true)
+        XCTAssertFalse(editor.clearAPIKey)
+        XCTAssertFalse(editor.canSave)
+    }
+
     func testOllamaRejectsRemoteAndCredentialBearingEndpoints() {
         var editor = ProviderConnectionSettings(providerID: .ollama)
         editor.displayName = "Local"
@@ -95,6 +118,81 @@ final class ProviderSettingsStateTests: XCTestCase {
         XCTAssertFalse(recovery.receive(ProviderSettingsFixtures.auth(requestID: "other-start", state: .succeeded)))
         XCTAssertEqual(recovery.authentications[ProviderSettingsFixtures.connectionID]?.startRequestID, "original-start")
         XCTAssertEqual(recovery.authentications[ProviderSettingsFixtures.connectionID]?.state, .pending)
+    }
+
+    func testLoginURLSurvivesMatchingSnapshotButIsClearedWhenUnconfirmedOrFinished() throws {
+        let url = try XCTUnwrap(ProviderAuthorizationURL(ProviderSettingsFixtures.authorizationURL()))
+        var recovery = ProviderSettingsRecovery()
+        _ = recovery.beginAuthentication(connectionID: ProviderSettingsFixtures.connectionID, requestID: "original-start")
+        XCTAssertTrue(recovery.receive(ProviderSettingsFixtures.auth(authorizationURL: url)))
+        recovery.observe(connections: [ProviderSettingsFixtures.connection(
+            providerID: .codexAppServer, activeAuth: ProviderSettingsFixtures.activeAuth())])
+        XCTAssertEqual(recovery.authentications[ProviderSettingsFixtures.connectionID]?.authorizationURL, url)
+        XCTAssertEqual(recovery.authentications[ProviderSettingsFixtures.connectionID]?.userCode?.displayValue, ProviderSettingsFixtures.userCode)
+        recovery.authenticationUnconfirmed(connectionID: ProviderSettingsFixtures.connectionID)
+        XCTAssertNil(recovery.authentications[ProviderSettingsFixtures.connectionID]?.authorizationURL)
+        XCTAssertNil(recovery.authentications[ProviderSettingsFixtures.connectionID]?.userCode)
+        XCTAssertTrue(recovery.receive(ProviderSettingsFixtures.auth(authorizationURL: url)))
+        XCTAssertEqual(recovery.authentications[ProviderSettingsFixtures.connectionID]?.authorizationURL, url)
+        XCTAssertTrue(recovery.receive(ProviderSettingsFixtures.auth(state: .succeeded)))
+        XCTAssertNil(recovery.authentications[ProviderSettingsFixtures.connectionID]?.authorizationURL)
+        XCTAssertNil(recovery.authentications[ProviderSettingsFixtures.connectionID]?.userCode)
+    }
+
+    func testLoginURLIsNotRetainedAcrossRevisionOrServerIdentityMismatch() throws {
+        let url = try XCTUnwrap(ProviderAuthorizationURL(ProviderSettingsFixtures.authorizationURL()))
+        for operation in [
+            ProviderSettingsFixtures.auth(instanceID: "00000000-0000-4000-8000-000000000002", authorizationURL: url),
+            ProviderSettingsFixtures.auth(connectionRevision: 2, authorizationURL: url),
+        ] {
+            var recovery = ProviderSettingsRecovery()
+            _ = recovery.beginAuthentication(connectionID: ProviderSettingsFixtures.connectionID, requestID: "original-start")
+            XCTAssertTrue(recovery.receive(ProviderSettingsFixtures.auth(authorizationURL: url)))
+            XCTAssertFalse(recovery.receive(operation))
+            XCTAssertEqual(recovery.authentications[ProviderSettingsFixtures.connectionID]?.state, .unknown)
+            XCTAssertNil(recovery.authentications[ProviderSettingsFixtures.connectionID]?.authorizationURL)
+            XCTAssertNil(recovery.authentications[ProviderSettingsFixtures.connectionID]?.userCode)
+        }
+    }
+
+    func testDeviceChallengeClearsForEveryCompletionStateAndRejectsAnIncompletePair() throws {
+        let url = try XCTUnwrap(ProviderAuthorizationURL(ProviderSettingsFixtures.authorizationURL()))
+        for state in [ProviderAuthOperationState.succeeded, .failed, .cancelled, .unknown] {
+            var recovery = ProviderSettingsRecovery()
+            _ = recovery.beginAuthentication(connectionID: ProviderSettingsFixtures.connectionID, requestID: "original-start")
+            XCTAssertTrue(recovery.receive(ProviderSettingsFixtures.auth(authorizationURL: url)))
+            XCTAssertNotNil(recovery.authentications[ProviderSettingsFixtures.connectionID]?.userCode)
+            XCTAssertTrue(recovery.receive(ProviderSettingsFixtures.auth(state: state)))
+            XCTAssertNil(recovery.authentications[ProviderSettingsFixtures.connectionID]?.authorizationURL)
+            XCTAssertNil(recovery.authentications[ProviderSettingsFixtures.connectionID]?.userCode)
+        }
+        var recovery = ProviderSettingsRecovery()
+        _ = recovery.beginAuthentication(connectionID: ProviderSettingsFixtures.connectionID, requestID: "original-start")
+        let code = try XCTUnwrap(ProviderUserCode(ProviderSettingsFixtures.userCode))
+        XCTAssertFalse(recovery.receive(ProviderSettingsFixtures.auth(userCode: code)))
+        XCTAssertEqual(recovery.authentications[ProviderSettingsFixtures.connectionID]?.state, .unknown)
+        XCTAssertNil(recovery.authentications[ProviderSettingsFixtures.connectionID]?.userCode)
+    }
+
+    func testInactiveOrReplacedLoginSnapshotDiscardsChallengeWithoutResolvingOriginalReceipt() throws {
+        let url = try XCTUnwrap(ProviderAuthorizationURL(ProviderSettingsFixtures.authorizationURL()))
+        let snapshots: [[ProviderConnection]] = [
+            [ProviderSettingsFixtures.connection(providerID: .codexAppServer)],
+            [ProviderSettingsFixtures.connection(
+                providerID: .codexAppServer, activeAuth: ProviderSettingsFixtures.activeAuth(requestID: "different-start"))],
+            [],
+        ]
+        for connections in snapshots {
+            var recovery = ProviderSettingsRecovery()
+            _ = recovery.beginAuthentication(connectionID: ProviderSettingsFixtures.connectionID, requestID: "original-start")
+            XCTAssertTrue(recovery.receive(ProviderSettingsFixtures.auth(authorizationURL: url)))
+            recovery.observe(connections: connections)
+            let original = try XCTUnwrap(recovery.authentications[ProviderSettingsFixtures.connectionID])
+            XCTAssertEqual(original.startRequestID, "original-start")
+            XCTAssertEqual(original.state, .pending)
+            XCTAssertNil(original.authorizationURL)
+            XCTAssertNil(original.userCode)
+        }
     }
 
     func testSetupRecoveryUsesMatchingLastReceiptRatherThanAnUnrelatedIdleSnapshot() throws {

@@ -1,7 +1,9 @@
+import AppKit
 import NarumiMenuBarCore
 import SwiftUI
 
 struct ProviderConnectionStatusSection: View {
+    @Environment(\.openURL) private var openURL
     @Bindable var store: ProviderSettingsStore
     @State private var confirmLogout = false
 
@@ -9,20 +11,33 @@ struct ProviderConnectionStatusSection: View {
         Section("保存済み接続の確認") {
             if let connection = store.selectedConnection {
                 LabeledContent("接続の有効化", value: connection.enabled ? "有効" : "無効")
-                LabeledContent("API キー", value: connection.authMethod == .none
-                    ? "不要" : (connection.credentialPresent ? "設定済み（再表示不可）" : "未設定"))
+                if connection.authMethod == .chatgpt {
+                    LabeledContent("ChatGPT ログイン", value: connection.credentialPresent
+                        ? "専用のログイン情報あり（再表示不可）" : "未ログイン")
+                } else {
+                    LabeledContent("API キー", value: connection.authMethod == .none
+                        ? "不要" : (connection.credentialPresent ? "設定済み（再表示不可）" : "未設定"))
+                }
                 LabeledContent("認証", value: ProviderDisplay.authentication(connection.authState))
                 LabeledContent("モデル情報", value: ProviderDisplay.catalog(connection.catalogState))
                 LabeledContent("議事録生成", value: ProviderDisplay.generation(connection.lastGenerationState))
                 LabeledContent("最終確認", value: connection.checkedAt ?? "未確認")
                 HStack {
+                    Button(connection.authMethod == .chatgpt ? "ChatGPT でログイン" : "認証確認を開始") {
+                        Task { await store.startAuthentication() }
+                    }
+                    .disabled(!store.canAuthenticate)
                     Button("接続テスト") { Task { await store.testConnection() } }
                         .disabled(!store.canTest)
-                    Button("認証確認を開始") { Task { await store.startAuthentication() } }
-                        .disabled(!store.canTest)
                 }
-                Text("保存済みの認証情報とメタデータだけを確認します。会議データの送信・議事録生成は行いません。")
+                Text("ログイン・認証確認とメタデータの照会だけを行います。会議データの送信・議事録生成は行いません。")
                     .font(.caption).foregroundStyle(.secondary)
+                if connection.authMethod == .chatgpt {
+                    Text(store.selectedProvider?.runtime.state == .ready
+                        ? "ログイン後、「接続先から候補を更新」でモデル一覧を取得してください。"
+                        : "ログインを始めるには、下の「実行環境」で「確認・準備」を完了してください。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if let result = store.lastTest, !store.editor.hasUnsavedChanges {
                     Text(result.connected ? "接続テスト成功（議事録生成は未検証）" : "接続テストで接続を確認できませんでした")
                         .font(.callout).foregroundStyle(result.connected ? .green : .orange)
@@ -31,6 +46,24 @@ struct ProviderConnectionStatusSection: View {
                     }
                 }
                 if let pending = store.pendingAuthentication {
+                    if let authorization = store.deviceAuthorization {
+                        LabeledContent("確認コード") {
+                            Text(authorization.userCode.displayValue).font(.body.monospaced())
+                        }
+                        HStack {
+                            Button("確認コードをコピー") {
+                                store.copyAuthorizationUserCode { code in
+                                    NSPasteboard.general.clearContents()
+                                    return NSPasteboard.general.setString(code, forType: .string)
+                                }
+                            }
+                            Button("ブラウザで続ける") {
+                                if let url = store.browserAuthorizationURL { openURL(url) }
+                            }
+                        }
+                        Text("公式の OpenAI デバイスログイン画面に確認コードを入力して承認します。完了すると、この画面の認証状態が更新されます。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     HStack {
                         Text(ProviderDisplay.authOperation(pending.state)).font(.callout)
                         Spacer()
@@ -39,20 +72,24 @@ struct ProviderConnectionStatusSection: View {
                             Button("認証操作を取消") { Task { await store.cancelAuthentication() } }
                         }
                     }
+                    if let reason = pending.reasonMessage {
+                        Text(reason).font(.caption).foregroundStyle(.secondary)
+                    }
                     if pending.unresolved {
                         Text("応答が途切れても認証確認は再送しません。元の操作の状態を確認します。")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                if connection.authMethod == .apiKey {
+                if connection.authMethod != .none {
                     Button("この接続からログアウト…", role: .destructive) { confirmLogout = true }
-                        .disabled(!store.canUseSavedConnection || !connection.credentialPresent
-                            || store.pendingAuthentication?.unresolved == true)
-                    Text("ログアウトはこの接続のキーだけを削除します。ほかのアプリや接続の認証情報には触れません。")
+                        .disabled(!store.canLogout)
+                    Text("ログアウトはこの接続の認証情報だけを削除します。ほかのアプリや接続の認証情報には触れません。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             } else {
-                Text("接続を保存すると、認証と接続先を確認できます。API キーは空欄でも保存できます。")
+                Text(store.editor.providerID == .codexAppServer
+                    ? "接続を保存すると、専用の ChatGPT ログインを開始できます。API キーは不要です。"
+                    : "接続を保存すると、認証と接続先を確認できます。API キーは空欄でも保存できます。")
                     .foregroundStyle(.secondary)
             }
         }
@@ -60,7 +97,9 @@ struct ProviderConnectionStatusSection: View {
             Button("ログアウト", role: .destructive) { Task { await store.logout() } }
             Button("キャンセル", role: .cancel) {}
         } message: {
-            Text("再び利用するには API キーの入力が必要です。接続名と過去の議事録は保持します。")
+            Text(store.selectedConnection?.authMethod == .chatgpt
+                ? "再び利用するには、この接続で ChatGPT にログインしてください。既存の Codex のログイン、接続名、過去の議事録は変更しません。"
+                : "再び利用するには API キーの入力が必要です。接続名と過去の議事録は保持します。")
         }
     }
 }
