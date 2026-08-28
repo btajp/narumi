@@ -74,6 +74,24 @@ def result(ctx, tool: str, args: dict[str, Any]) -> dict[str, Any]:
     return outcome.payload
 
 
+@pytest.mark.parametrize("transport", ["streamable-http", "stdio", "in-process"])
+def test_server_reports_minutes_selection_on_resident_transport(home, transport):
+    ctx = build_context(
+        home,
+        transports=[transport],
+        validate_output=True,
+        provider_secret_store=MemorySecrets(),
+        provider_codex_backend=FakeCodexBackend(),
+    )
+    try:
+        info = result(ctx, "get_server_info", {})
+        assert info["capabilities"]["workflow"]["stage_model_selection"] is (
+            transport == "streamable-http"
+        )
+    finally:
+        ctx.close()
+
+
 def test_connection_round_trip_metadata_cas_and_key_removal(tmp_path: Path, caplog):
     secrets, metadata = MemorySecrets(), Metadata()
     ctx = build_context(

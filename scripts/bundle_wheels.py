@@ -13,6 +13,7 @@ PROMPTS = {
     "narumi/generate/prompts/integrate_interval.md",
     "narumi/generate/prompts/minutes_chunk.md",
     "narumi/generate/prompts/minutes_final.md",
+    "narumi/generate/prompts/minutes_reduce.md",
     "narumi/slides/prompts/layer3_speakers.md",
 }
 METADATA_FILES = {"METADATA", "WHEEL", "RECORD", "entry_points.txt"}

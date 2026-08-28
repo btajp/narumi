@@ -292,7 +292,7 @@ final class ContractModelsTests: XCTestCase {
         XCTAssertFalse(http.capabilities.permissionSetupInProgress)
         XCTAssertEqual(http.capabilities.workflow?.providerConnections, true)
         XCTAssertEqual(http.capabilities.workflow?.providerModels, true)
-        XCTAssertEqual(http.capabilities.workflow?.stageModelSelection, false)
+        XCTAssertEqual(http.capabilities.workflow?.stageModelSelection, true)
         XCTAssertEqual(http.capabilities.workflow?.ensembleGeneration, false)
         XCTAssertEqual(http.secureTransport?.mode, "pinned_tls")
         XCTAssertEqual(http.secureTransport?.tlsRequired, true)
