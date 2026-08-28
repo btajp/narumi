@@ -13,12 +13,12 @@ from narumi.models import MergedTranscript, MinutesMeta, SpeakerMap, Transcript
 
 from narumi_server.handlers.common import (
     CONFIG_KEYS,
-    check_config_policy,
     config_from_mapping,
     find_bundle,
     locked_bundle,
     meeting_summary,
     sync_catalog,
+    validated_config,
 )
 
 if TYPE_CHECKING:
@@ -268,13 +268,13 @@ def set_meeting_config(ctx: ServerContext, args: dict[str, Any]) -> dict[str, An
         allow_recording=True,
     ) as bundle:
         config = config_from_mapping(bundle.manifest.config, updates)
-        check_config_policy(config)
         previous_scope = bundle.manifest.scope
-        bundle.manifest.config = config
         scope_changed = "new_scope" in args
-        if scope_changed:
-            bundle.manifest.scope = args["new_scope"]
-        bundle.save()
+        with validated_config(ctx, config):
+            bundle.manifest.config = config
+            if scope_changed:
+                bundle.manifest.scope = args["new_scope"]
+            bundle.save()
         sync_catalog(ctx, bundle)
         detail: dict[str, Any] = {
             "meeting_id": bundle.meeting_id,

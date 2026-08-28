@@ -157,6 +157,7 @@ def cli(
                 transports=[transport],
                 validate_output=validate_output or None,
                 server_instance_id=instance_id,
+                recover_jobs=True,
             )
             server = build_server(ctx)
             if transport == TRANSPORT_HTTP:

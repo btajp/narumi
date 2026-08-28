@@ -214,6 +214,7 @@ def test_cli_keeps_lease_through_context_shutdown(home, monkeypatch, mode):
     def context(root, **options):
         with pytest.raises(BusyError):
             acquire_server_lease(root)
+        assert options["recover_jobs"] is True
         events.append("context")
 
         def close():

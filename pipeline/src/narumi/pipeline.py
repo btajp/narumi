@@ -32,13 +32,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from narumi.align import run_align, transcript_artifact_keys
 from narumi.brief import load_brief, run_brief
 from narumi.bundle import Bundle, ExportRecord, RegenerationRecord, StageResult, utc_now_iso
 from narumi.diarize import run_diarize, run_layer3, run_layer4
-from narumi.errors import CancelledError, NotFoundError
+from narumi.errors import CancelledError, InvalidArgumentError, NotFoundError
 from narumi.export import GaiaExporter, get_exporter
 from narumi.gaia import GaiaClient
 from narumi.generate import run_generate, run_integrate
@@ -46,6 +46,9 @@ from narumi.models import MinutesMeta
 from narumi.preprocess import run_preprocess
 from narumi.slides import run_slides
 from narumi.transcribe import run_transcribe
+
+if TYPE_CHECKING:
+    from narumi.providers.generation import MinutesResolver
 
 ProgressFn = Callable[[str, float], None]
 StepFn = Callable[[Bundle, bool], StageResult | Sequence[StageResult]]
@@ -126,18 +129,45 @@ date first when needed)."""
 STAGE_ORDER: tuple[str, ...] = tuple(name for name, _ in PROCESS_STEPS)
 
 
-def _process_steps(client_factory: GaiaClientFactory | None) -> Sequence[tuple[str, StepFn]]:
+def _process_steps(
+    client_factory: GaiaClientFactory | None,
+    minutes_resolver: MinutesResolver | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> Sequence[tuple[str, StepFn]]:
     """Bind the caller's connection settings without changing the shared stage registry."""
     if client_factory is None:
-        return PROCESS_STEPS
-    return tuple(
+        return _minutes_steps(PROCESS_STEPS, minutes_resolver, should_cancel)
+    steps = tuple(
         (
             name,
             (lambda bundle, force: _step_brief(bundle, force, client_factory=client_factory))
-            if name == STAGE_BRIEF
+            if name == STAGE_BRIEF and client_factory is not None
             else step,
         )
         for name, step in PROCESS_STEPS
+    )
+    return _minutes_steps(steps, minutes_resolver, should_cancel)
+
+
+def _minutes_steps(
+    steps: Sequence[tuple[str, StepFn]],
+    resolver: MinutesResolver | None,
+    should_cancel: Callable[[], bool] | None,
+) -> Sequence[tuple[str, StepFn]]:
+    if resolver is None and should_cancel is None:
+        return steps
+    return tuple(
+        (
+            name,
+            (
+                lambda bundle, force: run_generate(
+                    bundle, force=force, minutes_resolver=resolver, should_cancel=should_cancel
+                )
+            )
+            if name == STAGE_GENERATE
+            else step,
+        )
+        for name, step in steps
     )
 
 
@@ -167,6 +197,8 @@ def process_meeting(
     force: bool = False,
     progress: ProgressFn | None = None,
     gaia_client_factory: GaiaClientFactory | None = None,
+    minutes_resolver: MinutesResolver | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> ProcessResult:
     """Full run: preprocess → brief → transcribe → diarize → slides → align → layer3 →
     integrate → generate.
@@ -174,7 +206,13 @@ def process_meeting(
     Sets ``manifest.status`` to ``processing`` first, ``ready`` on success and ``failed`` when
     any stage raises (the exception is re-raised unchanged; nothing is swallowed).
     """
-    return _run_steps(bundle, _process_steps(gaia_client_factory), force=force, progress=progress)
+    _check_minutes_force(bundle, force)
+    return _run_steps(
+        bundle,
+        _process_steps(gaia_client_factory, minutes_resolver, should_cancel),
+        force=force,
+        progress=progress,
+    )
 
 
 def regenerate_meeting(
@@ -184,18 +222,26 @@ def regenerate_meeting(
     progress: ProgressFn | None = None,
     reason: str = "regenerate",
     job_id: str | None = None,
+    minutes_resolver: MinutesResolver | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> ProcessResult:
     """Re-run alignment → integrate → generate only (never preprocess / transcribe / diarize).
 
     A :class:`RegenerationRecord` is appended to ``manifest.regenerations`` on success, even when
     every stage was skipped (the record then points at the unchanged latest version).
     """
+    _check_minutes_force(bundle, force)
     if not transcript_artifact_keys(bundle):
         raise NotFoundError(
             "no transcripts to regenerate from; run process_meeting first",
             details={"meeting_id": bundle.meeting_id, "status": bundle.manifest.status},
         )
-    result = _run_steps(bundle, REGENERATE_STEPS, force=force, progress=progress)
+    result = _run_steps(
+        bundle,
+        _minutes_steps(REGENERATE_STEPS, minutes_resolver, should_cancel),
+        force=force,
+        progress=progress,
+    )
     _record_regeneration(bundle, result, reason=reason, job_id=job_id)
     return result
 
@@ -208,6 +254,8 @@ def refresh_meeting(
     reason: str = "regenerate",
     job_id: str | None = None,
     gaia_client_factory: GaiaClientFactory | None = None,
+    minutes_resolver: MinutesResolver | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> ProcessResult:
     """Bring the minutes up to date with the bundle and its config (the MCP ``regenerate`` tool).
 
@@ -221,12 +269,23 @@ def refresh_meeting(
     forced when ``force`` is true. A :class:`RegenerationRecord` is appended like in
     :func:`regenerate_meeting`.
     """
+    _check_minutes_force(bundle, force)
     forced = {name for name, _ in REGENERATE_STEPS} if force else set()
     result = _run_steps(
-        bundle, _process_steps(gaia_client_factory), force=forced, progress=progress
+        bundle,
+        _process_steps(gaia_client_factory, minutes_resolver, should_cancel),
+        force=forced,
+        progress=progress,
     )
     _record_regeneration(bundle, result, reason=reason, job_id=job_id)
     return result
+
+
+def _check_minutes_force(bundle: Bundle, force: bool) -> None:
+    if force and bundle.manifest.config.minutes_model is not None:
+        raise InvalidArgumentError(
+            "Codex minutes cannot use force; start a new cache epoch instead"
+        )
 
 
 def export_meeting(

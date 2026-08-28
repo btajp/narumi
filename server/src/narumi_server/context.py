@@ -7,13 +7,14 @@ import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from narumi.bundle import Manifest
 from narumi.catalog import Catalog
 from narumi.config import catalog_path, data_root, meetings_root
 from narumi.contracts import ContractSet, load_contracts
-from narumi.errors import ErrorCode, NarumiError
+from narumi.errors import BusyError, ErrorCode, NarumiError
 from narumi.gaia.settings import GAIA_CONNECTION_FILE, GaiaConnectionStore
 from narumi.profiles import PROFILES_FILE, ProfileStore
 
@@ -49,6 +50,7 @@ class ServerContext:
     providers: ProviderService | None = field(default=None, repr=False)
     provider_secret_store: SecretStore | None = field(default=None, repr=False)
     provider_metadata_client: MetadataClient | None = field(default=None, repr=False)
+    provider_codex_backend: Any | None = field(default=None, repr=False)
     transports: list[str] = field(default_factory=list)
     validate_output: bool = False
     handlers: Mapping[str, Handler] = field(default_factory=lambda: dict(HANDLERS))
@@ -62,17 +64,53 @@ class ServerContext:
 
     def __post_init__(self) -> None:
         self.idempotency = IdempotencyStore(self.catalog)
-        if self.providers is None:
-            from narumi.providers.service import ProviderService
+        from narumi.providers.service import ProviderService
 
+        if self.providers is None:
             self.providers = ProviderService(
                 self.data_root,
                 secret_store=self.provider_secret_store,
                 metadata_client=self.provider_metadata_client,
+                codex_backend=self.provider_codex_backend,
+                recover="streamable-http" in self.transports,
                 contracts=self.contracts,
                 server_instance_id=self.server_instance_id,
                 submit_job=lambda fn: self.jobs.submit("provider_setup", None, fn),
+                connection_referenced=self._provider_connection_referenced,
             )
+        elif isinstance(self.providers, ProviderService):
+            previous = self.providers.connection_referenced
+            self.providers.connection_referenced = lambda connection_id: (
+                previous(connection_id) or self._provider_connection_referenced(connection_id)
+            )
+
+    def _provider_connection_referenced(self, connection_id: str) -> bool:
+        """Read saved references while the provider transaction excludes new references.
+
+        Profiles and manifests use atomic replacement. Do not take their write locks:
+        a meeting job may already own one while it waits for the provider transaction.
+        The catalog is only an index and cannot prove that an unindexed bundle is absent.
+        """
+        try:
+            for profile in self.profiles.list():
+                selected = profile.config.minutes_model
+                if selected is not None and selected.connection_id == connection_id:
+                    return True
+            for folder in self.meetings_root.iterdir():
+                if not folder.is_dir():
+                    continue
+                try:
+                    contents = (folder / "manifest.json").read_text(encoding="utf-8")
+                except FileNotFoundError:
+                    # A meeting may have been moved to trash after the directory listing.
+                    continue
+                manifest = Manifest.model_validate_json(contents)
+                selected = manifest.config.minutes_model
+                if selected is not None and selected.connection_id == connection_id:
+                    return True
+        except (OSError, ValueError, NarumiError):
+            raise BusyError("Saved model references could not be verified") from None
+        return False
 
     def close(self) -> None:
         """Finalize a running recording, stop jobs and close the catalog. Idempotent.
@@ -128,10 +166,12 @@ def build_context(
     transports: Sequence[str] = (),
     validate_output: bool | None = None,
     max_workers: int = 1,
+    recover_jobs: bool = False,
     handlers: Mapping[str, Handler] | None = None,
     provider_service: ProviderService | None = None,
     provider_secret_store: SecretStore | None = None,
     provider_metadata_client: MetadataClient | None = None,
+    provider_codex_backend: Any | None = None,
     server_instance_id: str | None = None,
 ) -> ServerContext:
     """Assemble a :class:`ServerContext` from settings and the environment.
@@ -139,11 +179,14 @@ def build_context(
     ``NARUMI_HOME`` (data root), ``NARUMI_RECORDER`` (recorder binary), ``NARUMI_CONTRACTS_DIR``
     (contract files) and ``NARUMI_VALIDATE_OUTPUT`` (=1 validates every tool result against its
     outputSchema) are honoured unless the explicit argument overrides them.
+
+    ``recover_jobs=True`` is reserved for the server owner holding the exclusive data-root
+    lease. Temporary contexts must leave it disabled, even when sharing that owner's catalog.
     """
     root = data_root(data_root_override)
     contracts = load_contracts(contracts_dir)
     catalog = Catalog(catalog_path(root))
-    jobs = JobManager(catalog, max_workers=max_workers)
+    jobs = JobManager(catalog, max_workers=max_workers, recover=recover_jobs)
     recorder = RecordingController(recorder_path)
     ctx = ServerContext(
         data_root=root,
@@ -157,6 +200,7 @@ def build_context(
         providers=provider_service,
         provider_secret_store=provider_secret_store,
         provider_metadata_client=provider_metadata_client,
+        provider_codex_backend=provider_codex_backend,
         server_instance_id=server_instance_id if server_instance_id is not None else str(uuid4()),
         transports=list(transports),
         validate_output=(

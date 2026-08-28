@@ -16,7 +16,7 @@ from narumi.catalog import Catalog
 from narumi.cli import cli
 from narumi.errors import NotFoundError, PolicyViolationError
 from narumi.generate import PLAIN_PLACEHOLDER
-from narumi.models import MinutesMeta
+from narumi.models import ExternalSendPolicy, MinutesMeta
 from narumi.pipeline import (
     STAGE_ORDER,
     export_meeting,
@@ -308,3 +308,65 @@ def test_refresh_runs_missing_and_changed_deterministic_stages(home: Path, tmp_p
     run_cli(home, "config", bundle.meeting_id, "--llm-provider", "none")
     retried = refresh_meeting(reopen(bundle), reason="retry")
     assert retried.minutes_version is not None and reopen(bundle).manifest.status == "ready"
+
+
+def test_codex_model_change_regenerates_only_minutes(home: Path, tmp_path: Path) -> None:
+    """A saved Codex selection never becomes the ASR/integration/vision provider."""
+    from copy import deepcopy
+
+    from narumi.model_selection import ModelSelection
+    from narumi.providers.generation import MinutesResolver
+    from narumi.providers.service import ProviderService
+
+    from .provider_fakes import FakeCodexBackend, MemorySecretStore, prepared_codex_connection
+
+    backend = FakeCodexBackend()
+    alternate = deepcopy(backend.models[0])
+    alternate["model_id"] = "codex-alternate-model"
+    service = ProviderService(home, secret_store=MemorySecretStore(), codex_backend=backend)
+    try:
+        record = prepared_codex_connection(service, models=[backend.models[0], alternate])
+        bundle = import_meeting(home, tmp_path)
+        bundle.manifest.config.external_send_policy = ExternalSendPolicy.SUBSCRIPTION_OK
+        bundle.manifest.config.minutes_model = ModelSelection(
+            provider="codex-app-server",
+            connection_id=record["connection_id"],
+            connection_revision=record["revision"],
+            model_id=backend.models[0]["model_id"],
+            parameters={"reasoning_effort": "medium"},
+        )
+        bundle.save()
+        resolver = MinutesResolver(service)
+        first = process_meeting(reopen(bundle), minutes_resolver=resolver)
+        assert first.stages == FULL_RUN_KEYS
+        bundle = reopen(bundle)
+        previous = minutes_text(bundle, 1)
+        upstream = {
+            key: item.model_dump()
+            for key, item in bundle.manifest.artifacts.items()
+            if not key.startswith("minutes/")
+        }
+        before_calls = len([call for call in backend.calls if call[0] == "complete"])
+        same = refresh_meeting(bundle, minutes_resolver=resolver)
+        assert same.stages == [] and same.minutes_version == 1
+        assert len([call for call in backend.calls if call[0] == "complete"]) == before_calls
+        bundle.manifest.config.minutes_model.model_id = alternate["model_id"]
+        bundle.save()
+        changed = refresh_meeting(reopen(bundle), minutes_resolver=resolver)
+        assert changed.stages == ["minutes/v2"]
+        bundle = reopen(bundle)
+        assert minutes_text(bundle, 1) == previous
+        assert bundle.manifest.config.llm_provider == "none"
+        assert {
+            key: item.model_dump()
+            for key, item in bundle.manifest.artifacts.items()
+            if not key.startswith("minutes/")
+        } == upstream
+        assert [call[2] for call in backend.calls if call[0] == "complete"] == [
+            backend.models[0]["model_id"],
+            backend.models[0]["model_id"],
+            alternate["model_id"],
+            alternate["model_id"],
+        ]
+    finally:
+        service.close()

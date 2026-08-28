@@ -17,15 +17,18 @@ from narumi.bundle import Bundle, TrackRecord, new_meeting_id, sha256_file
 from narumi.errors import InvalidArgumentError, NotFoundError
 
 from narumi_server.handlers.common import (
-    check_config_policy,
     config_from_mapping,
     probe_duration_or_none,
     resolve_profile,
     sync_catalog,
+    validated_config,
 )
 from narumi_server.handlers.processing import enqueue_process
 
 if TYPE_CHECKING:
+    from narumi.models import MeetingConfig
+    from narumi.profiles import Profile
+
     from narumi_server.context import ServerContext
 
 logger = logging.getLogger(__name__)
@@ -41,21 +44,38 @@ def import_recording(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]
     sources = _validated_sources(args)
     profile = resolve_profile(ctx, args.get("profile"))
     config = config_from_mapping(profile.config, args.get("config"))
-    check_config_policy(config)  # fail fast: no bundle is created for a rejected config
-    copy_files = bool(args.get("copy", True))
     started = _started_at(args.get("started_at"), sources)
-    durations = {name: probe_duration_or_none(path) for name, path in sources.items()}
+    meeting_id = new_meeting_id(started)
+    with ctx.locks.hold(meeting_id, purpose="import_recording"):
+        return _import_locked(ctx, args, sources, profile, config, started, meeting_id)
 
-    bundle = Bundle.create(
-        ctx.meetings_root,
-        meeting_name=args["meeting_name"],
-        meeting_id=new_meeting_id(started),
-        engagement=args["engagement"] if "engagement" in args else profile.engagement,
-        scope=args["scope"] if "scope" in args else profile.scope,
-        profile=profile.name,
-        config=config,
-    )
+
+def _import_locked(
+    ctx: ServerContext,
+    args: dict[str, Any],
+    sources: dict[str, Path],
+    profile: Profile,
+    config: MeetingConfig,
+    started: datetime,
+    meeting_id: str,
+) -> dict[str, Any]:
+    """Keep the initial manifest stable through copying, indexing and job acceptance."""
+    copy_files = bool(args.get("copy", True))
+
+    # Persist the reference before releasing the provider lock. Slow media copying
+    # happens afterwards; connection deletion will then see the saved manifest.
+    with validated_config(ctx, config):
+        bundle = Bundle.create(
+            ctx.meetings_root,
+            meeting_name=args["meeting_name"],
+            meeting_id=meeting_id,
+            engagement=args["engagement"] if "engagement" in args else profile.engagement,
+            scope=args["scope"] if "scope" in args else profile.scope,
+            profile=profile.name,
+            config=config,
+        )
     try:
+        durations = {name: probe_duration_or_none(path) for name, path in sources.items()}
         tracks_dir = bundle.dir("tracks")
         for name, src in sources.items():
             dest = tracks_dir / (f"{name}{src.suffix}" if src.suffix else name)

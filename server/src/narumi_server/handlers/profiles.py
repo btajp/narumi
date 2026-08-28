@@ -15,7 +15,7 @@ from narumi.export import list_exporters
 from narumi.models import MeetingConfig
 from narumi.profiles import UNSET, Profile
 
-from narumi_server.handlers.common import check_config_policy, config_from_mapping
+from narumi_server.handlers.common import config_from_mapping, validated_config
 
 if TYPE_CHECKING:
     from narumi_server.context import ServerContext
@@ -43,7 +43,6 @@ def set_profile(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
     current = ctx.profiles.peek(name)
     base = current.config if current is not None else MeetingConfig()
     config = config_from_mapping(base, args.get("config"))
-    check_config_policy(config)
     destinations = args.get("export_destinations")
     if destinations is not None:
         registered = sorted(str(item["name"]) for item in list_exporters())
@@ -55,14 +54,15 @@ def set_profile(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
                 details={"unknown": unknown, "registered": registered},
             )
     make_default = bool(args.get("make_default", False))
-    profile = ctx.profiles.set(
-        name,
-        config=config,
-        scope=args.get("scope", UNSET),
-        engagement=args.get("engagement", UNSET),
-        export_destinations=destinations,
-        make_default=make_default,
-    )
+    with validated_config(ctx, config):
+        profile = ctx.profiles.set(
+            name,
+            config=config,
+            scope=args.get("scope", UNSET),
+            engagement=args.get("engagement", UNSET),
+            export_destinations=destinations,
+            make_default=make_default,
+        )
     ctx.catalog.audit(
         ctx.actor,
         "set_profile",

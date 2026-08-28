@@ -6,6 +6,7 @@ import json
 import uuid
 from pathlib import Path
 
+import pytest
 from conftest import PerCallClient, call, make_recorded_bundle
 from narumi.bundle import Bundle
 from narumi.bundle.hashing import sha256_file
@@ -148,3 +149,37 @@ async def test_text_file_payload_is_parsed_from_stored_copy(
     bundle = Bundle.find(ctx.meetings_root, MEETING)
     record = bundle.manifest.artifacts[f"transcripts/ext-{result['context_id']}"]
     assert record.params["parser"] == "vtt"
+
+
+@pytest.mark.parametrize("auto_regenerate", [False, True])
+async def test_context_rejects_stale_expected_config_before_writing(
+    client: PerCallClient, ctx: ServerContext, auto_regenerate: bool
+):
+    bundle = make_recorded_bundle(ctx, meeting_id=MEETING)
+    expected = bundle.manifest.config.model_dump(mode="json")
+    expected["language"] = "en"
+    rejected = await register(
+        client,
+        source_type="zoom_transcript",
+        content=VTT,
+        auto_regenerate=auto_regenerate,
+        expected_config=expected,
+    )
+    assert rejected["error"]["code"] == "configuration_conflict"
+    fresh = Bundle.find(ctx.meetings_root, MEETING)
+    assert fresh.manifest.contexts == []
+    assert not list(fresh.path.glob("context/sources/*"))
+    assert not ctx.jobs.has_active(MEETING)
+
+
+async def test_context_accepts_matching_expected_legacy_config(
+    client: PerCallClient, ctx: ServerContext
+):
+    bundle = make_recorded_bundle(ctx, meeting_id=MEETING)
+    saved = await register(
+        client,
+        source_type="zoom_transcript",
+        content=VTT,
+        expected_config=bundle.manifest.config.model_dump(mode="json", exclude_none=True),
+    )
+    assert saved["status"] == "parsed"

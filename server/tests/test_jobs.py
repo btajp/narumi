@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 from pathlib import Path
@@ -56,6 +57,11 @@ def test_failures_are_persisted(catalog: Catalog):
         def wrong_type(progress: JobProgress) -> dict:
             return ["not", "a", "dict"]  # type: ignore[return-value]
 
+        def nonserializable(progress: JobProgress) -> dict:
+            result = {}
+            result["cycle"] = result
+            return result
+
         failed = manager.wait(manager.submit("export", "m1", policy), timeout=10)
         assert failed["status"] == "failed"
         assert failed["error"] == {
@@ -72,6 +78,9 @@ def test_failures_are_persisted(catalog: Catalog):
             bad["error"]["code"] == "internal"
             and "expected a JSON object" in bad["error"]["message"]
         )
+        invalid = manager.wait(manager.submit("process", None, nonserializable), timeout=10)
+        assert invalid["status"] == "failed"
+        assert invalid["error"]["details"]["exception"] == "ValueError"
     finally:
         manager.shutdown()
 
@@ -92,6 +101,36 @@ def test_provider_setup_never_persists_or_logs_upstream_exception_values(
         assert secret not in json.dumps(job)
         assert secret not in caplog.text
     finally:
+        manager.shutdown()
+
+
+@pytest.mark.parametrize("exception_type", [asyncio.CancelledError, SystemExit])
+@pytest.mark.parametrize("kind", ["process", "provider_setup"])
+def test_abrupt_worker_exit_is_terminal_before_ownership_is_forgotten(
+    catalog: Catalog, caplog, exception_type, kind
+):
+    manager = JobManager(catalog)
+    release = threading.Event()
+    secret = "fake-interrupted-job-value-9742"
+
+    def interrupted(progress: JobProgress) -> dict:
+        assert release.wait(10)
+        raise exception_type(secret)
+
+    job_id = manager.submit(kind, None, interrupted)
+    future = manager._futures[job_id]
+    try:
+        release.set()
+        with pytest.raises(exception_type):
+            future.result(timeout=10)
+        before_shutdown = catalog.get_job(job_id)
+        assert before_shutdown["status"] == "failed"
+        assert secret not in json.dumps(before_shutdown)
+        assert secret not in caplog.text
+        manager.shutdown()
+        assert catalog.get_job(job_id) == before_shutdown
+    finally:
+        release.set()
         manager.shutdown()
 
 
@@ -124,15 +163,104 @@ def test_has_active_and_shutdown_marks_unfinished(catalog: Catalog):
         manager.submit("process", None, blocking)
 
 
-def test_startup_marks_stale_jobs_failed(catalog: Catalog):
+@pytest.mark.parametrize("status", ["queued", "running"])
+@pytest.mark.parametrize("recover", [False, True])
+def test_startup_recovers_stale_jobs_only_for_the_owner(catalog: Catalog, status, recover):
     stale = catalog.create_job("process", "m1")
-    catalog.update_job(stale, status="running")
-    manager = JobManager(catalog)
+    catalog.update_job(stale, status=status)
+    before = catalog.get_job(stale)
+    manager = JobManager(catalog, recover=recover)
     try:
         job = catalog.get_job(stale)
-        assert job is not None and job["status"] == "failed"
-        assert "restarted" in job["error"]["message"]
-        assert not manager.has_active("m1")
+        if recover:
+            assert job is not None and job["status"] == "failed"
+            assert "restarted" in job["error"]["message"]
+            assert not manager.has_active("m1")
+        else:
+            assert job == before
+            assert manager.has_active("m1")
+    finally:
+        manager.shutdown()
+    assert catalog.get_job(stale) == job
+
+
+@pytest.mark.parametrize("recover", [False, True])
+@pytest.mark.parametrize("wait", [False, True])
+def test_shutdown_only_fails_owned_work_dropped_from_the_queue(catalog: Catalog, recover, wait):
+    manager = JobManager(catalog, recover=recover)
+    entered = threading.Event()
+    gate = threading.Event()
+    queued_done = threading.Event()
+    shutdown_errors: list[Exception] = []
+
+    def blocking(progress: JobProgress) -> dict:
+        entered.set()
+        assert gate.wait(20)
+        return {"completed": True}
+
+    def never_started(progress: JobProgress) -> dict:
+        raise AssertionError("shutdown must discard queued work")
+
+    def close() -> None:
+        try:
+            manager.shutdown(wait=wait)
+        except Exception as exc:
+            shutdown_errors.append(exc)
+
+    running = manager.submit("process", "owned-running", blocking)
+    running_future = manager._futures[running]
+    closer = threading.Thread(target=close)
+    try:
+        assert entered.wait(10)
+        queued = manager.submit("process", "owned-queued", never_started)
+        queued_future = manager._futures[queued]
+        queued_future.add_done_callback(lambda _: queued_done.set())
+        foreign = {}
+        for status in ("queued", "running", "succeeded"):
+            job_id = catalog.create_job("process", f"foreign-{status}")
+            catalog.update_job(job_id, status=status)
+            foreign[job_id] = catalog.get_job(job_id)
+
+        closer.start()
+        assert queued_done.wait(10)
+        assert queued_future.cancelled()
+        if wait:
+            assert closer.is_alive()
+        else:
+            closer.join(timeout=10)
+            assert not closer.is_alive()
+            assert catalog.get_job(running)["status"] == "running"
+        assert {job_id: catalog.get_job(job_id) for job_id in foreign} == foreign
+
+        gate.set()
+        closer.join(timeout=10)
+        assert not closer.is_alive()
+        assert not shutdown_errors
+        completed = manager.wait(running, timeout=10)
+        assert completed["status"] == "succeeded"
+        assert completed["result"] == {"completed": True}
+        dropped = catalog.get_job(queued)
+        assert dropped["status"] == "failed"
+        assert "shut down" in dropped["error"]["message"]
+        assert {job_id: catalog.get_job(job_id) for job_id in foreign} == foreign
+    finally:
+        gate.set()
+        if closer.ident is not None:
+            closer.join(timeout=10)
+        running_future.result(timeout=10)
+        manager.shutdown()
+
+
+@pytest.mark.parametrize("status", ["queued", "running"])
+def test_cancel_does_not_reconcile_a_job_owned_by_another_manager(catalog: Catalog, status):
+    manager = JobManager(catalog, recover=False)
+    foreign = catalog.create_job("process", "foreign")
+    catalog.update_job(foreign, status=status)
+    before = catalog.get_job(foreign)
+    try:
+        with pytest.raises(BusyError, match="another job manager"):
+            manager.cancel(foreign)
+        assert catalog.get_job(foreign) == before
     finally:
         manager.shutdown()
 
