@@ -11,6 +11,7 @@ from narumi.errors import InvalidArgumentError
 ANTHROPIC_ENDPOINT = "https://api.anthropic.com"
 CODEX_ENDPOINT = "https://chatgpt.com"
 OLLAMA_ENDPOINT = "http://127.0.0.1:11434"
+OPENAI_ENDPOINT = "https://api.openai.com"
 
 
 def validate_endpoint(provider_id: str, value: str) -> str:
@@ -20,6 +21,7 @@ def validate_endpoint(provider_id: str, value: str) -> str:
         "claude-agent-sdk",
         "codex-app-server",
         "ollama",
+        "openai-api",
     }:
         raise InvalidArgumentError("Unsupported provider", details={"reason": "invalid_provider"})
     if (
@@ -47,10 +49,14 @@ def validate_endpoint(provider_id: str, value: str) -> str:
     ):
         _invalid_endpoint()
     if provider_id != "ollama":
-        host = "chatgpt.com" if provider_id == "codex-app-server" else "api.anthropic.com"
+        endpoint = {
+            "codex-app-server": CODEX_ENDPOINT,
+            "openai-api": OPENAI_ENDPOINT,
+        }.get(provider_id, ANTHROPIC_ENDPOINT)
+        host = urlsplit(endpoint).hostname
         if parsed.scheme != "https" or hostname != host or port not in {None, 443}:
             _invalid_endpoint()
-        return CODEX_ENDPOINT if provider_id == "codex-app-server" else ANTHROPIC_ENDPOINT
+        return endpoint
     if "%" in hostname:
         _invalid_endpoint()
     try:

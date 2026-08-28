@@ -11,7 +11,7 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any, Literal
 
-from narumi.errors import AuthenticationRequiredError, EngineUnavailableError
+from narumi.errors import AuthenticationRequiredError, CancelledError, EngineUnavailableError
 from narumi.providers.metadata.deadline import (
     DeadlineHTTPHandler,
     DeadlineHTTPSHandler,
@@ -23,11 +23,62 @@ from narumi.providers.metadata.validation import check_public_payload, invalid_m
 MAX_RESPONSE_BYTES = 1_048_576
 MAX_GENERATION_RESPONSE_BYTES = 8_388_608
 DEFAULT_TIMEOUT = 10.0
+_METADATA_REASONS = {
+    "invalid_metadata",
+    "redirect_rejected",
+    "invalid_content_type",
+    "unsupported_content_encoding",
+    "metadata_size_limit",
+    "metadata_structure_limit",
+    "unsafe_metadata",
+}
+
+
+class _HTTPStatus(Exception):
+    def __init__(self, status: int):
+        self.status = status
+
+
+def _unknown_outcome() -> EngineUnavailableError:
+    return EngineUnavailableError(
+        "Provider generation outcome is unknown",
+        details={"reason": "provider_generation_outcome_unknown", "outcome_unknown": True},
+    )
+
+
+def _cancelled(deadline: RequestDeadline, *, response_kind: str) -> CancelledError:
+    if response_kind == "generation" and deadline.request_started:
+        return CancelledError(
+            "Provider generation was cancelled after transmission; outcome is unknown",
+            details={"reason": "provider_generation_outcome_unknown", "outcome_unknown": True},
+        )
+    return CancelledError(
+        "Provider generation was cancelled", details={"reason": "provider_generation_cancelled"}
+    )
+
+
+def _response_secrets(headers: dict[str, str]) -> tuple[str, ...]:
+    secrets = []
+    for key, value in headers.items():
+        if key.lower() in {"x-api-key", "authorization"}:
+            secrets.append(value)
+        if key.lower() == "authorization":
+            parts = value.split(None, 1)
+            if len(parts) == 2 and parts[0].lower() == "bearer":
+                secrets.append(parts[1].strip())
+    return tuple(secrets)
 
 
 class RejectRedirects(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise invalid_metadata("redirect_rejected")
+        # urllib closes this response only after redirect_request returns. A
+        # rejection must close its file reference as well as the tracked socket.
+        try:
+            if fp is not None:
+                fp.close()
+        except Exception:
+            pass
+        raise invalid_metadata("redirect_rejected") from None
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -64,6 +115,7 @@ class JSONHTTPClient:
         payload: dict[str, Any] | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         response_kind: Literal["metadata", "generation"] = "metadata",
+        should_cancel: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         if (
             not math.isfinite(timeout)
@@ -78,63 +130,80 @@ class JSONHTTPClient:
             request_headers["Content-Type"] = "application/json"
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
         request = urllib.request.Request(url, data=data, headers=request_headers, method=method)
-        deadline = RequestDeadline(timeout, monotonic=self._monotonic)
+        deadline = RequestDeadline(timeout, monotonic=self._monotonic, should_cancel=should_cancel)
         request.narumi_deadline = deadline
-        secrets = tuple(
-            value
-            for key, value in request_headers.items()
-            if key.lower() in {"x-api-key", "authorization"}
-        )
+        secrets = _response_secrets(request_headers)
         try:
             deadline.start()
+            handler = DeadlineHTTPSHandler if request.type == "https" else DeadlineHTTPHandler
+            if not any(isinstance(item, handler) for item in getattr(self._opener, "handlers", ())):
+                # Injected openers without the deadline handler cannot report
+                # their write boundary. Conservatively regard open() as sent.
+                deadline.mark_request_started()
             with self._opener.open(request, timeout=timeout) as response:
                 deadline.remaining()
                 if response.geturl() != url:
                     raise invalid_metadata("redirect_rejected")
                 if response.status != 200:
-                    self._status_error(response.status)
+                    raise _HTTPStatus(response.status)
                 content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip()
                 if content_type != "application/json":
                     raise invalid_metadata("invalid_content_type")
                 if response.headers.get("Content-Encoding", "identity") != "identity":
                     raise invalid_metadata("unsupported_content_encoding")
                 length = response.headers.get("Content-Length")
-                if length is not None and not 0 <= int(length) <= limit:
+                expected_length = int(length) if length is not None else None
+                if expected_length is not None and not 0 <= expected_length <= limit:
                     raise invalid_metadata("metadata_size_limit")
-                raw = self._read_body(response, deadline, limit)
-        except urllib.error.HTTPError as exc:
-            exc.close()
-            self._status_error(exc.code)
-        except (urllib.error.URLError, http.client.HTTPException, OSError, TimeoutError):
-            raise invalid_metadata("metadata_connection_failed") from None
-        except ValueError:
-            raise invalid_metadata("invalid_metadata") from None
-        finally:
-            deadline.close()
-        try:
+                raw = self._read_body(response, deadline, limit, expected_length=expected_length)
             body = json.loads(
                 raw, object_pairs_hook=_unique_object, parse_constant=_reject_constant
             )
-        except (ValueError, UnicodeDecodeError, RecursionError):
-            raise invalid_metadata("invalid_metadata") from None
-        if not isinstance(body, dict):
-            raise invalid_metadata()
-        if response_kind == "generation":
-            # Ollama's deprecated token context can contain one item per input token.
-            # It is not an artifact or a generation input in narumi; do not retain it
-            # or apply the metadata object-count bound to this unused vector.
-            body.pop("context", None)
-        check_public_payload(body, secrets=secrets, reject_credentials=False)
-        return body
+            if not isinstance(body, dict):
+                raise invalid_metadata()
+            if response_kind == "generation":
+                # Ollama's deprecated token context is unused and may contain
+                # more items than the metadata object-count bound permits.
+                body.pop("context", None)
+            check_public_payload(body, secrets=secrets, reject_credentials=False)
+            deadline.remaining()
+            return body
+        except urllib.error.HTTPError as exc:
+            # Never parse upstream error bodies, including authentication errors.
+            try:
+                exc.close()
+            except Exception:
+                pass
+            self._status_error(exc.code, response_kind=response_kind)
+        except _HTTPStatus as exc:
+            self._status_error(exc.status, response_kind=response_kind)
+        except Exception as exc:
+            if deadline.cancelled:
+                raise _cancelled(deadline, response_kind=response_kind) from None
+            if response_kind == "generation" and deadline.request_started:
+                raise _unknown_outcome() from None
+            reason = "invalid_metadata"
+            if isinstance(exc, (urllib.error.URLError, http.client.HTTPException, OSError)):
+                reason = "metadata_connection_failed"
+            elif isinstance(exc, EngineUnavailableError):
+                observed = exc.details.get("reason") if isinstance(exc.details, dict) else None
+                if isinstance(observed, str) and observed in _METADATA_REASONS:
+                    reason = observed
+            raise invalid_metadata(reason) from None
+        finally:
+            deadline.close()
 
     @staticmethod
-    def _read_body(response, deadline: RequestDeadline, limit: int) -> bytes:
+    def _read_body(
+        response, deadline: RequestDeadline, limit: int, *, expected_length: int | None = None
+    ) -> bytes:
         chunks = []
         total = 0
+        read_limit = limit if expected_length is None else expected_length
         read = getattr(response, "read1", response.read)
-        while total <= limit:
+        while total <= read_limit:
             deadline.remaining()
-            chunk = read(limit + 1 - total)
+            chunk = read(read_limit + 1 - total)
             if not chunk:
                 break
             total += len(chunk)
@@ -142,15 +211,28 @@ class JSONHTTPClient:
         deadline.remaining()
         if total > limit:
             raise invalid_metadata("metadata_size_limit")
+        # HTTPResponse.read1() permits premature EOF even when Content-Length
+        # promises more bytes. Syntactically complete JSON is not proof that the
+        # framed response finished; never accept that partial provider outcome.
+        if expected_length is not None and total != expected_length:
+            raise invalid_metadata()
         return b"".join(chunks)
 
     @staticmethod
-    def _status_error(status: int) -> None:
+    def _status_error(status: int, *, response_kind: str = "metadata") -> None:
+        if type(status) is not int or not 100 <= status <= 599:
+            if response_kind == "generation":
+                raise _unknown_outcome() from None
+            raise invalid_metadata() from None
         if status in {401, 403}:
             raise AuthenticationRequiredError(
                 "Provider authentication failed", details={"reason": "credential_rejected"}
             ) from None
+        if response_kind == "generation" and not 400 <= status < 500:
+            raise _unknown_outcome() from None
         raise EngineUnavailableError(
-            "Provider metadata request failed",
+            "Provider generation request failed"
+            if response_kind == "generation"
+            else "Provider metadata request failed",
             details={"reason": "metadata_http_error", "status": status},
         ) from None

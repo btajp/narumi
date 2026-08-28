@@ -31,6 +31,7 @@ from .provider_fakes import (
     JobQueue,
     ManualExecutor,
     MemorySecretStore,
+    create_connection,
     prepared_codex_connection,
 )
 
@@ -288,7 +289,10 @@ def test_installed_inspection_creates_private_evidence_without_starting_sdk(tmp_
     service.close()
 
 
-def test_missing_dependency_remains_not_prepared_without_installer(tmp_path, monkeypatch):
+@pytest.mark.parametrize("provider_id", ["claude-agent-sdk", "openai-api"])
+def test_missing_dependency_remains_not_prepared_without_installer(
+    tmp_path, monkeypatch, provider_id
+):
     def missing(_name):
         raise importlib.metadata.PackageNotFoundError()
 
@@ -303,17 +307,17 @@ def test_missing_dependency_remains_not_prepared_without_installer(tmp_path, mon
         runtime_inspector=RuntimeInspector(),
         codex_backend=FakeCodexBackend(),
     )
-    service.prepare_runtime(prepare_args(service))
+    service.prepare_runtime(prepare_args(service, provider_id))
     with pytest.raises(EngineUnavailableError):
         jobs.run()
-    result = provider(service)
+    result = provider(service, provider_id)
     assert result["runtime"]["state"] == "not_prepared"
     assert result["reason"] == "runtime_dependency_missing"
     assert result["runtime"]["resources"][0]["version"] is None
     service.close()
 
 
-def test_http_adapters_prepare_without_unused_anthropic_or_httpx_packages(tmp_path, monkeypatch):
+def test_http_adapters_prepare_from_narumi_metadata_without_external_sdks(tmp_path, monkeypatch):
     inspected = []
 
     class NarumiDistribution:
@@ -340,13 +344,73 @@ def test_http_adapters_prepare_without_unused_anthropic_or_httpx_packages(tmp_pa
         submit_job=jobs,
         codex_backend=FakeCodexBackend(),
     )
-    for index, provider_id in enumerate(("anthropic-api", "ollama")):
+    for index, provider_id in enumerate(("openai-api", "anthropic-api", "ollama")):
         args = prepare_args(service, provider_id, f"prepare-http-adapter-{index}")
         service.prepare_runtime(args)
         jobs.run(index)
-        assert provider(service, provider_id)["runtime"]["state"] == "ready"
+        runtime = provider(service, provider_id)["runtime"]
+        assert runtime["state"] == "ready"
+        evidence = tmp_path / "providers" / "runtime" / provider_id / "inspection.json"
+        inspected_resource = json.loads(evidence.read_text())["resource"]
+        assert inspected_resource == runtime["resources"][0]
+        assert stat.S_IMODE(evidence.stat().st_mode) == 0o600
+    assert provider(service, "openai-api")["runtime"]["resources"][0]["resource_id"] == (
+        "openai-client"
+    )
     assert set(inspected) == {"narumi", "claude-agent-sdk"}
+    assert service.metadata.calls == service.secrets.calls == []
     assert provider(service)["runtime"]["resources"][0]["version"] is None
+    service.close()
+
+
+@pytest.mark.parametrize(
+    "provider_id", ["openai-api", "anthropic-api", "ollama", "claude-agent-sdk"]
+)
+@pytest.mark.parametrize("missing_metadata", ["METADATA", "RECORD"])
+def test_distribution_fingerprint_is_required_only_for_http_runtime(
+    tmp_path, monkeypatch, provider_id, missing_metadata
+):
+    class Distribution:
+        version = "1.2.3"
+        metadata = {"License-Expression": "MIT"}
+
+        @staticmethod
+        def read_text(name):
+            if name == missing_metadata:
+                return None
+            return "fixture distribution metadata"
+
+    monkeypatch.setattr(importlib.metadata, "distribution", lambda _: Distribution())
+    jobs = JobQueue()
+    service = ProviderService(
+        tmp_path,
+        secret_store=MemorySecretStore(),
+        metadata_client=FakeMetadata(),
+        auth_executor=ManualExecutor(),
+        submit_job=jobs,
+        runtime_inspector=RuntimeInspector(),
+        codex_backend=FakeCodexBackend(),
+    )
+    resource = provider(service, provider_id)["runtime"]["resources"][0]
+    assert resource["version"] == "1.2.3"
+    assert resource["sha256"] is None
+    service.prepare_runtime(prepare_args(service, provider_id))
+    if provider_id == "claude-agent-sdk":
+        jobs.run()
+        result = provider(service, provider_id)
+        assert result["runtime"]["state"] == "ready"
+        assert result["availability"] == "unverified"
+        assert result["reason"] == "sdk_execution_isolation_unverified"
+    else:
+        with pytest.raises(EngineUnavailableError, match="Provider runtime preparation failed"):
+            jobs.run()
+        result = provider(service, provider_id)
+        assert result["runtime"]["state"] == "failed"
+        assert result["runtime"]["last_setup"]["state"] == "failed"
+        assert result["reason"] == "runtime_preparation_failed"
+        evidence = tmp_path / "providers" / "runtime" / provider_id / "inspection.json"
+        assert not evidence.exists()
+    assert service.metadata.calls == service.secrets.calls == []
     service.close()
 
 
@@ -423,6 +487,46 @@ def test_codex_runtime_update_marks_previous_model_observations_stale(runtime_se
     assert models["catalog_state"] == "stale"
     assert models["models"][0]["availability"] == "unverified"
     assert service.list_connections()["connections"][0]["credential_present"] is True
+
+
+@pytest.mark.parametrize("provider_id", ["openai-api", "anthropic-api", "ollama"])
+@pytest.mark.parametrize("runtime_changed", [False, True])
+def test_http_runtime_preparation_invalidates_only_changed_model_observations(
+    runtime_setup, provider_id, runtime_changed
+):
+    service, jobs, inspector, secrets = runtime_setup
+    service.metadata.models = [
+        {**service.metadata.models[0], "availability": "available", "reason": None}
+    ]
+    service.prepare_runtime(prepare_args(service, provider_id))
+    jobs.run()
+    record = create_connection(service, provider_id=provider_id)
+    result = service.test_connection(
+        {"connection_id": record["connection_id"], "expected_revision": record["revision"]}
+    )
+    assert result["connected"] is True
+    codex_record = prepared_codex_connection(service)
+    cached = service.store.read()["catalogs"][record["connection_id"]]
+    secret_calls, metadata_calls = list(secrets.calls), list(service.metadata.calls)
+    if runtime_changed:
+        inspector.version = "2.0.0"
+        assert provider(service, provider_id)["runtime"]["state"] == "not_prepared"
+    service.prepare_runtime(prepare_args(service, provider_id, "repeat-runtime-prepare"))
+    jobs.run(1)
+    models = service.list_models({"connection_id": record["connection_id"]})
+    assert models["catalog_state"] == ("stale" if runtime_changed else "ready")
+    assert models["models"][0]["availability"] == ("unverified" if runtime_changed else "available")
+    saved = service.store.read()
+    assert saved["catalogs"][record["connection_id"]] == cached
+    saved_connection = saved["connections"][record["connection_id"]]
+    assert saved_connection["credential_present"] == record["credential_present"]
+    assert saved_connection["auth_state"] == "authenticated"
+    assert (
+        service.list_models({"connection_id": codex_record["connection_id"]})["catalog_state"]
+        == "ready"
+    )
+    assert secrets.calls == secret_calls
+    assert service.metadata.calls == metadata_calls
 
 
 @pytest.mark.parametrize("instance_id", [INSTANCE_ONE, INSTANCE_TWO])

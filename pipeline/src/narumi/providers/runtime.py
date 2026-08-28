@@ -275,7 +275,7 @@ class RuntimePreparation:
                     state=runtime_state,
                     reason=reason,
                 )
-                if provider_id == "codex-app-server" and runtime_state == "ready":
+                if runtime_state == "ready":
                     for record in document["connections"].values():
                         cached = document["catalogs"].get(record["connection_id"])
                         if (

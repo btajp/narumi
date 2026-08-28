@@ -11,29 +11,82 @@ import urllib.request
 from collections.abc import Callable
 
 _DNS_SLOTS = threading.BoundedSemaphore(4)
+CANCEL_POLL_INTERVAL = 0.1
+
+
+class RequestCancelled(Exception):
+    """Internal cancellation signal; the HTTP boundary assigns public details."""
 
 
 class RequestDeadline:
     """Abort the actual socket even while urllib is blocked reading HTTP headers."""
 
-    def __init__(self, timeout: float, *, monotonic: Callable[[], float] = time.monotonic):
+    def __init__(
+        self,
+        timeout: float,
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
+        should_cancel: Callable[[], bool] | None = None,
+    ):
         self._clock = monotonic
         self._expires_at = monotonic() + timeout
         self._expired = threading.Event()
+        self._cancelled = threading.Event()
+        self._closed = threading.Event()
+        self._should_cancel = should_cancel
         self._lock = threading.Lock()
         self._socket: socket.socket | None = None
+        self._cancel_timer: threading.Timer | None = None
         self._timer = threading.Timer(timeout, self.expire)
         self._timer.daemon = True
+        self.request_started = False
 
     def start(self) -> None:
+        self.remaining()
         self._timer.start()
+        if self._should_cancel is not None:
+            self._poll_cancel()
+
+    @property
+    def cancelled(self) -> bool:
+        if not self._cancelled.is_set() and self._should_cancel is not None:
+            try:
+                cancelled = self._should_cancel()
+            except Exception:
+                # A failing cancellation callback must not leak on a timer thread
+                # or permit an operation to run without cancellation protection.
+                cancelled = True
+            if cancelled:
+                self._cancelled.set()
+                self._abort_socket()
+        return self._cancelled.is_set()
 
     def remaining(self) -> float:
+        if self.cancelled:
+            raise RequestCancelled("HTTP request cancelled")
         remaining = self._expires_at - self._clock()
         if self._expired.is_set() or remaining <= 0:
             self.expire()
             raise TimeoutError("HTTP request deadline exceeded")
         return remaining
+
+    def wait_timeout(self) -> float:
+        remaining = self.remaining()
+        return min(remaining, CANCEL_POLL_INTERVAL) if self._should_cancel else remaining
+
+    def mark_request_started(self) -> None:
+        """Called after connect/TLS, immediately before the first HTTP write."""
+        self.remaining()
+        self.request_started = True
+
+    def _poll_cancel(self) -> None:
+        if self._closed.is_set() or self.cancelled or self._expired.is_set():
+            return
+        with self._lock:
+            if not self._closed.is_set():
+                self._cancel_timer = threading.Timer(CANCEL_POLL_INTERVAL, self._poll_cancel)
+                self._cancel_timer.daemon = True
+                self._cancel_timer.start()
 
     def track(self, connection: socket.socket) -> None:
         with self._lock:
@@ -42,14 +95,20 @@ class RequestDeadline:
 
     def expire(self) -> None:
         self._expired.set()
+        self._abort_socket()
+
+    def _abort_socket(self) -> None:
         with self._lock:
             connection = self._socket
         if connection is not None:
             _abort(connection)
 
     def close(self) -> None:
+        self._closed.set()
         self._timer.cancel()
         with self._lock:
+            if self._cancel_timer is not None:
+                self._cancel_timer.cancel()
             connection, self._socket = self._socket, None
         if connection is not None:
             _abort(connection)
@@ -77,15 +136,20 @@ def _resolve(host: str, port: int, deadline: RequestDeadline) -> list[tuple]:
         return [(family, socket.SOCK_STREAM, 0, "", target)]
     # System DNS calls cannot be cancelled portably. Bound their number and stop
     # waiting at the deadline; the detached resolver only holds a host and port.
-    if not _DNS_SLOTS.acquire(timeout=deadline.remaining()):
-        raise TimeoutError("DNS deadline exceeded")
+    while not _DNS_SLOTS.acquire(timeout=deadline.wait_timeout()):
+        deadline.remaining()
+    try:
+        deadline.remaining()
+    except Exception:
+        _DNS_SLOTS.release()
+        raise
     finished = threading.Event()
     result: list[list[tuple] | None] = []
 
     def resolve() -> None:
         try:
             result.append(socket.getaddrinfo(host, port, type=socket.SOCK_STREAM))
-        except OSError:
+        except Exception:
             result.append(None)
         finally:
             finished.set()
@@ -93,11 +157,11 @@ def _resolve(host: str, port: int, deadline: RequestDeadline) -> list[tuple]:
 
     try:
         threading.Thread(target=resolve, daemon=True).start()
-    except RuntimeError:
+    except Exception:
         _DNS_SLOTS.release()
         raise OSError("DNS resolver unavailable") from None
-    if not finished.wait(deadline.remaining()):
-        raise TimeoutError("DNS deadline exceeded")
+    while not finished.wait(deadline.wait_timeout()):
+        deadline.remaining()
     deadline.remaining()
     if not result or not result[0]:
         raise OSError("DNS resolution failed")
@@ -118,7 +182,20 @@ def _connect(host: str, port: int, deadline: RequestDeadline) -> socket.socket:
     raise OSError("HTTP connection failed")
 
 
-class _HTTPConnection(http.client.HTTPConnection):
+class _TrackedSend:
+    def send(self, data) -> None:
+        # HTTPConnection.send() normally connects lazily. Complete that step
+        # first so a DNS/connect/TLS failure is never counted as a transmitted
+        # generation request. Once sendall may run, the outcome is uncertain.
+        if self.sock is None:
+            if not self.auto_open:
+                raise http.client.NotConnected()
+            self.connect()
+        self.deadline.mark_request_started()
+        super().send(data)
+
+
+class _HTTPConnection(_TrackedSend, http.client.HTTPConnection):
     def __init__(self, *args, deadline: RequestDeadline, **kwargs):
         super().__init__(*args, **kwargs)
         self.deadline = deadline
@@ -129,7 +206,7 @@ class _HTTPConnection(http.client.HTTPConnection):
         self.sock = _connect(self.host, self.port, self.deadline)
 
 
-class _HTTPSConnection(http.client.HTTPSConnection):
+class _HTTPSConnection(_TrackedSend, http.client.HTTPSConnection):
     def __init__(self, *args, deadline: RequestDeadline, **kwargs):
         super().__init__(*args, **kwargs)
         self.deadline = deadline

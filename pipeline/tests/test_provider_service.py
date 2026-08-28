@@ -53,6 +53,7 @@ def test_lists_do_not_access_secrets_or_network(service, effects):
         "claude-agent-sdk",
         "codex-app-server",
         "ollama",
+        "openai-api",
     }
     assert service.list_connections() == {"connections": []}
     assert secrets.calls == metadata.calls == []
@@ -256,8 +257,9 @@ def test_metadata_failure_is_safe_and_does_not_mark_generation_succeeded(service
     assert "fixture-key" not in service.store.path.read_text()
 
 
-def test_untrusted_metadata_cannot_echo_credential(service, effects):
-    record = create_connection(service)
+@pytest.mark.parametrize("provider_id", ["anthropic-api", "openai-api"])
+def test_untrusted_metadata_cannot_echo_credential(service, effects, provider_id):
+    record = create_connection(service, provider_id=provider_id)
     effects[1].models[0]["display_name"] = "Echo fixture-key"
     result = service.test_connection(
         {"connection_id": record["connection_id"], "expected_revision": 1}

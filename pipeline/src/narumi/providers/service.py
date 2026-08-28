@@ -46,6 +46,7 @@ class ProviderService:
         runtime_inspector: RuntimeInspector | None = None,
         connection_referenced: Callable[[str], bool] | None = None,
         codex_backend: Any | None = None,
+        http_backend: Any | None = None,
         recover: bool = True,
     ) -> None:
         self.root = Path(root).expanduser()
@@ -60,6 +61,8 @@ class ProviderService:
         self._can_recover = recover
         self._codex_backend = codex_backend
         self._codex_lock = threading.Lock()
+        self._http_backend = http_backend
+        self._http_lock = threading.Lock()
         self.auth_executor = auth_executor or ThreadPoolExecutor(
             max_workers=3,
             thread_name_prefix="narumi-provider-auth",
@@ -96,6 +99,18 @@ class ProviderService:
         except InvalidArgumentError:
             raise InvalidArgumentError("Provider operation arguments are invalid") from None
         return dict(args or {})
+
+    @property
+    def http_backend(self) -> Any:
+        """Construct the direct HTTP adapter without reading credentials or sending data."""
+        with self._http_lock:
+            if self.closed.is_set():
+                raise NarumiError("Provider service is closed")
+            if self._http_backend is None:
+                from narumi.providers.http_generation import HTTPMinutesBackend
+
+                self._http_backend = HTTPMinutesBackend(metadata=self.metadata)
+            return self._http_backend
 
     def list_providers(self, args: Mapping[str, Any] | None = None) -> dict[str, Any]:
         self.validate("list_providers", args)
