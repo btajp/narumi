@@ -6,31 +6,40 @@ enum MinutesModelFixtures {
     static let modelID = "fixture-codex-model"
 
     static func connection(
-        revision: Int = 1, enabled: Bool = true, authState: ProviderAuthState = .authenticated
+        revision: Int = 1, enabled: Bool = true, authState: ProviderAuthState = .authenticated,
+        providerID: ProviderID = .codexAppServer
     ) -> ProviderConnection {
         ProviderSettingsFixtures.connection(
-            revision: revision, providerID: .codexAppServer, name: "Minutes Codex", enabled: enabled,
+            revision: revision, providerID: providerID, name: "Minutes fixture", enabled: enabled,
             authState: authState, catalogState: .ready)
     }
 
     static func model(
         id: String = modelID, availability: ProviderAvailability = .available,
         inputs: [ProviderModality] = [.text], outputs: [ProviderModality] = [.text],
-        billing: ProviderBillingKind = .subscription, required: [String] = []
+        billing: ProviderBillingKind? = nil, required: [String] = [], provider: String = "codex-app-server",
+        parameterSchema: ProviderParameterSchema? = nil, maxOutputTokens: Int? = 10_000,
+        availabilityExpiresOn: String? = nil
     ) -> ProviderModelDescriptor {
-        ProviderModelDescriptor(
+        var properties: [String: ProviderModelParameter] = [:]
+        if ["codex-app-server", "openai-api"].contains(provider) {
+            properties["reasoning_effort"] = ProviderModelParameter(
+                type: .string, enumValues: [.string("low"), .string("high")], defaultValue: .string("low"))
+        }
+        if provider != "codex-app-server" {
+            properties["max_tokens"] = ProviderModelParameter(type: .integer, minimum: 1, maximum: 32768)
+        }
+        let billingKind = billing ?? (provider == "codex-app-server" ? .subscription : (provider == "ollama" ? .local : .api))
+        return ProviderModelDescriptor(
             modelID: id, displayName: "Fixture Codex model", resolvedRevision: "fixture-revision",
             inputModalities: inputs, outputModalities: outputs, roles: [.llm], timestampSupport: .none,
-            contextWindow: 100_000, maxOutputTokens: 10_000,
-            parameterSchema: ProviderParameterSchema(properties: [
-                "reasoning_effort": ProviderModelParameter(
-                    type: .string, enumValues: [.string("low"), .string("high")], defaultValue: .string("low"))
-            ], required: required),
+            contextWindow: 100_000, maxOutputTokens: maxOutputTokens,
+            parameterSchema: parameterSchema ?? ProviderParameterSchema(properties: properties, required: required),
             availability: availability, reason: nil, source: .runtime,
             fetchedAt: ProviderSettingsFixtures.timestamp,
             billing: ProviderModelBilling(
-                kind: billing, inputUSDPerMillionTokens: nil, outputUSDPerMillionTokens: nil,
-                audioUSDPerMinute: nil, fetchedAt: nil))
+                kind: billingKind, inputUSDPerMillionTokens: nil, outputUSDPerMillionTokens: nil,
+                audioUSDPerMinute: nil, fetchedAt: nil), availabilityExpiresOn: availabilityExpiresOn)
     }
 
     static func catalog(
@@ -42,8 +51,8 @@ enum MinutesModelFixtures {
             nextCursor: cursor, catalogState: state, fetchedAt: ProviderSettingsFixtures.timestamp)
     }
 
-    static func selection(revision: Int = 1, cacheEpoch: Int = 0) -> CodexMinutesSelection {
-        CodexMinutesSelection(
+    static func selection(revision: Int = 1, cacheEpoch: Int = 0) -> MinutesModelSelection {
+        MinutesModelSelection(
             connectionID: connectionID, connectionRevision: revision, modelID: modelID,
             reasoningEffort: "high", cacheEpoch: cacheEpoch)
     }

@@ -50,13 +50,17 @@ struct ProviderConnectionEditor: View {
                 Text("API キーは不要です。ローカル接続でも、モデルがローカル実行できるかは別に確認します。")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
-                LabeledContent("送信先", value: ProviderConnectionSettings.anthropicEndpoint)
+                LabeledContent("送信先", value: store.editor.normalizedEndpoint)
                 LabeledContent("認証方式", value: "API キー（API 課金）")
                 SecureField("API キー", text: $store.editor.apiKey, prompt: Text("空欄なら現在のキーを保持"))
                     .autocorrectionDisabled()
                     .disabled(store.editor.clearAPIKey)
                 Text("キーは Keychain に保存し、読み戻し・再表示しません。新規接続で空欄の場合は未設定として保存します。保存の成功・失敗・画面を閉じる際に入力を消去します。")
                     .font(.caption).foregroundStyle(.secondary)
+                if store.editor.providerID == .openaiAPI {
+                    Text("OpenAI API のキーを入力してください。送信先は固定で変更不要です。ChatGPT のログインや利用枠とは別に API 利用料が発生します。保存だけでは接続確認や議事録生成は行いません。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if !store.editor.isCreating {
                     Toggle("保存時に API キーを削除", isOn: Binding(
                         get: { store.editor.clearAPIKey }, set: { store.editor.setClearAPIKey($0) }

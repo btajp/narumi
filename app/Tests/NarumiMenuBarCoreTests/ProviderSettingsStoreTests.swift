@@ -103,6 +103,74 @@ final class ProviderSettingsStoreTests: XCTestCase {
         XCTAssertEqual(tests.count, 1)
     }
 
+    func testOpenAISaveAndMetadataChecksKeepGenerationSeparate() async throws {
+        let client = FakeProviderSettingsClient(
+            connections: [], providers: [ProviderSettingsFixtures.provider(providerID: .openaiAPI)])
+        let store = ProviderSettingsStore(client: client)
+        await store.load()
+        store.editor.displayName = "Meeting API"
+        store.editor.apiKey = "fixture-openai-key"
+        await store.save()
+        XCTAssertEqual(store.editor.apiKey, "")
+        let connection = try XCTUnwrap(store.selectedConnection)
+        XCTAssertEqual(connection.providerID, .openaiAPI)
+        XCTAssertEqual(connection.endpoint, "https://api.openai.com")
+        XCTAssertEqual(connection.authMethod, .apiKey)
+        XCTAssertEqual(connection.authState, .unverified)
+        let automaticTests = await client.testRequests
+        let automaticModels = await client.modelRequests
+        let automaticAuth = await client.authRequests
+        XCTAssertTrue(automaticTests.isEmpty)
+        XCTAssertTrue(automaticModels.isEmpty)
+        XCTAssertTrue(automaticAuth.isEmpty)
+
+        await store.testConnection()
+        XCTAssertEqual(store.selectedConnection?.authState, .authenticated)
+        XCTAssertEqual(store.selectedConnection?.lastGenerationState, .never)
+        XCTAssertEqual(store.selectedConnection?.revision, connection.revision)
+        XCTAssertEqual(store.notice, "モデル一覧を取得できました。残高・生成権限・議事録生成の成功は未確認です。")
+        XCTAssertNil(store.deviceAuthorization)
+        await store.loadModels()
+        await store.loadModels(refresh: true)
+        let modelRequests = await client.modelRequests
+        let testRequests = await client.testRequests
+        let saves = await client.saveRequests
+        XCTAssertEqual(modelRequests.map(\.refresh), [false, true])
+        XCTAssertEqual(testRequests.map(\.connectionID), [connection.connectionID])
+        XCTAssertEqual(saves.count, 1)
+        XCTAssertEqual(saves.first?.apiKey, .replace("fixture-openai-key"))
+        XCTAssertEqual(store.selectedConnection?.lastGenerationState, .never)
+    }
+
+    func testOpenAIContactRequiresPreparedRuntimeAndStoredKey() async {
+        for state in [ProviderRuntimeState.notPrepared, .preparing, .failed, .unavailable, .unknown] {
+            let client = FakeProviderSettingsClient(
+                connections: [ProviderSettingsFixtures.connection(providerID: .openaiAPI)],
+                providers: [ProviderSettingsFixtures.provider(providerID: .openaiAPI, state: state)])
+            let store = ProviderSettingsStore(client: client)
+            await store.load()
+            XCTAssertFalse(store.canTest, state.rawValue)
+            XCTAssertFalse(store.canAuthenticate, state.rawValue)
+            await store.testConnection()
+            await store.startAuthentication()
+            await store.loadModels(refresh: true)
+            await store.loadModels()
+            let tests = await client.testRequests
+            let auth = await client.authRequests
+            let models = await client.modelRequests
+            XCTAssertTrue(tests.isEmpty, state.rawValue)
+            XCTAssertTrue(auth.isEmpty, state.rawValue)
+            XCTAssertEqual(models.map(\.refresh), [false], state.rawValue)
+        }
+        let client = FakeProviderSettingsClient(
+            connections: [ProviderSettingsFixtures.connection(providerID: .openaiAPI, credential: false)],
+            providers: [ProviderSettingsFixtures.provider(providerID: .openaiAPI)])
+        let store = ProviderSettingsStore(client: client)
+        await store.load()
+        XCTAssertFalse(store.canTest)
+        XCTAssertFalse(store.canAuthenticate)
+    }
+
     func testSavedAndRefreshedCandidatesNeverApplyAModelOrMutateConnection() async {
         let client = FakeProviderSettingsClient()
         let store = ProviderSettingsStore(client: client)

@@ -59,7 +59,10 @@ final class MCPPermissionSessionStateTests: XCTestCase {
     }
 
     func testUnknownOldAndUnsupportedMajorVersionsCannotAuthorizeDataCalls() {
-        let unsupported: [String?] = [nil, "", "malformed", "1.0.0", "1.1.0", "2.0.0-rc.1", "0.9.0", "3.0.0-rc.1", "4.0.0"]
+        let unsupported: [String?] = [
+            nil, "", "malformed", "1.0.0", "1.1.0", "2.0.0-rc.1", "0.9.0",
+            "3.0.0-rc.1", "4.0.0-rc.1", "5.0.0",
+        ]
         for version in unsupported {
             var state = MCPPermissionSessionState()
             XCTAssertTrue(state.observeServerInfo(

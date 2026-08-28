@@ -27,19 +27,24 @@ struct ProviderConnectionStatusSection: View {
                         Task { await store.startAuthentication() }
                     }
                     .disabled(!store.canAuthenticate)
-                    Button("接続テスト") { Task { await store.testConnection() } }
+                    Button(connection.providerID == .openaiAPI ? "モデル一覧で接続を確認" : "接続テスト") {
+                        Task { await store.testConnection() }
+                    }
                         .disabled(!store.canTest)
                 }
-                Text("ログイン・認証確認とメタデータの照会だけを行います。会議データの送信・議事録生成は行いません。")
+                Text(ProviderDisplay.connectionVerificationScope(connection.providerID))
                     .font(.caption).foregroundStyle(.secondary)
                 if connection.authMethod == .chatgpt {
                     Text(store.selectedProvider?.runtime.state == .ready
                         ? "ログイン後、「接続先から候補を更新」でモデル一覧を取得してください。"
                         : "ログインを始めるには、下の「実行環境」で「確認・準備」を完了してください。")
                         .font(.caption).foregroundStyle(.secondary)
+                } else if connection.providerID == .openaiAPI, store.selectedProvider?.runtime.state != .ready {
+                    Text("接続確認を始めるには、下の「実行環境」で内蔵アダプタの「確認・準備」を完了してください。")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 if let result = store.lastTest, !store.editor.hasUnsavedChanges {
-                    Text(result.connected ? "接続テスト成功（議事録生成は未検証）" : "接続テストで接続を確認できませんでした")
+                    Text(ProviderDisplay.connectionTestResult(result))
                         .font(.callout).foregroundStyle(result.connected ? .green : .orange)
                     if let reason = ProviderDisplay.reason(result.reason) {
                         Text(reason).font(.caption).foregroundStyle(.secondary)

@@ -4,6 +4,7 @@ public enum ProviderDisplay {
     public static func name(_ provider: ProviderID) -> String {
         switch provider {
         case .anthropicAPI: return "Anthropic API"
+        case .openaiAPI: return "OpenAI API"
         case .claudeAgentSDK: return "Claude Agent SDK"
         case .ollama: return "Ollama"
         case .codexAppServer: return "Codex App Server"
@@ -73,6 +74,23 @@ public enum ProviderDisplay {
         }
     }
 
+    public static func connectionVerificationScope(_ provider: ProviderID) -> String {
+        if provider == .openaiAPI {
+            return "保存した API キーで https://api.openai.com/v1/models のモデル一覧を照会します。残高や生成権限は確認できず、会議データの送信・議事録生成は行いません。"
+        }
+        return "ログイン・認証確認とメタデータの照会だけを行います。会議データの送信・議事録生成は行いません。"
+    }
+
+    public static func connectionTestResult(_ result: ProviderConnectionTestResult) -> String {
+        guard result.connected else {
+            return "接続を確認できませんでした。認証・実行環境の状態を確認してください。"
+        }
+        if result.connection.providerID == .openaiAPI {
+            return "モデル一覧を取得できました。残高・生成権限・議事録生成の成功は未確認です。"
+        }
+        return "接続とメタデータを確認しました。議事録生成は未検証です。"
+    }
+
     public static func setup(_ state: ProviderSetupState) -> String {
         switch state {
         case .queued: return "準備の受付済み"
@@ -108,6 +126,8 @@ public enum ProviderDisplay {
     public static func reason(_ code: String?) -> String? {
         guard let code else { return nil }
         switch code {
+        case "provider_generation_outcome_unknown", "codex_generation_outcome_unknown":
+            return ToolErrorInfo.generationOutcomeMessage(reason: code, unknown: true)
         case "credential_required", "authentication_required": return "この接続の認証設定と認証確認が必要です。"
         case "runtime_verification_pending", "runtime_preparation_required": return "実行環境の準備・確認が必要です。"
         case "runtime_preparation_failed": return "実行環境の準備に失敗しました。準備状態を確認してください。"
@@ -130,6 +150,8 @@ public enum ProviderDisplay {
         case "remote_models_not_supported": return "この接続ではクラウド・リモートモデルを利用できません。"
         case "text_completion_not_supported": return "このモデルは文章生成に対応していません。"
         case "credential_rejected": return "保存済みの認証情報が受け付けられませんでした。ログインし直すか、API キーを確認してください。"
+        case "model_list_verified_generation_unchecked":
+            return "モデル一覧の取得を確認しました。残高・生成権限・実際の議事録生成は未確認です。"
         case "metadata_connection_failed", "metadata_timeout", "metadata_http_error", "metadata_unavailable":
             return "メタデータの取得に失敗しました。接続先の状態を確認してください。"
         case "metadata_catalog_limit", "metadata_page_limit", "metadata_size_limit":

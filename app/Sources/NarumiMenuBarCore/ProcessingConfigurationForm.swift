@@ -33,12 +33,14 @@ public struct ProcessingConfigurationForm: Equatable, Sendable {
             .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     }
 
-    public func makeUpdate(supportsMinutesModel: Bool = true) throws -> ProcessingConfigurationUpdate {
+    public func makeUpdate(
+        supportsMinutesModel: Bool = true, supportedProviders: [String] = MinutesModelSelection.providers
+    ) throws -> ProcessingConfigurationUpdate {
         guard supportsMinutesModel || minutesModel.mode == .legacy else {
-            throw ConfigurationFormFailure(message: "このサーバーは Codex の議事録モデル選択に対応していません。アプリを更新してください。")
+            throw ConfigurationFormFailure(message: "このサーバーは議事録モデル選択に対応していません。アプリを更新してください。")
         }
-        guard minutesModel.mode != .codex || minutesModel.selection != nil else {
-            throw ConfigurationFormFailure(message: "Codex の接続とモデルを選んでください。")
+        guard minutesModel.mode != .selected || (minutesModel.selection != nil && supportedProviders.contains(minutesModel.provider)) else {
+            throw ConfigurationFormFailure(message: "対応するプロバイダの接続・モデルと、利用できるパラメータを選んでください。")
         }
         let trimmedName = selfName.trimmingCharacters(in: .whitespaces)
         return ProcessingConfigurationUpdate(config: MeetingConfig(
@@ -48,7 +50,7 @@ public struct ProcessingConfigurationForm: Equatable, Sendable {
             externalSendPolicy: externalSendPolicy.isEmpty ? nil : externalSendPolicy,
             language: language.isEmpty ? nil : language,
             selfName: trimmedName.isEmpty ? nil : trimmedName, vocabHints: vocabHints,
-            minutesModel: minutesModel.mode == .codex ? minutesModel.selection : nil),
+            minutesModel: minutesModel.mode == .selected ? minutesModel.selection : nil),
             includesMinutesModel: supportsMinutesModel)
     }
 }

@@ -59,7 +59,12 @@ final class MainWindowModel: ObservableObject {
 
     // MARK: Server-wide data
 
-    @Published var serverInfo: ServerInfo?
+    @Published var serverInfo: ServerInfo? {
+        didSet {
+            minutesModelCatalog.setSupportedProviders(
+                serverInfo?.capabilities.supportedMinutesModelProviders(contractVersion: serverInfo?.contractVersion) ?? [])
+        }
+    }
     @Published var exportDestinations: [ExportDestinationInfo] = []
     @Published var profilesList: ListProfilesResponse?
     @Published var rebuildResult: RebuildCatalogResponse?

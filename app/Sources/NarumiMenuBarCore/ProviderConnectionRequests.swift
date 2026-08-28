@@ -89,6 +89,10 @@ public struct SetProviderConnectionRequest: Encodable, Equatable, Sendable,
         if let providerID, authMethod != providerID.supportedAuthMethod {
             throw invalidProviderRequest(encoder)
         }
+        if providerID == .openaiAPI,
+            endpoint != nil && endpoint != ProviderConnectionSettings.openaiEndpoint {
+            throw invalidProviderRequest(encoder)
+        }
         if authMethod == .chatgpt || providerID == .codexAppServer {
             guard apiKey == .unchanged,
                 endpoint == nil || endpoint == ProviderConnectionSettings.codexEndpoint else {

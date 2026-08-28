@@ -4,6 +4,7 @@ import Foundation
 /// removed from this state as soon as a save request is handed to the client.
 public struct ProviderConnectionSettings: Sendable {
     public static let anthropicEndpoint = "https://api.anthropic.com"
+    public static let openaiEndpoint = "https://api.openai.com"
     public static let ollamaEndpoint = "http://127.0.0.1:11434"
     public static let codexEndpoint = "https://chatgpt.com"
 
@@ -121,6 +122,7 @@ public struct ProviderConnectionSettings: Sendable {
     private static func defaultEndpoint(for providerID: ProviderID) -> String {
         switch providerID {
         case .anthropicAPI, .claudeAgentSDK: return anthropicEndpoint
+        case .openaiAPI: return openaiEndpoint
         case .ollama: return ollamaEndpoint
         case .codexAppServer: return codexEndpoint
         }

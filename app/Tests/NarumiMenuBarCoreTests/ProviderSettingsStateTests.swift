@@ -84,6 +84,45 @@ final class ProviderSettingsStateTests: XCTestCase {
         }
     }
 
+    func testOpenAIEditorClearsOtherProviderSecretAndPinsDestination() throws {
+        var editor = ProviderConnectionSettings()
+        editor.apiKey = "fixture-other-key"
+        editor.selectProvider(.openaiAPI)
+        XCTAssertEqual(editor.apiKey, "")
+        XCTAssertTrue(editor.usesAPIKey)
+        XCTAssertEqual(editor.endpoint, "https://api.openai.com")
+        editor.displayName = "Meeting API"
+        editor.endpoint = "https://example.invalid"
+        editor.apiKey = "fixture-openai-key"
+        let request = try XCTUnwrap(editor.takeSaveRequest())
+        XCTAssertEqual(request.providerID, .openaiAPI)
+        XCTAssertEqual(request.endpoint, "https://api.openai.com")
+        XCTAssertEqual(request.authMethod, .apiKey)
+        XCTAssertEqual(request.apiKey, .replace("fixture-openai-key"))
+        XCTAssertEqual(editor.apiKey, "")
+        editor.adopt(ProviderSettingsFixtures.connection(providerID: .openaiAPI))
+        XCTAssertEqual(editor.apiKey, "")
+        editor.displayName = "Updated API connection"
+        XCTAssertEqual(try XCTUnwrap(editor.takeSaveRequest()).apiKey, .unchanged)
+        editor.setClearAPIKey(true)
+        XCTAssertEqual(try XCTUnwrap(editor.takeSaveRequest()).apiKey, .clear)
+    }
+
+    func testOpenAIMetadataMessagesDistinguishGenerationAndBalanceChecks() throws {
+        let scope = ProviderDisplay.connectionVerificationScope(.openaiAPI)
+        XCTAssertTrue(scope.contains("https://api.openai.com/v1/models"))
+        XCTAssertTrue(scope.contains("会議データの送信・議事録生成は行いません"))
+        let result = ProviderConnectionTestResult(
+            connection: ProviderSettingsFixtures.connection(providerID: .openaiAPI), connected: true,
+            reason: "model_list_verified_generation_unchecked")
+        XCTAssertEqual(
+            ProviderDisplay.connectionTestResult(result),
+            "モデル一覧を取得できました。残高・生成権限・議事録生成の成功は未確認です。")
+        XCTAssertEqual(
+            ProviderDisplay.reason(result.reason),
+            "モデル一覧の取得を確認しました。残高・生成権限・実際の議事録生成は未確認です。")
+    }
+
     func testUnknownErrorAndPriceNeverEchoRawTextOrAssumeZero() {
         let failure = ProviderSettingsFailure(code: "raw-secret-from-server")
         XCTAssertEqual(failure.code, .internalError)

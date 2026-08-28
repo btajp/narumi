@@ -22,12 +22,24 @@ enum MCPClientSessionFixtureSource {
         private var tools: [String] = []
         private var methods: [String] = []
         private var argumentsByTool: [String: [[String: JSONNode]]] = [:]
+        private var savedConfig: [String: JSONNode] = [:]
+        private var savedProfile: JSONNode = .object([:])
         init(_ scenario: String) { self.scenario = scenario }
         func invalidate() {}
         func count(_ tool: String) -> Int { lock.withLock { tools.filter { $0 == tool }.count } }
         var calls: [String] { lock.withLock { tools } }
         var allMethods: [String] { lock.withLock { methods } }
         func arguments(_ tool: String) -> [[String: JSONNode]] { lock.withLock { argumentsByTool[tool] ?? [] } }
+
+        private var contractVersion: String {
+            switch scenario {
+            case "v1": return "1.1.0"
+            case "future_contract": return "5.0.0"
+            case "codex_minutes_requests": return "3.0.0"
+            case "minutes_requests": return "4.0.0"
+            default: return "2.0.0"
+            }
+        }
 
         func data(for request: URLRequest, protectingSecrets: Bool) async throws -> (Data, URLResponse) {
             let rpc = try JSONNode.parse(request.httpBody!)
@@ -43,7 +55,7 @@ enum MCPClientSessionFixtureSource {
             }
             if name == ToolCatalog.getServerInfo {
                 var info: [String: JSONNode] = [
-                    "contract_version": .string(scenario == "v1" ? "1.1.0" : (scenario == "minutes_requests" ? "3.0.0" : "2.0.0")),
+                    "contract_version": .string(contractVersion),
                     "server_instance_id": .string(scenario == "wrong_instance" ? "00000000-0000-4000-8000-000000000002" : instance),
                     "secure_transport": .object([
                         "mode": .string("pinned_tls"), "tls_required": .bool(true),
@@ -71,7 +83,51 @@ enum MCPClientSessionFixtureSource {
             if scenario == "malformed" {
                 return response(request, status: 200, body: Data(("invalid-json " + fixtureSecret).utf8))
             }
-            if scenario == "minutes_requests" || scenario == "legacy_minutes_requests" {
+            if ["minutes_requests", "codex_minutes_requests", "legacy_minutes_requests"].contains(scenario) {
+                let input = arguments(name).last ?? [:]
+                if name == ToolCatalog.setMeetingConfig {
+                    let configurationKeys: Set<String> = [
+                        "transcription_engine", "diarization_engine", "llm_provider", "external_send_policy",
+                        "language", "self_name", "vocab_hints", "minutes_model",
+                    ]
+                    let updates = input.filter { configurationKeys.contains($0.key) }
+                    let config = lock.withLock {
+                        savedConfig.merge(updates) { _, replacement in replacement }
+                        return savedConfig
+                    }
+                    return try structured(request, id: id, value: .object([
+                        "meeting_id": .string("20260829T000000Z-a1b2c3d4"), "config": .object(config),
+                        "scope": input["scope"] ?? .null,
+                    ]))
+                }
+                if name == ToolCatalog.getMeeting {
+                    let config = lock.withLock { savedConfig }
+                    return try structured(request, id: id, value: .object([
+                        "meeting": .object([
+                            "meeting_id": .string("20260829T000000Z-a1b2c3d4"), "meeting_name": .string("Fixture meeting"),
+                            "scope": input["scope"] ?? .null, "status": .string("recorded"),
+                            "started_at": .string("2026-08-29T00:00:00Z"),
+                        ]),
+                        "bundle_path": .string("/fixture/meeting"), "config": .object(config),
+                        "recording": .object(["tracks": .object([:])]), "contexts": .array([]),
+                        "minutes_versions": .array([]), "latest_minutes": .null,
+                        "exports": .array([]), "artifacts": .array([]),
+                    ]))
+                }
+                if name == ToolCatalog.setProfile {
+                    let profile = JSONNode.object([
+                        "name": input["name"]!, "config": input["config"]!,
+                        "scope": input["scope"] ?? .null, "engagement": input["engagement"] ?? .null,
+                        "export_destinations": input["export_destinations"] ?? .array([]),
+                        "is_default": input["make_default"] ?? .bool(false),
+                    ])
+                    lock.withLock { savedProfile = profile }
+                    return try structured(request, id: id, value: .object(["profile": profile]))
+                }
+                if name == ToolCatalog.getProfile {
+                    let profile = lock.withLock { savedProfile }
+                    return try structured(request, id: id, value: .object(["profile": profile]))
+                }
                 if name == ToolCatalog.regenerate {
                     return try structured(request, id: id, value: .object([
                         "job_id": .string("job-0123456789ab"), "meeting_id": .string("20260829T000000Z-a1b2c3d4"),
@@ -138,7 +194,8 @@ enum MCPClientSessionFixtureSource {
             _ = try await ordinary.callTool(ToolCatalog.listProviders, arguments: [:])
             checks["discovery_before_tools"] = http.allMethods.prefix(2) == ["initialize", "notifications/initialized"]
                 && http.calls == [ToolCatalog.getServerInfo, ToolCatalog.listProviders]
-            for (scenario, key) in [("v1", "v1_rejected"), ("missing_tls", "missing_tls_rejected"),
+            for (scenario, key) in [("v1", "v1_rejected"), ("future_contract", "future_contract_rejected"),
+                ("missing_tls", "missing_tls_rejected"),
                 ("false_auth", "false_client_auth_rejected"), ("wrong_instance", "wrong_instance_rejected")] {
                 let (blocked, wire) = client(scenario)
                 var failed = false
@@ -175,43 +232,48 @@ enum MCPClientSessionFixtureSource {
             invalid.serverURL = URL(string: "http://127.0.0.1:8765/mcp")!
             do { try await ordinary.configure(invalid); checks["invalid_config_rejected"] = false }
             catch { checks["invalid_config_rejected"] = true }
-            let (minutesMCP, minutesWire) = client("minutes_requests")
-            let typed = NarumiClient(mcp: minutesMCP)
-            let confirmed = MeetingConfig(
-                transcriptionEngine: "auto", diarizationEngine: "none", llmProvider: "none",
-                externalSendPolicy: "subscription_ok", language: "ja",
-                minutesModel: CodexMinutesSelection(
-                    connectionID: "conn-0123456789ab", connectionRevision: 4, modelID: "fixture-codex-model",
-                    reasoningEffort: "high", cacheEpoch: 3))
-            let confirmedNode = JSONNode.object(try NarumiClient.arguments(confirmed))
-            _ = try await typed.regenerate(
-                meetingID: "20260829T000000Z-a1b2c3d4", scope: "fixture-scope", force: false,
-                reason: "fixture reason", expectedConfig: confirmed)
-            let generationArguments = minutesWire.arguments(ToolCatalog.regenerate).last!
-            checks["codex_expected_config_sent"] = generationArguments["expected_config"] == confirmedNode
-                && generationArguments["scope"] == .string("fixture-scope") && generationArguments["force"] == nil
-            var forceRejected = false
-            do {
-                _ = try await typed.regenerate(
-                    meetingID: "20260829T000000Z-a1b2c3d4", scope: nil, force: true,
-                    reason: nil, expectedConfig: confirmed)
-            } catch { forceRejected = true }
-            checks["codex_force_rejected"] = forceRejected && minutesWire.count(ToolCatalog.regenerate) == 1
-            _ = try await typed.registerContext(
-                meetingID: "20260829T000000Z-a1b2c3d4", scope: nil, sourceType: "text",
-                payload: .content("fixture text"), label: nil, autoRegenerate: true, expectedConfig: confirmed)
-            let contextArguments = minutesWire.arguments(ToolCatalog.registerContext).last!
-            checks["context_expected_config_sent"] = contextArguments["expected_config"] == confirmedNode
-                && contextArguments["auto_regenerate"] == .bool(true)
-            _ = try await typed.registerContext(
-                meetingID: "20260829T000000Z-a1b2c3d4", scope: nil, sourceType: "text",
-                payload: .content("fixture text"), label: nil, autoRegenerate: false, expectedConfig: confirmed)
-            let nonGenerating = minutesWire.arguments(ToolCatalog.registerContext).last!
-            checks["non_generating_context_omits_config"] = nonGenerating["expected_config"] == nil
-                && nonGenerating["auto_regenerate"] == nil
+            let unknownFailure = ToolFailure(from: .tool(message: fixtureSecret, payload: .object([
+                "error": .object([
+                    "code": .string("engine_unavailable"), "message": .string(fixtureSecret),
+                    "details": .object([
+                        "reason": .string("provider_generation_outcome_unknown"), "outcome_unknown": .bool(true),
+                    ]),
+                ]),
+            ])))
+            checks["generation_unknown_localized_without_details"] =
+                unknownFailure.code == "engine_unavailable" && unknownFailure.message.contains("結果が不明")
+                && unknownFailure.message.contains("自動再送しません") && !unknownFailure.message.contains(fixtureSecret)
+            let selections: [(prefix: String, provider: String, scenario: String, effort: String?, maxTokens: Int?)] = [
+                ("v4_codex", "codex-app-server", "minutes_requests", "high", nil),
+                ("v4_openai", "openai-api", "minutes_requests", "high", 8192),
+                ("v4_anthropic", "anthropic-api", "minutes_requests", nil, 4096),
+                ("v4_ollama", "ollama", "minutes_requests", nil, 2048),
+                ("v3_codex", "codex-app-server", "codex_minutes_requests", "high", nil),
+            ]
+            for selection in selections {
+                let (minutesMCP, minutesWire) = client(selection.scenario)
+                let results = try await checkMinutesSelection(
+                    provider: selection.provider, effort: selection.effort, maxTokens: selection.maxTokens,
+                    client: NarumiClient(mcp: minutesMCP), wire: minutesWire)
+                for (name, passed) in results { checks[selection.prefix + "_" + name] = passed }
+            }
             let legacy = MeetingConfig(llmProvider: "none", externalSendPolicy: "local_only")
             let (legacyMCP, legacyWire) = client("legacy_minutes_requests")
             let legacyTyped = NarumiClient(mcp: legacyMCP)
+            let legacyUpdates = try NarumiClient.arguments(legacy)
+            let savedLegacy = try await legacyTyped.setMeetingConfig(
+                meetingID: "20260829T000000Z-a1b2c3d4", scope: nil, updates: legacyUpdates)
+            let reloadedLegacy = try await legacyTyped.meeting(id: "20260829T000000Z-a1b2c3d4", scope: nil)
+            checks["legacy_meeting_config_omits_new_field"] =
+                legacyWire.arguments(ToolCatalog.setMeetingConfig).last?["minutes_model"] == nil
+                && savedLegacy.config == legacy && reloadedLegacy.config == legacy
+            let legacyProfile = try await legacyTyped.setProfile(
+                name: "fixture-legacy", updates: ["config": .object(legacyUpdates)])
+            let reloadedLegacyProfile = try await legacyTyped.profile(name: "fixture-legacy")
+            checks["legacy_profile_omits_new_field"] =
+                legacyWire.arguments(ToolCatalog.setProfile).last?["config"]?["minutes_model"] == nil
+                && legacyProfile.config == legacy && reloadedLegacyProfile.config == legacy
+            checks["legacy_save_does_not_regenerate"] = legacyWire.count(ToolCatalog.regenerate) == 0
             _ = try await legacyTyped.regenerate(
                 meetingID: "20260829T000000Z-a1b2c3d4", scope: nil, force: true, reason: nil, expectedConfig: legacy)
             let legacyGeneration = legacyWire.arguments(ToolCatalog.regenerate).last!
@@ -222,6 +284,91 @@ enum MCPClientSessionFixtureSource {
                 && legacyGeneration["force"] == .bool(true)
                 && legacyWire.arguments(ToolCatalog.registerContext).last?["expected_config"] == nil
             print(String(decoding: try JSONEncoder().encode(checks), as: UTF8.self))
+        }
+
+        private static func checkMinutesSelection(
+            provider: String, effort: String?, maxTokens: Int?, client: NarumiClient, wire: FakeHTTP
+        ) async throws -> [String: Bool] {
+            var checks: [String: Bool] = [:]
+            let policy = provider == "ollama" ? "local_only" : (provider == "codex-app-server" ? "subscription_ok" : "api_ok")
+            let selection = MinutesModelSelection(
+                provider: provider, connectionID: "conn-0123456789ab", connectionRevision: 4,
+                modelID: "fixture-\(provider)-model", reasoningEffort: effort, maxTokens: maxTokens, cacheEpoch: 3)
+            let confirmed = MeetingConfig(
+                transcriptionEngine: "auto", diarizationEngine: "none", llmProvider: "none",
+                externalSendPolicy: policy, language: "ja", selfName: "Fixture Owner", vocabHints: ["fixture vocabulary"],
+                minutesModel: selection)
+            var parameters: [String: JSONNode] = [:]
+            if let effort { parameters["reasoning_effort"] = .string(effort) }
+            if let maxTokens { parameters["max_tokens"] = .number(Double(maxTokens)) }
+            let confirmedNode = JSONNode.object([
+                "transcription_engine": .string("auto"), "diarization_engine": .string("none"),
+                "llm_provider": .string("none"), "external_send_policy": .string(policy),
+                "language": .string("ja"), "self_name": .string("Fixture Owner"),
+                "vocab_hints": .array([.string("fixture vocabulary")]),
+                "minutes_model": .object([
+                    "provider": .string(provider), "connection_id": .string("conn-0123456789ab"),
+                    "connection_revision": .number(4), "model_id": .string("fixture-\(provider)-model"),
+                    "parameters": .object(parameters), "cache_epoch": .number(3),
+                ]),
+            ])
+            let saved = try await client.setMeetingConfig(
+                meetingID: "20260829T000000Z-a1b2c3d4", scope: "fixture-scope",
+                updates: NarumiClient.arguments(confirmed))
+            let reloaded = try await client.meeting(id: "20260829T000000Z-a1b2c3d4", scope: "fixture-scope")
+            var saveArguments = wire.arguments(ToolCatalog.setMeetingConfig).last!
+            let saveRequestID = saveArguments.removeValue(forKey: "request_id")?.stringValue
+            let savedMeetingID = saveArguments.removeValue(forKey: "meeting_id")
+            let savedScope = saveArguments.removeValue(forKey: "scope")
+            checks["meeting_config_round_trip"] = JSONNode.object(saveArguments) == confirmedNode
+                && saved.config == confirmed && reloaded.config == confirmed
+                && savedMeetingID == .string("20260829T000000Z-a1b2c3d4") && savedScope == .string("fixture-scope")
+                && UUID(uuidString: saveRequestID ?? "") != nil
+            let profileUpdates: [String: JSONNode] = [
+                "config": .object(try NarumiClient.arguments(confirmed)), "scope": .string("fixture-scope"),
+                "engagement": .string("fixture-engagement"), "export_destinations": .array([.string("markdown")]),
+                "make_default": .bool(false),
+            ]
+            let savedProfile = try await client.setProfile(name: "fixture-\(provider)", updates: profileUpdates)
+            let reloadedProfile = try await client.profile(name: "fixture-\(provider)")
+            var profileArguments = wire.arguments(ToolCatalog.setProfile).last!
+            let profileRequestID = profileArguments.removeValue(forKey: "request_id")?.stringValue
+            let profileName = profileArguments.removeValue(forKey: "name")
+            checks["profile_round_trip"] = profileArguments["config"] == confirmedNode
+                && profileArguments == profileUpdates && savedProfile.config == confirmed
+                && savedProfile == reloadedProfile && profileName == .string("fixture-\(provider)")
+                && UUID(uuidString: profileRequestID ?? "") != nil && profileRequestID != saveRequestID
+            checks["save_does_not_regenerate"] = wire.count(ToolCatalog.regenerate) == 0
+                && wire.count(ToolCatalog.registerContext) == 0
+            _ = try await client.regenerate(
+                meetingID: "20260829T000000Z-a1b2c3d4", scope: "fixture-scope", force: false,
+                reason: "fixture reason", expectedConfig: confirmed)
+            let generationArguments = wire.arguments(ToolCatalog.regenerate).last!
+            checks["expected_config_sent"] = generationArguments["expected_config"] == confirmedNode
+                && generationArguments["scope"] == .string("fixture-scope")
+                && generationArguments["reason"] == .string("fixture reason") && generationArguments["force"] == nil
+            var forceRejected = false
+            do {
+                _ = try await client.regenerate(
+                    meetingID: "20260829T000000Z-a1b2c3d4", scope: nil, force: true,
+                    reason: nil, expectedConfig: confirmed)
+            } catch let failure as ToolFailure {
+                forceRejected = failure.code == "invalid_argument"
+            }
+            checks["force_rejected"] = forceRejected && wire.count(ToolCatalog.regenerate) == 1
+            _ = try await client.registerContext(
+                meetingID: "20260829T000000Z-a1b2c3d4", scope: nil, sourceType: "text",
+                payload: .content("fixture text"), label: nil, autoRegenerate: true, expectedConfig: confirmed)
+            let contextArguments = wire.arguments(ToolCatalog.registerContext).last!
+            checks["context_expected_config_sent"] = contextArguments["expected_config"] == confirmedNode
+                && contextArguments["auto_regenerate"] == .bool(true)
+            _ = try await client.registerContext(
+                meetingID: "20260829T000000Z-a1b2c3d4", scope: nil, sourceType: "text",
+                payload: .content("fixture text"), label: nil, autoRegenerate: false, expectedConfig: confirmed)
+            let nonGenerating = wire.arguments(ToolCatalog.registerContext).last!
+            checks["non_generating_context_omits_config"] = nonGenerating["expected_config"] == nil
+                && nonGenerating["auto_regenerate"] == nil
+            return checks
         }
     }
     """#

@@ -283,6 +283,25 @@ final class ContractModelsTests: XCTestCase {
 
     // MARK: Server info / catalog
 
+    func testGenerationUnknownDetailsProduceSafeActionableMessage() throws {
+        for reason in ["provider_generation_outcome_unknown", "codex_generation_outcome_unknown"] {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "code": "engine_unavailable", "message": "fixture-untrusted-message",
+                "details": ["reason": reason, "outcome_unknown": true, "extra": "fixture-untrusted-detail"],
+            ])
+            let error = try JSONDecoder().decode(ToolErrorInfo.self, from: data)
+            XCTAssertTrue(error.message.contains("結果が不明"))
+            XCTAssertTrue(error.message.contains("自動再送しません"))
+            XCTAssertTrue(error.message.contains("重複"))
+            let encoded = String(decoding: try JSONEncoder().encode(error), as: UTF8.self)
+            XCTAssertFalse(encoded.contains("fixture-untrusted"))
+            XCTAssertFalse(encoded.contains("extra"))
+        }
+        let known = try JSONDecoder().decode(ToolErrorInfo.self, from: Data(
+            #"{"code":"invalid_argument","message":"fixture validation message","details":{"reason":"other"}}"#.utf8))
+        XCTAssertEqual(known.message, "fixture validation message")
+    }
+
     func testGetServerInfo() throws {
         let infos = try decodeAll(ServerInfo.self, tool: "get_server_info")
         XCTAssertEqual(infos.count, 2)
@@ -292,7 +311,8 @@ final class ContractModelsTests: XCTestCase {
         XCTAssertFalse(http.capabilities.permissionSetupInProgress)
         XCTAssertEqual(http.capabilities.workflow?.providerConnections, true)
         XCTAssertEqual(http.capabilities.workflow?.providerModels, true)
-        XCTAssertEqual(http.capabilities.workflow?.stageModelSelection, false)
+        XCTAssertEqual(http.capabilities.workflow?.stageModelSelection, true)
+        XCTAssertEqual(Set(http.capabilities.minutesModelProviders ?? []), Set(MinutesModelSelection.providers))
         XCTAssertEqual(http.capabilities.workflow?.ensembleGeneration, false)
         XCTAssertEqual(http.secureTransport?.mode, "pinned_tls")
         XCTAssertEqual(http.secureTransport?.tlsRequired, true)

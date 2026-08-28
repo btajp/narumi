@@ -2,13 +2,14 @@ import Foundation
 
 public enum ProviderID: String, Codable, CaseIterable, Sendable {
     case anthropicAPI = "anthropic-api"
+    case openaiAPI = "openai-api"
     case claudeAgentSDK = "claude-agent-sdk"
     case ollama
     case codexAppServer = "codex-app-server"
 
     public var supportedAuthMethod: ProviderAuthMethod {
         switch self {
-        case .anthropicAPI, .claudeAgentSDK: return .apiKey
+        case .anthropicAPI, .openaiAPI, .claudeAgentSDK: return .apiKey
         case .ollama: return .none
         case .codexAppServer: return .chatgpt
         }
