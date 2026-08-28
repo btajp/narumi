@@ -2,7 +2,8 @@
 # scripts/check-version.sh — VERSION ファイルを正本に、版の整合を検査する。
 #
 # 検査対象（すべて一致すること）:
-#   VERSION / pyproject.toml / Python の __version__ / recorder / CHANGELOG.md の最新見出し
+#   VERSION / pipeline・server の pyproject.toml と Python __version__ /
+#   recorder の版 / CHANGELOG.md の最新見出し
 #
 # Usage: scripts/check-version.sh
 set -euo pipefail
