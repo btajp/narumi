@@ -8,13 +8,13 @@ narumi は、macOS 上でローカルに会議を録画し、終了後に議事�
 
 配布版は Apple Silicon（arm64）・macOS 15 以降に対応します。
 
-1. [GitHub Releases](https://github.com/btajp/narumi/releases/latest) の ZIP を展開し、`narumi.app` を「アプリケーション」へ移します。
+1. 既存の narumi がある場合は、先に [停止・退避の手順](#初回導入と失敗時の復旧) を済ませます。既存版がなければこの準備は不要です。その後、[GitHub Releases](https://github.com/btajp/narumi/releases/latest) の `narumi-<version>.dmg` を開き、`narumi.app` を隣の「Applications」へドラッグします。
 2. `narumi.app` を開きます。初回は同梱ランタイムの準備が終わるまで待ちます。Python や uv、ソースコードの別途導入は不要ですが、初回の依存・モデル取得にはネットワークが必要です。
 3. 上部の「診断」を開き、「録画の権限」でマイク・画面収録の「許可を求める」を押します。拒否済みの場合は「macOS の設定を開く」から許可します。設定から戻ると再確認され、「状態を再確認」でも更新できます。許可設定だけでは録画は始まりません。
 4. 両方が許可済みになったら「録画開始」を押し、会議名を入力します。プロファイルと scope は空欄なら既定設定を使います。macOS がアプリの再起動を求めた場合は、その案内に従ってから再試行します。
 5. 録画中は同じ画面に経過時間と「録画停止」が表示されます。終了後は会議一覧から結果を開けます。
 
-ffmpeg / ffprobe は別途必要です。アプリの「診断」で検出状態を確認できます。更新は GitHub Releases を自動確認し、利用者の操作で適用します。録画中やアプリが把握している処理の実行中は更新を延期します。別の CLI / MCP クライアントから処理している間は更新しないでください。会議データはアプリ本体とは別の Application Support 配下に保存するため、通常の更新で削除されません。
+ffmpeg / ffprobe は別途必要です。アプリの「診断」で検出状態を確認できます。初回導入後の更新は GitHub Releases を自動確認し、利用者の操作で適用します。手動確認はメニューバーの「narumi」→「アップデートを確認…」です。毎回 DMG を入れ直す必要はありません。録画中やアプリが把握している処理の実行中は更新を延期します。別の CLI / MCP クライアントから処理している間は更新しないでください。会議データはアプリ本体とは別の Application Support 配下に保存するため、通常の更新で削除されません。
 
 ## 開発環境の要件
 
@@ -223,7 +223,7 @@ args = ["--directory", "/path/to/narumi", "run", "narumi-server", "--stdio"]
 
 ## 配布（ランタイム同梱 .app と自動更新）
 
-設計の正本は [docs/superpowers/specs/2026-08-27-narumi-app-distribution-design.md](docs/superpowers/specs/2026-08-27-narumi-app-distribution-design.md)。対象は Apple Silicon（arm64）・macOS 15 以降、配布経路は GitHub Releases のみ。
+設計は [配布・自動更新](docs/superpowers/specs/2026-08-27-narumi-app-distribution-design.md) と [初回 DMG・公開後確認](docs/superpowers/specs/2026-08-28-dmg-installer-release-design.md)。対象は Apple Silicon（arm64）・macOS 15 以降、配布経路は GitHub Releases のみ。
 
 ### ランタイム同梱 .app のビルド
 
@@ -237,17 +237,25 @@ scripts/build-app.sh --runtime    # dist/narumi.app（ランタイム同梱、ad
 
 ### リリース（`scripts/release-app.sh <version>`）
 
-Developer ID 署名 → Apple 公証 → Sparkle フィード生成 → GitHub Release（draft）までを行い、公開前に停止します。
+Developer ID 署名 → Apple 公証 → DMG・Sparkle フィード生成 → GitHub Release（draft）までを行います。
+署名・公証・配布物照合を通した draft を公開し、その後にインストール・更新・実機確認を行います。
 
 1. clean な `main` と `origin/main` の一致、版、lock、既存リリース、署名鍵を検査します。Sparkle ツールは SwiftPM が取得したものを自動検出します。別の既存配置を使う場合だけ `SPARKLE_BIN` を指定します。
 2. 署名には `APPLE_SIGNING_IDENTITY` / `APPLE_API_KEY` / `APPLE_API_ISSUER` / `APPLE_API_KEY_PATH` を使います。ローカル設定 `~/.config/narumi/release.env` があれば読み込みます。設定ファイルの場所を変える場合は `NARUMI_RELEASE_ENV` を指定します。秘密情報をリポジトリやログに記録しないでください。
 3. 専用の `dist/release/v<version>/build/narumi.app` へビルドし、同梱 uv を含めて署名します。使用中の `dist/narumi.app` は置き換えません。wheel とアプリの収録ファイルも検査します。
-4. 公証・staple 後に最終 ZIP を作り、再展開して署名と公証チケットを検証します。その ZIP から EdDSA 署名と appcast を作り、版・build・公開 URL・長さ・SHA256 を照合します。
-5. 出荷元に変更がないことを再検査し、固定したコミット SHA を指定して draft を作成します。アップロードするのは ZIP と appcast のみです。draft を再取得してハッシュまで照合します。
-6. 録画・処理がないことを確認し、旧アプリを正常終了します。管理していたプロセスと待受ポートの停止を確認してから、同じ ZIP を `/Applications` にインストールし、起動・同梱サーバー・診断を検証します。`scripts/release-app.sh <version> --verify-draft` が成功してから公開します。
-7. 公開後に `scripts/release-app.sh <version> --verify-published` で公開タグ・latest・匿名ダウンロードの内容を照合し、アプリの更新確認も行います。失敗時は公開を取り下げて調査し、公開済み asset を上書きして修正しません。
+4. 公証・staple 後に最終 ZIP を作り、再展開して署名と公証チケットを検証します。その ZIP の app から初回導入用 DMG を作り、DMG 自体も署名・公証・staple します。read-only でマウントし、内容とファイル権限が ZIP と一致することを確認します。
+5. ZIP だけから EdDSA 署名と appcast を作り、版・build・公開 URL・長さ・SHA256 を照合します。`feed/` は ZIP と appcast の 2 件、DMG は `installer/` に分けて封印します。
+6. 出荷元に変更がないことを再検査し、固定したコミット SHA を指定して draft を作成します。0.1.4 以降は ZIP・appcast・DMG の 3 件を添付し、実 assets を再取得して照合します。0.1.3 以前の検証は 2 件のままです。
+7. `scripts/release-app.sh <version> --verify-draft` が成功したら、同じ release ID・`tag_name`・`target_commitish` を保持して公開します。この段階では UI や OS 許可の確認を待ちません。
+8. `scripts/release-app.sh <version> --verify-published` で公開タグ・latest・匿名取得した feed / ZIP / DMG を照合します。初回は公開 DMG からインストールし、以後はアプリの Sparkle 更新後に起動・同梱サーバー・診断を確認します。配布物が不一致なら公開を取り下げて調査し、公開済み asset を上書きせず次の版で修正します。
 
 別の出力先を使う場合は、最初から最後まで同じ `RELEASE_DIR` を指定します。初回出荷での「最新です」という表示は、旧版から新版への更新適用を検証したことにはなりません。
+
+### 初回導入と失敗時の復旧
+
+初回の置換前に録画・ジョブ・許可操作がないことを確認し、既存 app と所有 server を正常終了します。対象プロセス・process group・待受 port の停止を確認できない場合は置換しません。既存 app は `~/Library/Application Support/narumi/app-backups/<版>-<日時>/` に退避し、app の版・build・同梱 server の版・署名主体と退避先を記録します。復元候補は Developer ID 署名・公証を検証できた正式版に限ります。会議データや設定は初期化しません。
+
+更新前後の app の版・build、server の版、起動結果を記録します。失敗時は「ログを開く」の `~/Library/Logs/narumi/server.log` と、環境準備の `runtime.log` を確認します。旧版が正常なら継続利用し、Sparkle から再試行します。server が起動せず更新も操作できない場合は、利用者の承認と対象プロセスの停止確認後に、検証済みの退避旧版へ復元します。安全な復元元がなければ停止して状況を報告します。手動復元を自動更新の成功とは記録しません。
 
 ### Sparkle 鍵の管理（重要）
 

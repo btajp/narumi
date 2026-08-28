@@ -36,9 +36,9 @@ def shipping(tmp_path):
     binary = tmp_path / "bin"
     binary.mkdir()
     (binary / "python3").symlink_to(sys.executable)
-    for name in ("git", "gh", "uv", "codesign", "spctl", "xcrun", "ditto"):
+    for name in ("git", "gh", "uv", "codesign", "spctl", "xcrun", "ditto", "hdiutil"):
         (binary / name).symlink_to(tool)
-    for name in ("build-app.sh", "check-version.sh", "bundle_inventory.py"):
+    for name in ("build-app.sh", "check-version.sh", "bundle_inventory.py", "release_dmg.py"):
         (scripts / name).symlink_to(tool)
     sparkle = root / "app/.build/artifacts/sparkle/Sparkle/bin"
     sparkle.mkdir(parents=True)
@@ -62,6 +62,15 @@ def shipping(tmp_path):
         "APPLE_API_KEY_PATH": str(key_file),
     }
     return root, env, env_file
+
+
+@pytest.fixture
+def modern_shipping(shipping):
+    root, env, _ = shipping
+    env["FAKE_RELEASE_VERSION"] = "0.1.4"
+    (root / "VERSION").write_text("0.1.4\n")
+    (root / "CHANGELOG.md").write_text("# Changelog\n\n## 0.1.4\n\nTest DMG release.\n")
+    return shipping
 
 
 def invoke(shipping, *args, script="release-app.sh"):
@@ -108,6 +117,111 @@ def test_release_isolated_signed_notarized_draft_and_reverified(shipping):
     assert "fixture-secret" not in result.stdout + result.stderr
     assert invoke(shipping, "0.1.1", "--verify-draft").returncode == 0
     assert len(uploads(shipping)) == 1
+
+
+def test_dmg_release_seals_final_stapled_bytes_and_uploads_exactly_three(modern_shipping):
+    root, _, _ = modern_shipping
+    old = root / "dist/release/v0.1.3/immutable-marker"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b"previous release stays unchanged")
+    result = invoke(modern_shipping, "0.1.4")
+    assert result.returncode == 0, result.stderr + result.stdout
+    directory = root / "dist/release/v0.1.4"
+    sealed = json.loads((directory / "release.json").read_text())
+    created = json.loads((directory / "installer-create.json").read_text())
+    assert sealed["schema_version"] == 2
+    assert set(sealed["assets"]) == {"narumi-0.1.4.zip", "appcast.xml", "narumi-0.1.4.dmg"}
+    assert {p.name for p in (directory / "feed").iterdir()} == {"narumi-0.1.4.zip", "appcast.xml"}
+    assert {p.name for p in (directory / "installer").iterdir()} == {"narumi-0.1.4.dmg"}
+    assert (directory / "installer/narumi-0.1.4.dmg").read_bytes().endswith(b":signed:stapled")
+    assert sealed["assets"]["narumi-0.1.4.dmg"]["sha256"] != created["sha256"]
+    assert sealed["installer"]["notarization"] == {
+        "id": "22222222-2222-2222-2222-222222222222",
+        "status": "Accepted",
+    }
+    assert old.read_bytes() == b"previous release stays unchanged"
+    assert len(uploads(modern_shipping)) == 1
+    assert [Path(p).name for p in uploads(modern_shipping)[0][-3:]] == [
+        "narumi-0.1.4.zip",
+        "appcast.xml",
+        "narumi-0.1.4.dmg",
+    ]
+    assert "実機検証後" not in result.stdout
+    assert not any(name == "gh" and "edit" in args for name, args in calls(modern_shipping))
+    assert invoke(modern_shipping, "0.1.4", "--verify-draft").returncode == 0
+
+
+def test_last_legacy_release_does_not_create_or_accept_a_dmg(shipping):
+    root, env, _ = shipping
+    env["FAKE_RELEASE_VERSION"] = "0.1.3"
+    (root / "VERSION").write_text("0.1.3\n")
+    (root / "CHANGELOG.md").write_text("# Changelog\n\n## 0.1.3\n\nLegacy release.\n")
+    result = invoke(shipping, "0.1.3")
+    assert result.returncode == 0, result.stderr + result.stdout
+    sealed = json.loads((root / "dist/release/v0.1.3/release.json").read_text())
+    assert sealed["schema_version"] == 1 and "installer" not in sealed
+    assert set(sealed["assets"]) == {"narumi-0.1.3.zip", "appcast.xml"}
+    assert not any(name == "release_dmg.py" for name, _ in calls(shipping))
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "dmg_create_failure",
+        "dmg_signing_failure",
+        "dmg_notary_failure",
+        "dmg_notary_rejected",
+        "dmg_staple_failure",
+        "dmg_verification_failure",
+        "dmg_helper_wrong_hash",
+    ],
+)
+def test_dmg_failures_never_upload_or_disclose_diagnostics(modern_shipping, mode):
+    modern_shipping[1]["FAKE_RELEASE_MODE"] = mode
+    result = invoke(modern_shipping, "0.1.4")
+    assert result.returncode != 0
+    assert not uploads(modern_shipping)
+    assert "fixture-secret" not in result.stdout + result.stderr
+    directory = modern_shipping[0] / "dist/release/v0.1.4"
+    if mode == "dmg_notary_failure":
+        assert b"fixture-secret" in (directory / "installer-notary-error.log").read_bytes()
+    if mode == "dmg_verification_failure":
+        diagnostics = list(directory.glob("dmg-verification-*.log"))
+        assert len(diagnostics) == 1
+        assert b"retained-mount diagnostic" in diagnostics[0].read_bytes()
+        assert diagnostics[0].stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("change", ["schema", "dmg", "notarization"])
+def test_sealed_dmg_changes_fail_before_mount(modern_shipping, change):
+    assert invoke(modern_shipping, "0.1.4").returncode == 0
+    directory = modern_shipping[0] / "dist/release/v0.1.4"
+    if change == "schema":
+        path = directory / "release.json"
+        sealed = json.loads(path.read_text())
+        sealed["schema_version"] = 1
+        path.write_text(json.dumps(sealed))
+    elif change == "dmg":
+        path = directory / "installer/narumi-0.1.4.dmg"
+        path.write_bytes(path.read_bytes() + b"changed")
+    else:
+        path = directory / "installer-notary-result.json"
+        record = json.loads(path.read_text())
+        record["id"] = "33333333-3333-3333-3333-333333333333"
+        path.write_text(json.dumps(record))
+    previous = [row for row in calls(modern_shipping) if row[0] == "release_dmg.py"]
+    result = invoke(modern_shipping, "0.1.4", "--verify-draft")
+    assert result.returncode != 0
+    assert [row for row in calls(modern_shipping) if row[0] == "release_dmg.py"] == previous
+    assert len(uploads(modern_shipping)) == 1
+
+
+def test_remote_dmg_tampering_fails_without_replacing_uploaded_assets(modern_shipping):
+    modern_shipping[1]["FAKE_RELEASE_MODE"] = "remote_dmg_mutation"
+    result = invoke(modern_shipping, "0.1.4")
+    assert result.returncode != 0 and "SHA256" in result.stderr
+    assert len(uploads(modern_shipping)) == 1
+    assert not any(name == "gh" and "delete" in args for name, args in calls(modern_shipping))
 
 
 def test_explicit_release_environment_and_sparkle_account(shipping):

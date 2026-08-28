@@ -18,30 +18,39 @@ from release_artifacts import (
     REPOSITORY,
     ReleaseError,
     asset_names,
+    asset_path,
     build_number,
     feed_version,
+    installer_name,
     load_json,
     parse_feed,
     public_key,
+    release_asset_names,
+    release_schema,
     require,
     sha256,
     validate_appcast,
     validate_artifacts,
+    validate_installer,
     validate_plist,
+    validate_release_schema,
+    validate_sealed_assets,
     version_tuple,
     write_new_json,
 )
 from release_public import download_public
 
 
-def run(*command: str, output: Path | None = None) -> bytes:
+def run(*command: str, output: Path | None = None, timeout: float | None = 300) -> bytes:
     """Keep tool errors/arguments out of logs; never disclose credential-bearing output."""
     try:
         if output is None:
-            result = subprocess.run(command, check=True, capture_output=True, timeout=300)
+            result = subprocess.run(command, check=True, capture_output=True, timeout=timeout)
             return result.stdout
         with output.open("xb") as stream:
-            subprocess.run(command, check=True, stdout=stream, stderr=subprocess.PIPE, timeout=300)
+            subprocess.run(
+                command, check=True, stdout=stream, stderr=subprocess.PIPE, timeout=timeout
+            )
         return b""
     except (subprocess.SubprocessError, OSError) as exc:
         raise ReleaseError(f"{Path(command[0]).name} の検証コマンドに失敗しました") from exc
@@ -84,7 +93,7 @@ def source_snapshot(root: Path, version: str, *, fetch: bool = True) -> tuple[di
     )
     require(tracked.endswith(b"\0"), "公開ソースの追跡一覧が空または不正です")
     snapshot = {
-        "schema_version": 1,
+        "schema_version": release_schema(version),
         "repository": REPOSITORY,
         "version": version,
         "build": build,
@@ -223,6 +232,7 @@ def inventory(root: Path, directory: Path, target: Path, kind: str) -> object:
 
 def context(root: Path, directory: Path, version: str, *, fetch: bool = True) -> dict:
     saved = load_json(directory / "source.json")
+    validate_release_schema(version, saved.get("schema_version"))
     current, tracked = source_snapshot(root, version, fetch=fetch)
     require(saved == current, "ビルド元 commit / 版 / build / 公開鍵が出荷準備時から変わっています")
     require(
@@ -256,14 +266,119 @@ def verify_signature(directory: Path, snapshot: dict, sparkle_bin: Path, account
     )
 
 
+def distribution_details(directory: Path, version: str, build: int, key: str) -> dict:
+    details = validate_artifacts(directory / "feed", version, build, key)
+    if release_schema(version) == 2:
+        details["assets"][installer_name(version)] = validate_installer(
+            directory / "installer", version
+        )
+    return details
+
+
+def validate_notarization(record: object) -> None:
+    require(
+        isinstance(record, dict) and set(record) == {"id", "status"},
+        "DMG の公証記録が不正です",
+    )
+    require(record["status"] == "Accepted", "DMG の公証が未承認です")
+    identifier = record["id"]
+    require(
+        isinstance(identifier, str)
+        and re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", identifier),
+        "DMG の公証 ID が不正です",
+    )
+
+
+def installer_notarization(directory: Path) -> dict:
+    result = load_json(directory / "installer-notary-result.json")
+    record = {name: result.get(name) for name in ("id", "status")}
+    validate_notarization(record)
+    return record
+
+
+def validate_sealed_release(sealed: dict, version: str) -> None:
+    require(sealed.get("version") == version, "封印した release の版が不一致です")
+    validate_sealed_assets(version, sealed.get("schema_version"), sealed.get("assets"))
+    if release_schema(version) == 1:
+        require("installer" not in sealed, "旧 schema に installer の封印は追加できません")
+        return
+    record = sealed.get("installer")
+    require(
+        isinstance(record, dict) and set(record) == {"notarization", "app_inventory_sha256"},
+        "DMG の内容照合記録が不正です",
+    )
+    fingerprint = record["app_inventory_sha256"]
+    require(
+        isinstance(fingerprint, str) and re.fullmatch(r"[0-9a-f]{64}", fingerprint),
+        "DMG の app inventory SHA256 が不正です",
+    )
+    validate_notarization(record["notarization"])
+
+
+def verify_installer(
+    root: Path, directory: Path, artifacts: Path, version: str, expected: dict
+) -> dict:
+    try:
+        output = run(
+            sys.executable,
+            str(root / "scripts/release_dmg.py"),
+            "verify",
+            "--zip",
+            str(asset_path(artifacts, version, asset_names(version)[0])),
+            "--dmg",
+            str(asset_path(artifacts, version, installer_name(version))),
+            "--work-dir",
+            str(directory),
+            "--tracked-sources",
+            str(directory / "tracked-sources.nul"),
+            "--expected-sha256",
+            expected["sha256"],
+            "--expected-size",
+            str(expected["size"]),
+            # Each OS operation in the helper is bounded. An outer process deadline
+            # could kill it before its finally block detaches an owned mount.
+            timeout=None,
+        )
+    except ReleaseError as exc:
+        # In particular, preserve the location of an owned mount if detach failed.
+        # Store diagnostics outside downloaded TemporaryDirectory cleanup and never
+        # print helper output (or inherited credentials) to normal release logs.
+        diagnostic = getattr(exc.__cause__, "stderr", None)
+        if not isinstance(diagnostic, bytes):
+            diagnostic = b"DMG verification failed without diagnostic output.\n"
+        with tempfile.NamedTemporaryFile(
+            prefix="dmg-verification-", suffix=".log", dir=directory, delete=False
+        ) as stream:
+            stream.write(diagnostic)
+            name = Path(stream.name).name
+        raise ReleaseError(
+            f"DMG 検証に失敗しました。診断は RELEASE_DIR/{name} に保存しました"
+        ) from exc
+    result = json.loads(output)
+    require(
+        isinstance(result, dict) and set(result) == {"sha256", "size", "app_inventory_sha256"},
+        "DMG helper の検証結果が不正です",
+    )
+    require(
+        result["sha256"] == expected["sha256"]
+        and type(result["size"]) is int
+        and result["size"] == expected["size"],
+        "DMG helper と封印した SHA256 / 長さが不一致です",
+    )
+    require(
+        isinstance(result["app_inventory_sha256"], str)
+        and re.fullmatch(r"[0-9a-f]{64}", result["app_inventory_sha256"]),
+        "DMG helper の app inventory SHA256 が不正です",
+    )
+    return result
+
+
 def seal(root: Path, directory: Path, version: str, sparkle_bin: Path, account: str) -> dict:
     snapshot = check_app(root, directory, version)
     require(
         load_json(directory / "notary-result.json").get("status") == "Accepted", "公証が未承認です"
     )
-    details = validate_artifacts(
-        directory / "feed", version, snapshot["build"], snapshot["public_key"]
-    )
+    details = distribution_details(directory, version, snapshot["build"], snapshot["public_key"])
     expected_signature = (directory / "archive-signature.txt").read_text().strip()
     require(
         details["signature"] == expected_signature, "署名後に ZIP または appcast が変わっています"
@@ -272,6 +387,16 @@ def seal(root: Path, directory: Path, version: str, sparkle_bin: Path, account: 
     verify_signature(directory / "feed", snapshot, sparkle_bin, account)
     app_inventory = inventory(root, directory, directory / "build/narumi.app", "app")
     zip_inventory = inventory(root, directory, directory / "feed" / asset_names(version)[0], "zip")
+    if release_schema(version) == 2:
+        notarization = installer_notarization(directory)
+        result = verify_installer(
+            root, directory, directory, version, snapshot["assets"][installer_name(version)]
+        )
+        snapshot["installer"] = {
+            "notarization": notarization,
+            "app_inventory_sha256": result["app_inventory_sha256"],
+        }
+    validate_sealed_release(snapshot, version)
     write_new_json(directory / "app-inventory.json", app_inventory)
     write_new_json(directory / "zip-inventory.json", zip_inventory)
     write_new_json(directory / "release.json", snapshot)
@@ -283,19 +408,92 @@ def verify_local(
 ) -> dict:
     original = context(root, directory, version)
     sealed = load_json(directory / "release.json")
+    validate_sealed_release(sealed, version)
     require(
         all(sealed.get(k) == v for k, v in original.items()), "封印したリリース情報が変わっています"
     )
-    details = validate_artifacts(
-        directory / "feed", version, original["build"], original["public_key"]
-    )
+    details = distribution_details(directory, version, original["build"], original["public_key"])
     require(
         all(sealed.get(k) == v for k, v in details.items()),
-        "ZIP / appcast の SHA256 が変わっています",
+        "ZIP / appcast / DMG の SHA256 が変わっています",
     )
     inventory(root, directory, directory / "feed" / asset_names(version)[0], "zip")
     verify_signature(directory / "feed", sealed, sparkle_bin, account)
+    if release_schema(version) == 2:
+        require(
+            installer_notarization(directory) == sealed["installer"]["notarization"],
+            "封印した DMG の公証記録が変わっています",
+        )
+        result = verify_installer(
+            root, directory, directory, version, sealed["assets"][installer_name(version)]
+        )
+        require(
+            result["app_inventory_sha256"] == sealed["installer"]["app_inventory_sha256"],
+            "封印した DMG の app inventory が変わっています",
+        )
     return sealed
+
+
+def prepare_downloads(directory: Path, version: str) -> None:
+    (directory / "feed").mkdir()
+    if release_schema(version) == 2:
+        (directory / "installer").mkdir()
+
+
+def verify_downloaded(
+    root: Path,
+    directory: Path,
+    downloaded: Path,
+    sealed: dict,
+    sparkle_bin: Path,
+    account: str,
+) -> None:
+    version = sealed["version"]
+    details = distribution_details(downloaded, version, sealed["build"], sealed["public_key"])
+    require(
+        all(sealed.get(k) == v for k, v in details.items()),
+        "再取得した成果物が出荷準備時と不一致です",
+    )
+    inventory(root, directory, asset_path(downloaded, version, asset_names(version)[0]), "zip")
+    verify_signature(downloaded / "feed", sealed, sparkle_bin, account)
+    if release_schema(version) == 2:
+        result = verify_installer(
+            root, directory, downloaded, version, sealed["assets"][installer_name(version)]
+        )
+        require(
+            result["app_inventory_sha256"] == sealed["installer"]["app_inventory_sha256"],
+            "再取得した DMG の app inventory が出荷準備時と不一致です",
+        )
+
+
+def download_asset(asset: dict, target: Path, expected: dict, download_base: str) -> None:
+    require(asset.get("state") == "uploaded", "GitHub asset がアップロード未完了です")
+    require(
+        type(asset.get("size")) is int and asset["size"] == expected["size"],
+        "GitHub asset の長さが不一致です",
+    )
+    require(
+        asset.get("browser_download_url") == f"{download_base}/{target.name}",
+        "GitHub asset URL が不一致です",
+    )
+    require(
+        asset.get("digest") in (None, "sha256:" + expected["sha256"]),
+        "GitHub asset digest が不一致です",
+    )
+    identifier = asset.get("id")
+    require(type(identifier) is int and identifier > 0, "GitHub asset ID が不正です")
+    run(
+        "gh",
+        "api",
+        f"repos/{REPOSITORY}/releases/assets/{identifier}",
+        "-H",
+        "Accept: application/octet-stream",
+        output=target,
+    )
+    require(
+        target.stat().st_size == expected["size"] and sha256(target) == expected["sha256"],
+        "再ダウンロードした asset の SHA256 / 長さが不一致です",
+    )
 
 
 def verify_remote(
@@ -308,6 +506,7 @@ def verify_remote(
     published: bool = False,
 ) -> dict:
     sealed = verify_local(root, directory, version, sparkle_bin, account)
+    validate_sealed_release(sealed, version)
     check_history(version, sealed["build"], allow_current=True)
     release = release_for_verification(version, published=published)
     require(release.get("tag_name") == f"v{version}", "Release tag が不一致です")
@@ -330,47 +529,26 @@ def verify_remote(
             api("releases/latest").get("tag_name") == f"v{version}", "latest の更新先が不一致です"
         )
     assets = release.get("assets", [])
+    names = release_asset_names(version)
     require(
-        len(assets) == 2 and {a.get("name") for a in assets} == set(sealed["assets"]),
-        "GitHub の公開対象が ZIP と appcast の 2 ファイルと一致しません",
+        isinstance(assets, list)
+        and len(assets) == len(names)
+        and all(isinstance(asset, dict) for asset in assets)
+        and {a.get("name") for a in assets} == set(names),
+        "GitHub の公開対象が版に対応する release assets と一致しません",
     )
     with tempfile.TemporaryDirectory(prefix="narumi-release-verify-") as temporary:
         downloaded = Path(temporary)
+        prepare_downloads(downloaded, version)
         for asset in assets:
             name = asset["name"]
-            expected = sealed["assets"][name]
-            require(asset.get("state") == "uploaded", "GitHub asset がアップロード未完了です")
-            require(asset.get("size") == expected["size"], "GitHub asset の長さが不一致です")
-            expected_url = f"{download_base}/{name}"
-            require(
-                asset.get("browser_download_url") == expected_url, "GitHub asset URL が不一致です"
+            download_asset(
+                asset,
+                asset_path(downloaded, version, name),
+                sealed["assets"][name],
+                download_base,
             )
-            digest = asset.get("digest")
-            require(
-                digest in (None, "sha256:" + expected["sha256"]), "GitHub asset digest が不一致です"
-            )
-            identifier = asset.get("id")
-            require(type(identifier) is int and identifier > 0, "GitHub asset ID が不正です")
-            target = downloaded / name
-            run(
-                "gh",
-                "api",
-                f"repos/{REPOSITORY}/releases/assets/{identifier}",
-                "-H",
-                "Accept: application/octet-stream",
-                output=target,
-            )
-            require(
-                target.stat().st_size == expected["size"] and sha256(target) == expected["sha256"],
-                "再ダウンロードした asset の SHA256 / 長さが不一致です",
-            )
-        details = validate_artifacts(downloaded, version, sealed["build"], sealed["public_key"])
-        require(
-            all(sealed.get(k) == v for k, v in details.items()),
-            "GitHub 成果物が出荷準備時と不一致です",
-        )
-        inventory(root, directory, downloaded / asset_names(version)[0], "zip")
-        verify_signature(downloaded, sealed, sparkle_bin, account)
+        verify_downloaded(root, directory, downloaded, sealed, sparkle_bin, account)
     if published:
         verify_public(root, directory, sealed, sparkle_bin, account)
     return {
@@ -387,10 +565,12 @@ def verify_public(
 ) -> None:
     """Check the same unauthenticated feed and enclosure that an installed Sparkle app uses."""
     version = sealed["version"]
+    validate_sealed_release(sealed, version)
     archive_name, feed_name = asset_names(version)
     with tempfile.TemporaryDirectory(prefix="narumi-public-release-verify-") as temporary:
         downloaded = Path(temporary)
-        public_feed = downloaded / feed_name
+        prepare_downloads(downloaded, version)
+        public_feed = asset_path(downloaded, version, feed_name)
         download_public(FEED_URL, public_feed, sealed["assets"][feed_name])
         # Validate the public feed before following any URL from its contents. The sealed
         # local ZIP supplies the already verified length until the public ZIP is downloaded.
@@ -403,15 +583,18 @@ def verify_public(
         )
         _, enclosure = parse_feed(public_feed.read_bytes())
         download_public(
-            enclosure.get("url"), downloaded / archive_name, sealed["assets"][archive_name]
+            enclosure.get("url"),
+            asset_path(downloaded, version, archive_name),
+            sealed["assets"][archive_name],
         )
-        details = validate_artifacts(downloaded, version, sealed["build"], sealed["public_key"])
-        require(
-            all(sealed.get(k) == v for k, v in details.items()),
-            "匿名取得した公開成果物が出荷準備時と不一致です",
-        )
-        inventory(root, directory, downloaded / archive_name, "zip")
-        verify_signature(downloaded, sealed, sparkle_bin, account)
+        if release_schema(version) == 2:
+            name = installer_name(version)
+            download_public(
+                f"{DOWNLOAD_BASE}/v{version}/{name}",
+                asset_path(downloaded, version, name),
+                sealed["assets"][name],
+            )
+        verify_downloaded(root, directory, downloaded, sealed, sparkle_bin, account)
 
 
 def main() -> None:
@@ -422,6 +605,7 @@ def main() -> None:
             "preflight",
             "check-app",
             "check-notary",
+            "check-installer-notary",
             "seal",
             "verify-local",
             "verify-ready",
@@ -450,6 +634,10 @@ def main() -> None:
                 "公証が未承認です",
             )
             print("release-verify: notarization accepted")
+            return
+        if args.command == "check-installer-notary":
+            installer_notarization(args.release_dir)
+            print("release-verify: installer notarization accepted")
             return
         require(args.sparkle_bin is not None, "--sparkle-bin が必要です")
         common = args.root, args.release_dir, args.version, args.sparkle_bin, args.account
