@@ -604,6 +604,7 @@ public struct ServerCapabilities: Codable, Equatable, Sendable {
     public var llmProviders: [String]
     public var exportDestinations: [String]
     public var permissionSetupInProgress: Bool
+    public var workflow: ProviderWorkflowCapabilities?
 
     enum CodingKeys: String, CodingKey {
         case recording
@@ -614,12 +615,14 @@ public struct ServerCapabilities: Codable, Equatable, Sendable {
         case llmProviders = "llm_providers"
         case exportDestinations = "export_destinations"
         case permissionSetupInProgress = "permission_setup_in_progress"
+        case workflow
     }
 
     public init(
         recording: Bool, permissions: RecorderPermissions? = nil, transports: [String],
         transcriptionEngines: [String], diarizationEngines: [String], llmProviders: [String],
-        exportDestinations: [String], permissionSetupInProgress: Bool = false
+        exportDestinations: [String], permissionSetupInProgress: Bool = false,
+        workflow: ProviderWorkflowCapabilities? = nil
     ) {
         self.recording = recording
         self.permissions = permissions
@@ -629,6 +632,7 @@ public struct ServerCapabilities: Codable, Equatable, Sendable {
         self.llmProviders = llmProviders
         self.exportDestinations = exportDestinations
         self.permissionSetupInProgress = permissionSetupInProgress
+        self.workflow = workflow
     }
 
     public init(from decoder: Decoder) throws {
@@ -640,6 +644,7 @@ public struct ServerCapabilities: Codable, Equatable, Sendable {
         diarizationEngines = try container.decode([String].self, forKey: .diarizationEngines)
         llmProviders = try container.decode([String].self, forKey: .llmProviders)
         exportDestinations = try container.decode([String].self, forKey: .exportDestinations)
+        workflow = try container.decodeIfPresent(ProviderWorkflowCapabilities.self, forKey: .workflow)
         if container.contains(.permissionSetupInProgress) {
             permissionSetupInProgress = try container.decode(Bool.self, forKey: .permissionSetupInProgress)
         } else {
@@ -676,6 +681,7 @@ public struct ServerInfo: Codable, Equatable, Sendable {
     public var contractVersion: String
     public var capabilities: ServerCapabilities
     public var diagnostics: ServerDiagnostics
+    public var secureTransport: SecureTransportMetadata?
 
     enum CodingKeys: String, CodingKey {
         case name
@@ -684,11 +690,13 @@ public struct ServerInfo: Codable, Equatable, Sendable {
         case contractVersion = "contract_version"
         case capabilities
         case diagnostics
+        case secureTransport = "secure_transport"
     }
 
     public init(
         name: String, serverVersion: String, contractVersion: String,
-        capabilities: ServerCapabilities, diagnostics: ServerDiagnostics, serverInstanceID: String? = nil
+        capabilities: ServerCapabilities, diagnostics: ServerDiagnostics, serverInstanceID: String? = nil,
+        secureTransport: SecureTransportMetadata? = nil
     ) {
         self.name = name
         self.serverVersion = serverVersion
@@ -696,6 +704,7 @@ public struct ServerInfo: Codable, Equatable, Sendable {
         self.contractVersion = contractVersion
         self.capabilities = capabilities
         self.diagnostics = diagnostics
+        self.secureTransport = secureTransport
     }
 
     public init(from decoder: Decoder) throws {
@@ -705,6 +714,7 @@ public struct ServerInfo: Codable, Equatable, Sendable {
         contractVersion = try container.decode(String.self, forKey: .contractVersion)
         capabilities = try container.decode(ServerCapabilities.self, forKey: .capabilities)
         diagnostics = try container.decode(ServerDiagnostics.self, forKey: .diagnostics)
+        secureTransport = try container.decodeIfPresent(SecureTransportMetadata.self, forKey: .secureTransport)
         if container.contains(.serverInstanceID) {
             let instanceID = try container.decode(String.self, forKey: .serverInstanceID)
             guard RecordingPermissionContract.isValidServerInstanceID(instanceID) else {

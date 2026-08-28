@@ -63,6 +63,21 @@ EXPECTED_TOOLS = {
     "get_gaia_connection",
     "set_gaia_connection",
     "test_gaia_connection",
+    "list_providers",
+    "list_provider_connections",
+    "set_provider_connection",
+    "delete_provider_connection",
+    "prepare_provider_runtime",
+    "authenticate_provider_connection",
+    "get_provider_auth_status",
+    "test_provider_connection",
+    "list_provider_models",
+}
+EXTERNAL_METADATA_TOOLS = {
+    "prepare_provider_runtime",
+    "authenticate_provider_connection",
+    "test_provider_connection",
+    "list_provider_models",
 }
 MEETING_ID = "20260827T030500Z-a1b2c3d4"
 REQUEST_ID = "6f1c2a1e-9b7d-4c2e-8f0a-1a2b3c4d5e6f"
@@ -72,9 +87,19 @@ def _manifest() -> dict[str, Any]:
     return json.loads((CONTRACTS_DIR / "manifest.json").read_text(encoding="utf-8"))
 
 
-def _common_defs() -> dict[str, Any]:
-    doc = json.loads((CONTRACTS_DIR / "defs" / "common.json").read_text(encoding="utf-8"))
-    return doc["$defs"]
+def _defs_files() -> dict[str, dict[str, Any]]:
+    return {
+        rel: json.loads((CONTRACTS_DIR / rel).read_text(encoding="utf-8"))
+        for rel in _manifest()["defs"]
+    }
+
+
+def _shared_defs() -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for doc in _defs_files().values():
+        assert not merged.keys() & doc["$defs"].keys(), "shared definition names must be unique"
+        merged.update(doc["$defs"])
+    return merged
 
 
 def _tool_files() -> dict[str, dict[str, Any]]:
@@ -114,7 +139,7 @@ def contracts_copy(tmp_path: Path) -> Path:
 
 
 # ----------------------------------------------------------------------------- manifest ↔ files
-def test_manifest_lists_exactly_the_v1_tools() -> None:
+def test_manifest_lists_exactly_the_supported_tools() -> None:
     manifest = _manifest()
     assert manifest["name"] == "narumi"
     assert manifest["tools"] == sorted(manifest["tools"], key=manifest["tools"].index)
@@ -149,7 +174,7 @@ def test_tool_file_has_required_keys_and_annotations(name: str) -> None:
     assert set(annotations) == set(ANNOTATION_KEYS)
     for key in ANNOTATION_KEYS:
         assert isinstance(annotations[key], bool), f"{name}: {key}"
-    assert annotations["openWorldHint"] is False
+    assert annotations["openWorldHint"] is (name in EXTERNAL_METADATA_TOOLS)
     if annotations["readOnlyHint"]:
         assert annotations["destructiveHint"] is False
     # every description tells the client that an error envelope may come back
@@ -168,22 +193,31 @@ def test_raw_schemas_are_valid_2020_12(name: str) -> None:
     Draft202012Validator.check_schema(doc["outputSchema"])
 
 
-def test_common_defs_are_valid_2020_12() -> None:
-    doc = json.loads((CONTRACTS_DIR / "defs" / "common.json").read_text(encoding="utf-8"))
-    Draft202012Validator.check_schema(doc)
-    for schema in doc["$defs"].values():
-        Draft202012Validator.check_schema(schema)
+def test_shared_defs_are_valid_2020_12() -> None:
+    for doc in _defs_files().values():
+        Draft202012Validator.check_schema(doc)
+        for schema in doc["$defs"].values():
+            Draft202012Validator.check_schema(schema)
 
 
 @pytest.mark.parametrize("name", sorted(EXPECTED_TOOLS))
 def test_raw_refs_use_the_shared_defs_convention(name: str) -> None:
     doc = _tool_files()[name]
-    defs = _common_defs()
-    prefix = "../defs/common.json#/$defs/"
+    files = _defs_files()
     refs = list(_iter_refs(doc["inputSchema"])) + list(_iter_refs(doc["outputSchema"]))
     for ref in refs:
-        assert ref.startswith(prefix), f"{name}: unexpected $ref {ref}"
-        assert ref[len(prefix) :] in defs, f"{name}: unresolved $ref {ref}"
+        path, separator, def_name = ref.partition("#/$defs/")
+        assert separator and path.startswith("../defs/"), f"{name}: unexpected $ref {ref}"
+        assert path[3:] in files, f"{name}: unlisted $ref file {ref}"
+        assert def_name in files[path[3:]]["$defs"], f"{name}: unresolved $ref {ref}"
+
+
+def test_shared_defs_reference_only_the_merged_namespace() -> None:
+    defs = _shared_defs()
+    for name, schema in defs.items():
+        for ref in _iter_refs(schema):
+            assert ref.startswith("#/$defs/"), f"{name}: external shared reference {ref}"
+            assert ref[len("#/$defs/") :] in defs, f"{name}: unresolved shared reference {ref}"
 
 
 # ----------------------------------------------------------------------------- loader
@@ -193,7 +227,7 @@ def test_loader_exposes_manifest_metadata(contracts: ContractSet) -> None:
     assert contracts.contract_version == manifest["contract_version"]
     assert contracts.tool_names() == manifest["tools"]
     assert contracts.path == CONTRACTS_DIR
-    assert set(contracts.defs) == set(_common_defs())
+    assert set(contracts.defs) == set(_shared_defs())
     assert len(contracts) == len(EXPECTED_TOOLS)
     assert "get_meeting" in contracts
     assert isinstance(contracts["get_meeting"], ToolContract)
@@ -552,6 +586,11 @@ def test_read_only_tools_have_no_request_id_and_write_tools_require_it(
         "get_profile",
         "get_gaia_connection",
         "test_gaia_connection",
+        "list_providers",
+        "list_provider_connections",
+        "get_provider_auth_status",
+        "test_provider_connection",
+        "list_provider_models",
     }
     for name in read_only:
         assert "request_id" not in contracts[name].input_schema["properties"], name

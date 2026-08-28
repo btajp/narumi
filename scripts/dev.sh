@@ -2,9 +2,10 @@
 # scripts/dev.sh — start the narumi MCP server for development, optionally with gaia-library.
 #
 # Usage:
-#   scripts/dev.sh                       # narumi-server over Streamable HTTP on 127.0.0.1:8765
+#   scripts/dev.sh                       # authenticated Streamable HTTP/TLS on 127.0.0.1:8765
 #   scripts/dev.sh --port 9000           # different port (or NARUMI_PORT=9000)
-#   scripts/dev.sh --stdio               # narumi-server over stdio (for MCP client configs)
+#   scripts/dev.sh --stdio               # isolated dev server; provider/secret tools disabled
+#   scripts/dev.sh --stdio-bridge        # MCP client bridge to the running authenticated server
 #   GAIA_LIBRARY_CMD="gaia serve" scripts/dev.sh
 #                                        # also start gaia-library as a subprocess (any command
 #                                        # string; run with `bash -c`). narumi works without it.
@@ -12,11 +13,11 @@
 # Behaviour:
 #   * SIGINT / SIGTERM are forwarded to both children.
 #   * When either child exits, the other is stopped and the script exits with that child's status.
-#   * In --stdio mode the server owns stdin/stdout; gaia-library's stdout is sent to stderr so the
+#   * In stdio modes the server owns stdin/stdout; gaia-library's stdout is sent to stderr so the
 #     MCP protocol stream stays clean.
 #
 # Environment:
-#   NARUMI_PORT       HTTP port (default 8765); the server binds 127.0.0.1
+#   NARUMI_PORT       TLS port (default 8765); the server binds 127.0.0.1
 #   NARUMI_HOME       data root (see narumi.config)
 #   GAIA_LIBRARY_CMD  optional gaia-library start command
 #
@@ -39,6 +40,7 @@ usage() {
 while [ $# -gt 0 ]; do
   case "$1" in
     --stdio) mode="stdio" ;;
+    --stdio-bridge) mode="stdio-bridge" ;;
     --http) mode="http" ;;
     --port)
       [ $# -ge 2 ] || { echo "dev.sh: --port needs a value" >&2; exit 2; }
@@ -100,7 +102,7 @@ trap cleanup EXIT
 # --- gaia-library (optional) -------------------------------------------------------------
 if [ -n "${GAIA_LIBRARY_CMD:-}" ]; then
   log "starting gaia-library: $GAIA_LIBRARY_CMD"
-  if [ "$mode" = "stdio" ]; then
+  if [ "$mode" != "http" ]; then
     bash -c "$GAIA_LIBRARY_CMD" </dev/null 1>&2 &
   else
     bash -c "$GAIA_LIBRARY_CMD" </dev/null &
@@ -111,8 +113,8 @@ fi
 
 # --- narumi-server -------------------------------------------------------------------------
 server_cmd=(uv run narumi-server)
-if [ "$mode" = "stdio" ]; then
-  server_cmd+=(--stdio)
+if [ "$mode" != "http" ]; then
+  server_cmd+=("--$mode")
 else
   server_cmd+=(--http --port "$port")
 fi
@@ -120,7 +122,7 @@ server_cmd+=(${server_extra[@]+"${server_extra[@]}"})
 
 log "starting narumi-server: ${server_cmd[*]}"
 if [ "$mode" = "http" ]; then
-  log "MCP endpoint: http://127.0.0.1:${port}/mcp"
+  log "MCP endpoint: https://127.0.0.1:${port}/mcp (owner bootstrap + Keychain token required)"
 fi
 # `<&0` keeps the child attached to our stdin even though it is backgrounded (needed for --stdio).
 "${server_cmd[@]}" <&0 &

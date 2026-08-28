@@ -1954,7 +1954,7 @@ wheels = [
 
 [[package]]
 name = "narumi"
-version = "0.1.4"
+version = "0.2.0"
 source = { editable = "pipeline" }
 dependencies = [
     { name = "click" },
@@ -2006,7 +2006,7 @@ provides-extras = ["whisper-mlx", "whisper-faster", "pyannote", "claude", "anthr
 
 [[package]]
 name = "narumi-server"
-version = "0.1.4"
+version = "0.2.0"
 source = { editable = "server" }
 dependencies = [
     { name = "anyio" },
@@ -2017,15 +2017,24 @@ dependencies = [
     { name = "uvicorn" },
 ]
 
+[package.optional-dependencies]
+secure = [
+    { name = "cryptography" },
+    { name = "httpx2" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4.5" },
+    { name = "cryptography", marker = "extra == 'secure'", specifier = ">=44" },
+    { name = "httpx2", marker = "extra == 'secure'", specifier = ">=2" },
     { name = "jsonschema", specifier = ">=4.23" },
     { name = "mcp", specifier = ">=2.0,<3" },
     { name = "narumi", editable = "pipeline" },
     { name = "starlette", specifier = ">=0.40" },
     { name = "uvicorn", specifier = ">=0.30" },
 ]
+provides-extras = ["secure"]
 
 [[package]]
 name = "narumi-workspace"
@@ -2036,7 +2045,7 @@ source = { virtual = "." }
 dev = [
     { name = "datamodel-code-generator" },
     { name = "narumi", extra = ["anthropic", "claude", "html", "slides", "whisper-faster", "whisper-mlx"] },
-    { name = "narumi-server" },
+    { name = "narumi-server", extra = ["secure"] },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
@@ -2048,7 +2057,7 @@ dev = [
 dev = [
     { name = "datamodel-code-generator", specifier = ">=0.28" },
     { name = "narumi", extras = ["whisper-mlx", "whisper-faster", "claude", "anthropic", "html", "slides"], editable = "pipeline" },
-    { name = "narumi-server", editable = "server" },
+    { name = "narumi-server", extras = ["secure"], editable = "server" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "ruff", specifier = ">=0.8" },

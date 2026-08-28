@@ -97,6 +97,8 @@ final class DesktopJobRequestStateTests: XCTestCase {
     }
 
     private let rejectionCases: [(tool: String, preflightCodes: Set<String>)] = [
+        (ToolCatalog.prepareProviderRuntime,
+            ["invalid_argument", "not_found", "configuration_conflict", "busy", "engine_unavailable", "authentication_required"]),
         (ToolCatalog.regenerate,
             ["invalid_argument", "not_found", "busy", "scope_denied", "policy_violation", "engine_unavailable"]),
         (ToolCatalog.importRecording,
@@ -110,6 +112,7 @@ final class DesktopJobRequestStateTests: XCTestCase {
         "invalid_argument", "not_found", "busy", "scope_denied", "policy_violation", "engine_unavailable",
         "contract_mismatch", "cancelled", "recorder_unavailable", "internal",
         "permission_denied", "scope_mismatch", "unknown_code", nil,
+        "configuration_conflict", "authentication_required",
     ]
 
     func testFirstFailureUsesTheToolSpecificContractPreflightTable() throws {
@@ -124,6 +127,9 @@ final class DesktopJobRequestStateTests: XCTestCase {
                 XCTAssertEqual(state.uncertainCount, definitive ? 0 : 1, label)
                 if definitive {
                     XCTAssertNil(state.beginRetry(), label)
+                } else if row.tool == ToolCatalog.prepareProviderRuntime {
+                    XCTAssertNil(state.beginRetry(), label)
+                    XCTAssertTrue(state.requiresManualRecovery(requestID: "request-1"), label)
                 } else {
                     XCTAssertEqual(try XCTUnwrap(state.beginRetry()).request.tool, row.tool, label)
                 }
@@ -132,7 +138,7 @@ final class DesktopJobRequestStateTests: XCTestCase {
     }
 
     func testEveryReplayErrorRetainsTheOriginalUnknownRequest() throws {
-        for row in rejectionCases {
+        for row in rejectionCases where row.tool != ToolCatalog.prepareProviderRuntime {
             for code in failureCodes {
                 var state = DesktopJobRequestState()
                 let original = request("request-1", tool: row.tool, runAsync: true)
@@ -228,6 +234,91 @@ final class DesktopJobRequestStateTests: XCTestCase {
                 requestID: "export-1", tool: ToolCatalog.exportMinutes, arguments: Data(arguments.utf8))
             XCTAssertEqual(request.canAutomaticallyRetry, expected, arguments)
         }
+    }
+
+    func testUnknownProviderSetupStaysPendingWithoutAutomaticReplay() throws {
+        for arguments in [providerSetup().arguments, Data("invalid JSON".utf8)] {
+            var state = DesktopJobRequestState()
+            let original = DesktopJobRequestState.Request(
+                requestID: "setup-1", tool: ToolCatalog.prepareProviderRuntime, arguments: arguments)
+            XCTAssertFalse(original.canAutomaticallyRetry)
+            let token = try XCTUnwrap(state.begin(original))
+            XCTAssertFalse(state.requiresManualRecovery(requestID: "setup-1"))
+            XCTAssertTrue(state.markUncertain(token))
+            state.invalidateRetries()
+            for _ in 0..<3 { XCTAssertNil(state.beginRetry()) }
+            XCTAssertTrue(state.requiresManualRecovery(requestID: "setup-1"))
+            XCTAssertEqual(state.pendingTools, [ToolCatalog.prepareProviderRuntime])
+            XCTAssertEqual(state.pendingCount, 1)
+            XCTAssertEqual(state.uncertainCount, 1)
+        }
+    }
+
+    func testProviderSetupIsConfirmedOnlyByMatchingPublicLookup() throws {
+        for responseLost in [false, true] {
+            var state = DesktopJobRequestState()
+            let token = try XCTUnwrap(state.begin(providerSetup()))
+            if responseLost { XCTAssertTrue(state.markUncertain(token)) }
+            let before = state
+            for (id, provider, resource) in [
+                ("other-request", "codex-app-server", "codex-runtime"),
+                ("setup-1", "claude-agent-sdk", "codex-runtime"),
+                ("setup-1", "codex-app-server", "other-runtime"),
+            ] {
+                XCTAssertFalse(state.confirmProviderSetup(requestID: id, providerID: provider, resourceID: resource))
+                XCTAssertEqual(state, before)
+            }
+            XCTAssertTrue(state.confirmProviderSetup(
+                requestID: "setup-1", providerID: "codex-app-server", resourceID: "codex-runtime"))
+            XCTAssertEqual(state.pendingCount, 0)
+            XCTAssertFalse(state.requiresManualRecovery(requestID: "setup-1"))
+            XCTAssertFalse(state.confirm(token), "A late original response must not confirm the recovered request again")
+            XCTAssertFalse(state.markUncertain(token))
+            XCTAssertFalse(state.confirmProviderSetup(
+                requestID: "setup-1", providerID: "codex-app-server", resourceID: "codex-runtime"))
+        }
+    }
+
+    func testProviderSetupLookupCannotConfirmAnotherToolOrMalformedArguments() throws {
+        let cases: [(String, Data)] = [
+            (ToolCatalog.regenerate, providerSetup().arguments),
+            (ToolCatalog.prepareProviderRuntime, Data("invalid JSON".utf8)),
+            (ToolCatalog.prepareProviderRuntime, Data("[]".utf8)),
+            (ToolCatalog.prepareProviderRuntime, Data(#"{"resource_id":"codex-runtime"}"#.utf8)),
+            (ToolCatalog.prepareProviderRuntime, Data(#"{"provider_id":"codex-app-server","resource_id":1}"#.utf8)),
+        ]
+        for (tool, arguments) in cases {
+            var state = DesktopJobRequestState()
+            let token = try XCTUnwrap(state.begin(.init(requestID: "setup-1", tool: tool, arguments: arguments)))
+            state.markUncertain(token)
+            let before = state
+            XCTAssertFalse(state.confirmProviderSetup(
+                requestID: "setup-1", providerID: "codex-app-server", resourceID: "codex-runtime"))
+            XCTAssertEqual(state, before)
+        }
+    }
+
+    func testUnknownProviderSetupDoesNotStarveAnotherJobAndLookupKeepsOtherRequests() throws {
+        var state = DesktopJobRequestState()
+        let setup = try XCTUnwrap(state.begin(providerSetup()))
+        let regenerate = try XCTUnwrap(state.begin(request("regenerate-1", tool: ToolCatalog.regenerate)))
+        state.markUncertain(setup)
+        state.markUncertain(regenerate)
+        let retry = try XCTUnwrap(state.beginRetry())
+        XCTAssertEqual(retry.request.requestID, "regenerate-1")
+        XCTAssertTrue(state.confirmProviderSetup(
+            requestID: "setup-1", providerID: "codex-app-server", resourceID: "codex-runtime"))
+        XCTAssertEqual(state.pendingTools, [ToolCatalog.regenerate])
+        XCTAssertEqual(state.pendingCount, 1)
+        XCTAssertTrue(state.confirm(retry.token))
+        XCTAssertEqual(state.pendingCount, 0)
+    }
+
+    private func providerSetup() -> DesktopJobRequestState.Request {
+        let arguments = Data("""
+            {"request_id":"setup-1","provider_id":"codex-app-server","resource_id":"codex-runtime"}
+            """.utf8)
+        return .init(requestID: "setup-1", tool: ToolCatalog.prepareProviderRuntime, arguments: arguments)
     }
 
     func testStaleCallbackCannotRemoveOrResetANewerRetry() throws {

@@ -146,6 +146,7 @@ final class RuntimeSyncOrphanTests: XCTestCase {
                 "RuntimeSyncOwnership.swift", "RuntimeGuards.swift", "RuntimeInstallation.swift", "RuntimeSyncPlan.swift", "RuntimeManifest.swift",
                 "ServerCommand.swift", "ServerConfig.swift", "ServerReadiness.swift", "ServerState.swift", "OwnedServerRecovery.swift",
                 "ContractModels.swift", "RecordingPermissionModels.swift", "ToolCatalog.swift",
+                "MCPServerEndpoint.swift", "ProviderWorkflowCapabilities.swift", "KeychainHelperLocation.swift",
             ]
                 .map { core.appendingPathComponent($0).path }
         let output = Pipe()
@@ -179,6 +180,12 @@ final class RuntimeSyncOrphanTests: XCTestCase {
             func serialized() -> Data { Data() }
         }
         actor MCPClient {
+            func configure(_ config: ServerConfig) throws {
+                try config.validateSecureEndpoint()
+            }
+            func prepareConnection(expectedProcessID: Int32? = nil, expectedProcessGroup: Int32? = nil) throws {
+                fatalError("The orphan recovery test must never prepare an MCP connection")
+            }
             func callTool(_ name: String, arguments: [String: String]) -> FakeToolResult {
                 fatalError("The orphan recovery test must never call MCP")
             }
@@ -196,7 +203,7 @@ final class RuntimeSyncOrphanTests: XCTestCase {
                         let port = try unusedPort()
                         let config = ServerConfig(
                             repository: nil, repositorySource: nil, port: port,
-                            serverURL: URL(string: "http://127.0.0.1:\\(port)/mcp")!, recorder: nil,
+                            serverURL: URL(string: "https://127.0.0.1:\\(port)/mcp")!, recorder: nil,
                             logFile: data.appendingPathComponent("server.log"), dataRoot: data.path,
                             runtimeMode: .bundled, bundledRuntime: BundledRuntime(root: data.appendingPathComponent("empty-bundle")),
                             runtimePaths: paths, runtimeLogFile: data.appendingPathComponent("runtime.log"))

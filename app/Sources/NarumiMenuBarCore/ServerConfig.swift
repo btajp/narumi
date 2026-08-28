@@ -10,14 +10,15 @@ public struct ServerConfig: Equatable, Sendable {
     public enum Env {
         /// Repository checkout (highest precedence for the repository).
         public static let repo = "NARUMI_REPO"
-        /// HTTP port the launched server binds; also derives the MCP URL.
+        /// HTTPS port the launched server binds; also derives the MCP URL.
         public static let port = "NARUMI_SERVER_PORT"
-        /// Explicit MCP URL (`MCPClient.serverURLFromEnvironment` reads the same variable).
+        /// Explicit pinned HTTPS MCP URL; never an alternate HTTP endpoint.
         public static let serverURL = "NARUMI_SERVER_URL"
         /// Data root; passed through to the server when set.
         public static let home = "NARUMI_HOME"
         /// Recorder binary; handed to the server as `--recorder`.
         public static let recorder = "NARUMI_RECORDER"
+        public static let keychainHelper = "NARUMI_KEYCHAIN_HELPER"
         /// Forces `repo` or `bundled` runtime mode (dev / E2E override; any other value is
         /// ignored and the automatic detection applies).
         public static let runtimeMode = "NARUMI_RUNTIME_MODE"
@@ -48,6 +49,7 @@ public struct ServerConfig: Equatable, Sendable {
     /// Files that make a directory the narumi repository (uv workspace root + `server` member).
     public static let repositoryMarkers = ["pyproject.toml", "server/pyproject.toml"]
     public static let recorderPathInBundle = "Contents/MacOS/narumi-recorder"
+    public static let keychainHelperPathInBundle = "Contents/MacOS/narumi-keychain"
     public static let logPathInHome = "Library/Logs/narumi/server.log"
     /// Output of the bundled-runtime sync (uv), separate from the server log.
     public static let runtimeLogPathInHome = "Library/Logs/narumi/runtime.log"
@@ -76,6 +78,10 @@ public struct ServerConfig: Equatable, Sendable {
     public var hasExplicitServerURL: Bool
     /// `narumi-recorder` shipped inside the .app, when present.
     public var recorder: URL?
+    /// The same signed helper used by the resident server owns its Keychain entries.
+    public var keychainHelper: URL?
+    public var keychainHelperLocations: [KeychainHelperLocation]
+    public var rejectedKeychainHelperOverride: Bool
     /// stdout + stderr of the launched server.
     public var logFile: URL
     /// `NARUMI_HOME` passthrough (nil = the server's default data root).
@@ -101,7 +107,10 @@ public struct ServerConfig: Equatable, Sendable {
         bundledRuntime: BundledRuntime?,
         runtimePaths: RuntimePaths,
         runtimeLogFile: URL,
-        hasExplicitServerURL: Bool = false
+        hasExplicitServerURL: Bool = false,
+        keychainHelper: URL? = nil,
+        keychainHelperLocations: [KeychainHelperLocation] = [],
+        rejectedKeychainHelperOverride: Bool = false
     ) {
         self.repository = repository
         self.repositorySource = repositorySource
@@ -109,6 +118,9 @@ public struct ServerConfig: Equatable, Sendable {
         self.serverURL = serverURL
         self.hasExplicitServerURL = hasExplicitServerURL
         self.recorder = recorder
+        self.keychainHelper = keychainHelper
+        self.keychainHelperLocations = keychainHelperLocations
+        self.rejectedKeychainHelperOverride = rejectedKeychainHelperOverride
         self.logFile = logFile
         self.dataRoot = dataRoot
         self.runtimeMode = runtimeMode
@@ -127,7 +139,8 @@ public struct ServerConfig: Equatable, Sendable {
         storedRepoPath: String?,
         bundleURL: URL? = Bundle.main.bundleURL,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
-        fileExists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }
+        fileExists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) },
+        canonicalize: (URL) -> URL = { $0.standardizedFileURL.resolvingSymlinksInPath() }
     ) -> ServerConfig {
         let (repository, source) = resolveRepository(
             environment: environment, storedRepoPath: storedRepoPath, bundleURL: bundleURL,
@@ -150,6 +163,10 @@ public struct ServerConfig: Equatable, Sendable {
         let dataRootURL =
             dataRoot.map(directoryURL)
             ?? homeDirectory.appendingPathComponent(dataRootPathInHome, isDirectory: true)
+        let mode = resolveRuntimeMode(environment: environment, repository: repository, bundledRuntime: bundledRuntime)
+        let helperLocations = Self.helperLocations(mode: mode, repository: repository, bundleURL: bundleURL)
+        let helper = resolveKeychainHelper(
+            environment: environment, locations: helperLocations, fileExists: fileExists, canonicalize: canonicalize)
         return ServerConfig(
             repository: repository,
             repositorySource: source,
@@ -158,12 +175,28 @@ public struct ServerConfig: Equatable, Sendable {
             recorder: recorder,
             logFile: homeDirectory.appendingPathComponent(logPathInHome),
             dataRoot: dataRoot,
-            runtimeMode: resolveRuntimeMode(
-                environment: environment, repository: repository, bundledRuntime: bundledRuntime),
+            runtimeMode: mode,
             bundledRuntime: bundledRuntime,
             runtimePaths: RuntimePaths(dataRoot: dataRootURL),
             runtimeLogFile: homeDirectory.appendingPathComponent(runtimeLogPathInHome),
-            hasExplicitServerURL: explicitServerURL(environment) != nil)
+            hasExplicitServerURL: nonEmpty(environment[Env.serverURL]) != nil,
+            keychainHelper: helper.url, keychainHelperLocations: helperLocations,
+            rejectedKeychainHelperOverride: helper.rejected)
+    }
+
+    public var bootstrapDataRoot: URL { runtimePaths.root.deletingLastPathComponent() }
+
+    public func validateSecureEndpoint() throws {
+        let endpoint = try MCPServerEndpoint.validate(serverURL)
+        guard endpoint.port == port else { throw MCPConnectionError.endpointMismatch }
+        guard !rejectedKeychainHelperOverride else { throw MCPConnectionError.credentialUnavailable }
+    }
+
+    public func validatedKeychainHelper() throws -> URL {
+        guard !rejectedKeychainHelperOverride, let keychainHelper,
+            let location = keychainHelperLocations.first(where: { $0.candidate == keychainHelper })
+        else { throw MCPConnectionError.credentialUnavailable }
+        return try location.validatedExecutable()
     }
 
     /// An implicitly configured bundled app must own the server it uses. In particular,
@@ -229,10 +262,44 @@ public struct ServerConfig: Equatable, Sendable {
     }
 
     static func resolveServerURL(environment: [String: String], port: Int) -> URL {
-        if let url = explicitServerURL(environment) {
-            return url
+        if let raw = nonEmpty(environment[Env.serverURL]) {
+            // Preserve an invalid explicit choice as a visible error, never a fallback.
+            return URL(string: raw) ?? URL(string: "invalid:")!
         }
-        return URL(string: "http://\(defaultHost):\(port)\(mcpPath)")!
+        return URL(string: "https://\(defaultHost):\(port)\(mcpPath)")!
+    }
+
+    static func resolveKeychainHelper(
+        environment: [String: String], locations: [KeychainHelperLocation], fileExists: (URL) -> Bool,
+        canonicalize: (URL) -> URL
+    ) -> (url: URL?, rejected: Bool) {
+        if let explicit = nonEmpty(environment[Env.keychainHelper]) {
+            let path = (explicit as NSString).expandingTildeInPath
+            guard (path as NSString).isAbsolutePath else { return (nil, true) }
+            let requested = URL(fileURLWithPath: path).standardizedFileURL
+            guard let known = locations.first(where: { canonicalize($0.candidate) == canonicalize(requested) }) else {
+                return (nil, true)
+            }
+            return (known.candidate, false)
+        }
+        return (locations.first(where: { fileExists($0.candidate) })?.candidate, false)
+    }
+
+    static func helperLocations(mode: RuntimeMode?, repository: URL?, bundleURL: URL?) -> [KeychainHelperLocation] {
+        if mode == .bundled, let bundleURL, bundleURL.pathExtension == "app" {
+            return [KeychainHelperLocation(trustedRoot: bundleURL,
+                candidate: bundleURL.appendingPathComponent(keychainHelperPathInBundle))]
+        }
+        if mode == .repo, let repository {
+            let build = repository.appendingPathComponent("app/.build")
+            return [KeychainHelperLocation(trustedRoot: repository,
+                candidate: repository.appendingPathComponent("dist/narumi.app/\(keychainHelperPathInBundle)"))]
+                + ["release", "debug"].map {
+                    KeychainHelperLocation(trustedRoot: repository,
+                        candidate: build.appendingPathComponent("\($0)/narumi-keychain"), buildRoot: build)
+                }
+        }
+        return []
     }
 
     static func explicitServerURL(_ environment: [String: String]) -> URL? {

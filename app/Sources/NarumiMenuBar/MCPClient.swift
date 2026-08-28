@@ -12,9 +12,9 @@ enum MCPClientError: Error, CustomStringConvertible {
     var description: String {
         switch self {
         case .transport(let message): return "接続できません: \(message)"
-        case .httpStatus(let status, let body): return "HTTP \(status): \(body)"
+        case .httpStatus(let status, _): return "HTTP \(status): サーバー要求を完了できませんでした"
         case .protocolError(let message): return "プロトコルエラー: \(message)"
-        case .rpc(let code, let message): return "JSON-RPC エラー \(code): \(message)"
+        case .rpc(let code, _): return "JSON-RPC エラー \(code): サーバー要求を完了できませんでした"
         case .tool(let message, _): return message
         }
     }
@@ -36,11 +36,16 @@ actor MCPClient {
     static let protocolVersion = "2025-06-18"
     static let clientName = "narumi-menubar"
 
-    let serverURL: URL
+    var config: ServerConfig
+    var serverURL: URL { config.serverURL }
+    var bootstrap: MCPServerBootstrap?
+    var transport: (any MCPHTTPTransporting)?
+    let bootstrapLoader: (any MCPServerBootstrapLoading)?
+    let transportFactory: @Sendable (MCPServerConnection) -> any MCPHTTPTransporting
     private let clientVersion: String
-    private let transport: MCPHTTPTransport
     private var sessionID: String?
     private var initialized = false
+    private var initializationTask: Task<Void, any Error>?
     private var permissionSession = MCPPermissionSessionState()
     private var nextID = 1
     var jobRequests = DesktopJobRequestState()
@@ -48,19 +53,18 @@ actor MCPClient {
     var jobRequestPublication: UInt64 = 0
     var unpublishedJobIDs: [String: UInt64] = [:]
 
-    init(serverURL: URL, clientVersion: String, jobRequestObserver: JobRequestObserver? = nil) {
-        self.serverURL = serverURL
+    init(
+        config: ServerConfig, clientVersion: String, jobRequestObserver: JobRequestObserver? = nil,
+        bootstrapLoader: (any MCPServerBootstrapLoading)? = nil,
+        transportFactory: @escaping @Sendable (MCPServerConnection) -> any MCPHTTPTransporting = {
+            MCPHTTPTransport(connection: $0)
+        }
+    ) {
+        self.config = config
         self.clientVersion = clientVersion
         self.jobRequestObserver = jobRequestObserver
-        transport = MCPHTTPTransport()
-    }
-
-    static func serverURLFromEnvironment() -> URL {
-        let fallback = URL(string: "http://127.0.0.1:8765/mcp")!
-        guard let raw = ProcessInfo.processInfo.environment["NARUMI_SERVER_URL"], !raw.isEmpty else {
-            return fallback
-        }
-        return URL(string: raw) ?? fallback
+        self.bootstrapLoader = bootstrapLoader
+        self.transportFactory = transportFactory
     }
 
     // MARK: Public API
@@ -104,6 +108,9 @@ actor MCPClient {
         expectedSessionGeneration: UInt64? = nil
     ) async throws -> ToolCallResult {
         try await ensureInitialized(confidential: confidential)
+        if name != ToolCatalog.getServerInfo, permissionSession.contractVersion == nil {
+            _ = try await performToolCall(ToolCatalog.getServerInfo, arguments: [:], confidential: false)
+        }
         let params: JSONNode = .object(["name": .string(name), "arguments": .object(arguments)])
         let result: JSONNode
         var responseGeneration = permissionSession.generation
@@ -121,6 +128,9 @@ actor MCPClient {
                 throw MCPClientError.httpStatus(404, body)
             }
             try await ensureInitialized(confidential: confidential)
+            if name != ToolCatalog.getServerInfo {
+                _ = try await performToolCall(ToolCatalog.getServerInfo, arguments: [:], confidential: false)
+            }
             responseGeneration = permissionSession.generation
             do {
                 result = try await request(method: "tools/call", params: params, confidential: confidential)
@@ -143,40 +153,71 @@ actor MCPClient {
             structuredContent: structured, text: text, isError: isError,
             sessionGeneration: responseGeneration == permissionSession.generation ? responseGeneration : nil)
         if isError {
-            throw MCPClientError.tool(message: MCPClient.errorMessage(from: callResult), payload: structured)
+            let message = MCPClient.errorMessage(from: callResult)
+            let code = MCPHTTPTransport.confidentialErrorCode(structured?["error"]?["code"]?.stringValue)
+            throw MCPClientError.tool(message: message, payload: .object([
+                "error": .object(["code": .string(code), "message": .string(message)])]))
         }
         if name == ToolCatalog.getServerInfo {
+            guard structured?["server_instance_id"]?.stringValue == bootstrap?.serverInstanceID else {
+                reset()
+                throw MCPConnectionError.connectionChanged
+            }
+            guard RecordingPermissionContract.supportsSetup(structured?["contract_version"]?.stringValue),
+                structured?["secure_transport"]?["mode"]?.stringValue == "pinned_tls",
+                structured?["secure_transport"]?["tls_required"]?.boolValue == true,
+                structured?["secure_transport"]?["client_auth_required"]?.boolValue == true
+            else {
+                reset()
+                throw MCPConnectionError.incompatibleContract
+            }
             permissionSession.observeServerInfo(
                 contractVersion: structured?["contract_version"]?.stringValue,
                 serverInstanceID: structured?["server_instance_id"]?.stringValue,
                 requestGeneration: responseGeneration)
             callResult.sessionGeneration = responseGeneration == permissionSession.generation ? responseGeneration : nil
         }
+        if name == ToolCatalog.listProviders {
+            await reconcileProviderSetupRequests(callResult)
+        }
         return callResult
     }
 
     /// Drop the session so the next call re-initializes (used after connection failures).
     func reset() {
+        initializationTask?.cancel()
+        initializationTask = nil
+        transport?.invalidate()
+        transport = nil
+        bootstrap = nil
         sessionID = nil
         initialized = false
         permissionSession.reset()
+        jobRequests.invalidateRetries()
     }
 
     static func errorMessage(from result: ToolCallResult) -> String {
-        if let error = result.structuredContent?["error"] {
-            let code = error["code"]?.stringValue ?? "error"
-            let message = error["message"]?.stringValue ?? ""
-            return "\(code): \(message)"
-        }
-        return result.text.isEmpty ? "ツールがエラーを返しました" : result.text
+        let code = MCPHTTPTransport.confidentialErrorCode(result.structuredContent?["error"]?["code"]?.stringValue)
+        return "\(code): 操作を完了できませんでした。設定と接続状態を確認してください。"
     }
 
     // MARK: Session
 
     private func ensureInitialized(confidential: Bool) async throws {
-        if initialized {
+        if initialized { return }
+        if let initializationTask {
+            try await initializationTask.value
             return
         }
+        let task = Task { try await initializeSession(confidential: confidential) }
+        initializationTask = task
+        defer { if initializationTask == task { initializationTask = nil } }
+        try await task.value
+    }
+
+    private func initializeSession(confidential: Bool) async throws {
+        try prepareConnection()
+        let generation = permissionSession.generation
         let params: JSONNode = .object([
             "protocolVersion": .string(MCPClient.protocolVersion),
             "capabilities": .object([:]),
@@ -187,6 +228,7 @@ actor MCPClient {
         ])
         _ = try await request(method: "initialize", params: params, confidential: confidential)
         try await notify(method: "notifications/initialized", confidential: confidential)
+        guard generation == permissionSession.generation else { throw MCPConnectionError.connectionChanged }
         initialized = true
     }
 
@@ -205,13 +247,18 @@ actor MCPClient {
         ])
         let (data, response) = try await post(
             body, confidential: confidential, expectedSessionGeneration: expectedSessionGeneration)
-        let message = try MCPClient.extractResponse(data: data, response: response, expectedID: id)
+        let message: JSONNode
+        do {
+            message = try MCPClient.extractResponse(data: data, response: response, expectedID: id)
+        } catch {
+            throw MCPClientError.protocolError("サーバー応答を解釈できませんでした。")
+        }
         if let error = message["error"] {
-            let code = Int(error["code"].flatMap { node -> Double? in
-                if case .number(let value) = node { return value }
+            let code = error["code"].flatMap { node -> Int? in
+                if case .number(let value) = node { return Int(exactly: value) }
                 return nil
-            } ?? -1)
-            throw MCPClientError.rpc(code: code, message: error["message"]?.stringValue ?? "unknown error")
+            } ?? -1
+            throw MCPClientError.rpc(code: code, message: "サーバー要求を完了できませんでした。")
         }
         guard let result = message["result"] else {
             throw MCPClientError.protocolError("response without result for \(method)")
@@ -237,7 +284,7 @@ actor MCPClient {
             let refreshing = body["params"]?["arguments"]?["refresh_permissions"]?.boolValue == true
             guard (tool != ToolCatalog.configureRecordingPermission || expectedSessionGeneration != nil),
                 permissionSession.allowsCall(tool: tool, refreshingPermissions: refreshing) else {
-                throw MCPClientError.protocolError("接続先の権限設定機能を再確認する必要があります。診断から状態を再確認してください。")
+                throw MCPConnectionError.incompatibleContract
             }
         }
         let requestGeneration = permissionSession.generation
@@ -253,10 +300,15 @@ actor MCPClient {
 
         let data: Data
         let response: URLResponse
+        guard let transport else { throw MCPConnectionError.bootstrapUnavailable }
         do {
             (data, response) = try await transport.data(for: request, protectingSecrets: confidential)
+        } catch let error as MCPConnectionError {
+            throw error
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
-            throw MCPClientError.transport(error.localizedDescription)
+            throw MCPConnectionError.transportFailed
         }
         guard let http = response as? HTTPURLResponse else {
             throw MCPClientError.protocolError("non-HTTP response")
@@ -271,8 +323,7 @@ actor MCPClient {
             sessionID = newSessionID
         }
         guard (200..<300).contains(http.statusCode) else {
-            let text = String(data: data, encoding: .utf8) ?? ""
-            throw MCPClientError.httpStatus(http.statusCode, text)
+            throw MCPClientError.httpStatus(http.statusCode, "")
         }
         return (data, http)
     }
@@ -292,7 +343,7 @@ actor MCPClient {
             }
         }
         for candidate in candidates {
-            if case .number(let id)? = candidate["id"], Int(id) == expectedID {
+            if case .number(let id)? = candidate["id"], id == Double(expectedID) {
                 return candidate
             }
         }

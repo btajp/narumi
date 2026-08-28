@@ -36,6 +36,8 @@ Codex App Server / Claude Agent SDK / ローカル LLM / API 課金の 4 系統�
 - 依存追加は `pipeline/pyproject.toml` / `server/pyproject.toml` の該当 extras に入れ、重い ML 依存は base に含めない
 - 契約を変えるときは `contracts/` を先に更新し、`uv run pytest pipeline/tests/contracts` で整合を確認してから実装に着手する
 - コミットは Conventional Commits（feat / fix / refactor / test / docs / chore）。`Co-Authored-By` は付けない
+- 動作確認はインストール済みアプリの更新で行う。確認可能な機能単位でコミット・push・新バージョン公開まで進め、後続機能の完成を待って配布をまとめない
+- 公開前にテスト・署名・公証・配布物照合を通す。アプリ画面や OS 許可の実機確認は公開後の Sparkle 更新で行い、開発ビルドの手動コピーを確認の前提にしない。未実装・未検証の範囲はリリースノートに明記する
 
 ## コマンド
 ```sh

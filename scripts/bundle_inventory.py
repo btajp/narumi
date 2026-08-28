@@ -24,6 +24,7 @@ REQUIRED = {
     "Contents/PkgInfo",
     "Contents/MacOS/NarumiMenuBar",
     "Contents/MacOS/narumi-recorder",
+    "Contents/MacOS/narumi-keychain",
     "Contents/Resources/AppIcon.icns",
 }
 SIGNATURE_FILES = {"Contents/_CodeSignature/CodeResources", "Contents/CodeResources"}

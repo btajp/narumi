@@ -1,0 +1,99 @@
+{
+  "name": "test_provider_connection",
+  "title": "Test provider connection",
+  "description": "Explicitly check the saved connection's current credential and provider metadata after expected_revision validation. This observational operation may update authentication/catalog check timestamps but not configuration revision, enabled state, keys, model selection, generation history or meeting content. It never sends meetings, starts generation, prompts for login, reads ambient keys or switches providers. Use only the validated endpoint, no redirect/proxy fallback. A safe failure result may set connected=false and retain the connection for correction; transport/authentication prerequisites may return an error. Metadata success is not proof that generation works. On failure returns an error_envelope (isError=true) with code: invalid_argument, not_found, configuration_conflict, authentication_required, engine_unavailable, internal. All provider operations require the authenticated resident server; no implicit in-process or unauthenticated HTTP fallback is allowed.",
+  "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "connection_id": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_connection_id"
+      },
+      "expected_revision": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_connection_revision"
+      }
+    },
+    "required": [
+      "connection_id",
+      "expected_revision"
+    ],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "connection": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_connection"
+      },
+      "connected": {
+        "type": "boolean"
+      },
+      "reason": {
+        "$ref": "../defs/providers.json#/$defs/provider_reason"
+      }
+    },
+    "required": [
+      "connection",
+      "connected",
+      "reason"
+    ],
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {
+        "connection_id": "conn-0123456789ab",
+        "expected_revision": 2
+      },
+      {
+        "connection_id": "conn-abcdef012345",
+        "expected_revision": 1
+      }
+    ],
+    "output": [
+      {
+        "connection": {
+          "connection_id": "conn-0123456789ab",
+          "revision": 2,
+          "provider_id": "anthropic-api",
+          "display_name": "議事録 API",
+          "enabled": true,
+          "endpoint": "https://api.anthropic.com",
+          "auth_method": "api_key",
+          "credential_present": true,
+          "auth_state": "authenticated",
+          "catalog_state": "ready",
+          "checked_at": "2026-08-28T09:00:00Z",
+          "active_auth": null,
+          "last_generation_state": "never"
+        },
+        "connected": true,
+        "reason": null
+      },
+      {
+        "connection": {
+          "connection_id": "conn-0123456789ab",
+          "revision": 1,
+          "provider_id": "anthropic-api",
+          "display_name": "議事録 API",
+          "enabled": true,
+          "endpoint": "https://api.anthropic.com",
+          "auth_method": "api_key",
+          "credential_present": false,
+          "auth_state": "failed",
+          "catalog_state": "unfetched",
+          "checked_at": "2026-08-28T09:00:00Z",
+          "active_auth": null,
+          "last_generation_state": "never"
+        },
+        "connected": false,
+        "reason": "credential_required"
+      }
+    ]
+  }
+}

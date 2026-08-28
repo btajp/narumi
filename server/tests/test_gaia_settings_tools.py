@@ -31,6 +31,13 @@ def no_real_gaia_environment(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv(ENV_GAIA_API_KEY, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def authenticated_resident_context(ctx: ServerContext):
+    # The in-memory harness models an already-authenticated resident request. Transport
+    # rejection is covered separately; these tests exercise the secret-safe handlers.
+    ctx.transports = ["streamable-http"]
+
+
 def rid() -> str:
     return str(uuid.uuid4())
 

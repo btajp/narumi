@@ -1,0 +1,75 @@
+{
+  "name": "delete_provider_connection",
+  "title": "Delete provider connection",
+  "description": "Delete an inactive, unreferenced provider connection and its connection-scoped credentials after confirm=true and expected_revision checks. Reject active operations or references from profiles instead of leaving dangling selections. Past non-secret result provenance is preserved. This never logs out another connection or modifies global SDK state. The same request_id returns the original deletion receipt. On failure returns an error_envelope (isError=true) with code: invalid_argument, not_found, configuration_conflict, busy, authentication_required, internal. All provider operations require the authenticated resident server; no implicit in-process or unauthenticated HTTP fallback is allowed.",
+  "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "connection_id": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_connection_id"
+      },
+      "expected_revision": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_connection_revision"
+      },
+      "confirm": {
+        "type": "boolean",
+        "const": true
+      },
+      "request_id": {
+        "$ref": "../defs/common.json#/$defs/request_id"
+      }
+    },
+    "required": [
+      "connection_id",
+      "expected_revision",
+      "confirm",
+      "request_id"
+    ],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "connection_id": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_connection_id"
+      },
+      "deleted": {
+        "type": "boolean",
+        "const": true
+      }
+    },
+    "required": [
+      "connection_id",
+      "deleted"
+    ],
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {
+        "connection_id": "conn-0123456789ab",
+        "expected_revision": 1,
+        "confirm": true,
+        "request_id": "provider-request-20260828-001"
+      },
+      {
+        "connection_id": "conn-abcdef012345",
+        "expected_revision": 3,
+        "confirm": true,
+        "request_id": "provider-request-delete-002"
+      }
+    ],
+    "output": [
+      {
+        "connection_id": "conn-0123456789ab",
+        "deleted": true
+      }
+    ]
+  }
+}

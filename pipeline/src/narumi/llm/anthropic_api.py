@@ -10,19 +10,22 @@ from typing import Any
 
 from narumi.errors import EngineUnavailableError, InvalidArgumentError
 from narumi.llm.base import CapabilityProfile
+from narumi.providers.metadata.http import JSONHTTPClient
 
 PROVIDER_NAME = "anthropic-api"
 ENV_MODEL = "NARUMI_ANTHROPIC_MODEL"
 ENV_API_KEY = "ANTHROPIC_API_KEY"
 DEFAULT_MODEL = "claude-opus-5"
 """Default model id (no date suffix). Override with ``NARUMI_ANTHROPIC_MODEL``."""
+MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+DEFAULT_TIMEOUT_SEC = 600.0
 
 PROFILE = CapabilityProfile(
     vision=True,
     context_window=200_000,
     cost_class="api",
     data_destination="anthropic",
-    tool_use=True,
+    tool_use=False,
     max_output_tokens=8192,
 )
 
@@ -33,23 +36,42 @@ class AnthropicAPIProvider:
     name = PROVIDER_NAME
     profile = PROFILE
 
-    def __init__(self, *, model: str | None = None, api_key: str | None = None) -> None:
-        try:
-            import anthropic
-        except ImportError as exc:  # pragma: no cover - depends on the environment
-            raise EngineUnavailableError(
-                "anthropic SDK is not installed (uv sync --extra anthropic)",
-                details={"provider": PROVIDER_NAME, "error": str(exc)},
-            ) from exc
-        key = api_key or os.environ.get(ENV_API_KEY)
+    def __init__(
+        self,
+        *,
+        model: str | None = None,
+        api_key: str | None = None,
+        http: JSONHTTPClient | None = None,
+    ) -> None:
+        key = os.environ.get(ENV_API_KEY) if api_key is None else api_key
         if not key:
             raise EngineUnavailableError(
-                f"{ENV_API_KEY} is not set; the anthropic-api provider needs an API key",
+                "The anthropic-api provider needs a non-empty API key",
                 details={"provider": PROVIDER_NAME, "env": ENV_API_KEY},
             )
-        self.model = model or os.environ.get(ENV_MODEL) or DEFAULT_MODEL
-        self._anthropic = anthropic
-        self._client = anthropic.Anthropic(api_key=key)
+        if (
+            not isinstance(key, str)
+            or len(key) > 4096
+            or any(not 33 <= ord(char) <= 126 for char in key)
+        ):
+            raise InvalidArgumentError(
+                "API key has an invalid format", details={"provider": PROVIDER_NAME}
+            )
+        self.model = (os.environ.get(ENV_MODEL) or DEFAULT_MODEL) if model is None else model
+        if (
+            not isinstance(self.model, str)
+            or not self.model
+            or len(self.model) > 256
+            or not self.model.isascii()
+            or not self.model.isprintable()
+            or self.model != self.model.strip()
+        ):
+            raise InvalidArgumentError(
+                "Anthropic model must be a non-empty model identifier",
+                details={"provider": PROVIDER_NAME},
+            )
+        self._api_key = key
+        self._http = http if http is not None else JSONHTTPClient()
 
     def complete(
         self,
@@ -59,34 +81,65 @@ class AnthropicAPIProvider:
         images: list[Path] | None = None,
         max_tokens: int | None = None,
     ) -> str:
+        if max_tokens is not None and (type(max_tokens) is not int or max_tokens <= 0):
+            raise InvalidArgumentError("max_tokens must be a positive integer")
         content: list[dict[str, Any]] = [_image_block(p) for p in images or []]
         content.append({"type": "text", "text": prompt})
-        kwargs: dict[str, Any] = {
+        payload: dict[str, Any] = {
             "model": self.model,
-            "max_tokens": max_tokens or self.profile.max_output_tokens,
+            "max_tokens": self.profile.max_output_tokens if max_tokens is None else max_tokens,
             "messages": [{"role": "user", "content": content}],
         }
         if system:
-            kwargs["system"] = system
+            payload["system"] = system
         try:
-            response = self._client.messages.create(**kwargs)
-        except self._anthropic.APIError as exc:
-            raise EngineUnavailableError(
-                f"anthropic API call failed: {exc}",
-                details={"provider": PROVIDER_NAME, "error": type(exc).__name__},
-            ) from exc
-        if response.stop_reason == "refusal":
-            raise EngineUnavailableError(
-                "anthropic API refused the request",
-                details={"provider": PROVIDER_NAME, "stop_reason": "refusal"},
+            # The SDK inherits custom headers, endpoints and debug logging from the
+            # environment. This transport supplies only these explicit credentials.
+            response = self._http.request(
+                "POST",
+                MESSAGES_URL,
+                headers={"x-api-key": self._api_key, "anthropic-version": "2023-06-01"},
+                payload=payload,
+                timeout=DEFAULT_TIMEOUT_SEC,
+                response_kind="generation",
             )
-        text = "".join(block.text for block in response.content if block.type == "text").strip()
-        if not text:
+        except Exception:
+            # This is an external-call boundary: neither exception text nor its
+            # chained traceback is safe for job logs or the catalog.
             raise EngineUnavailableError(
-                "anthropic API returned no text",
-                details={"provider": PROVIDER_NAME, "stop_reason": response.stop_reason},
-            )
-        return text
+                "Anthropic generation request failed", details={"provider": PROVIDER_NAME}
+            ) from None
+        return _response_text(response)
+
+
+def _response_text(response: dict[str, Any]) -> str:
+    def invalid_response() -> EngineUnavailableError:
+        return EngineUnavailableError(
+            "Anthropic returned no usable text", details={"provider": PROVIDER_NAME}
+        )
+
+    if (
+        not isinstance(response, dict)
+        or response.get("type") != "message"
+        or response.get("role") != "assistant"
+        or response.get("stop_reason") not in ("end_turn", "max_tokens", "stop_sequence")
+        or not isinstance(response.get("content"), list)
+    ):
+        raise invalid_response() from None
+    parts: list[str] = []
+    for block in response["content"]:
+        if not isinstance(block, dict):
+            raise invalid_response() from None
+        if block.get("type") == "text":
+            if not isinstance(block.get("text"), str):
+                raise invalid_response() from None
+            parts.append(block["text"])
+        elif block.get("type") not in ("thinking", "redacted_thinking"):
+            raise invalid_response() from None
+    text = "".join(parts).strip()
+    if not text:
+        raise invalid_response() from None
+    return text
 
 
 def _image_block(path: Path) -> dict[str, Any]:

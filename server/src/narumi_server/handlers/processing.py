@@ -329,9 +329,14 @@ def get_job_status(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
     job = ctx.catalog.get_job(args["job_id"])
     if job is None:
         raise NotFoundError(f"job not found: {args['job_id']}", details={"job_id": args["job_id"]})
+    if job["kind"] == "provider_setup":
+        ctx.providers.observe_job(job["job_id"], job["status"])
     return {"job": job}
 
 
 def cancel_job(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
     """``JobManager.cancel``: queued → cancelled now, running → cooperative flag."""
-    return {"job": ctx.jobs.cancel(args["job_id"])}
+    job = ctx.jobs.cancel(args["job_id"])
+    if job["kind"] == "provider_setup":
+        ctx.providers.observe_job(job["job_id"], job["status"])
+    return {"job": job}

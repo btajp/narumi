@@ -44,11 +44,19 @@ public struct ServerCommand: Equatable, Sendable {
             script += Self.recorderClause
             parameters.append(recorder.path)
         }
+        // Freeze the bootstrap root and helper after login profiles have run. An inherited
+        // shell setting must not redirect either side to different credentials.
+        parameters.append(config.bootstrapDataRoot.path)
+        script += " --data-root \"$\(parameters.count)\""
+        if let helper = config.keychainHelper {
+            parameters.append(helper.path)
+            script = script.replacingOccurrences(
+                of: "exec uv ", with: "exec env NARUMI_KEYCHAIN_HELPER=\"$\(parameters.count)\" uv ")
+            environment[ServerConfig.Env.keychainHelper] = helper.path
+        }
         // Without a bundled recorder `--recorder` is omitted: the server then honours an
         // inherited NARUMI_RECORDER or falls back to app/.build/{release,debug}/narumi-recorder.
-        if let dataRoot = config.dataRoot {
-            environment[ServerConfig.Env.home] = dataRoot
-        }
+        environment[ServerConfig.Env.home] = config.bootstrapDataRoot.path
         executable = Self.shell
         arguments = ["-lc", script, Self.scriptName] + parameters
         currentDirectory = repository
@@ -75,12 +83,14 @@ public struct ServerCommand: Equatable, Sendable {
             !key.hasPrefix("PYTHON") && !key.hasPrefix("_PYTHON") && key != "__PYVENV_LAUNCHER__"
         }
         environment[ServerConfig.Env.contractsDir] = runtime.contractsDir.path
-        if let dataRoot = config.dataRoot {
-            environment[ServerConfig.Env.home] = dataRoot
+        environment[ServerConfig.Env.home] = config.bootstrapDataRoot.path
+        if let helper = config.keychainHelper {
+            environment[ServerConfig.Env.keychainHelper] = helper.path
         }
         var arguments = [
             "-I", "-m", "narumi_server.cli",
             "--http", "--host", ServerConfig.defaultHost, "--port", String(config.port),
+            "--data-root", config.bootstrapDataRoot.path,
         ]
         if let recorder = config.recorder {
             arguments += ["--recorder", recorder.path]

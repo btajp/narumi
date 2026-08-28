@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
 
 import pytest
 from narumi.catalog import Catalog
-from narumi.errors import BusyError, NarumiError, PolicyViolationError
+from narumi.errors import BusyError, CancelledError, NarumiError, PolicyViolationError
 from narumi_server.jobs import JobManager, JobProgress
 
 
@@ -71,6 +72,25 @@ def test_failures_are_persisted(catalog: Catalog):
             bad["error"]["code"] == "internal"
             and "expected a JSON object" in bad["error"]["message"]
         )
+    finally:
+        manager.shutdown()
+
+
+@pytest.mark.parametrize("exception_type", [ValueError, PolicyViolationError, CancelledError])
+def test_provider_setup_never_persists_or_logs_upstream_exception_values(
+    catalog: Catalog, caplog, exception_type
+):
+    secret = "fake-job-credential-843910"
+    manager = JobManager(catalog)
+    try:
+
+        def fail(progress: JobProgress) -> dict:
+            raise exception_type(secret)
+
+        job = manager.wait(manager.submit("provider_setup", None, fail), timeout=10)
+        assert job["status"] in {"failed", "cancelled"}
+        assert secret not in json.dumps(job)
+        assert secret not in caplog.text
     finally:
         manager.shutdown()
 

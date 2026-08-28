@@ -1,37 +1,24 @@
-"""``claude-agent-sdk`` provider: Claude Code subscription via the Claude Agent SDK."""
+"""Claude Agent SDK adapter, gated until authentication and history isolation are verified."""
 
 from __future__ import annotations
 
-import asyncio
 import os
 from pathlib import Path
 
-from narumi.errors import EngineUnavailableError, InvalidArgumentError
+from narumi.errors import EngineUnavailableError
 from narumi.llm.base import CapabilityProfile
 
 PROVIDER_NAME = "claude-agent-sdk"
 ENV_MODEL = "NARUMI_CLAUDE_MODEL"
-"""Optional model override passed to ``ClaudeAgentOptions(model=…)``; default = CLI default."""
 
 PROFILE = CapabilityProfile(
-    vision=True,
+    vision=False,
     context_window=200_000,
-    cost_class="subscription",
+    cost_class="api",
     data_destination="anthropic",
-    tool_use=True,
+    tool_use=False,
     max_output_tokens=8192,
 )
-
-
-def _import_sdk():  # noqa: ANN202 - module object, typed via attribute access below
-    try:
-        import claude_agent_sdk
-    except ImportError as exc:  # pragma: no cover - depends on the environment
-        raise EngineUnavailableError(
-            "claude-agent-sdk is not installed (uv sync --extra claude)",
-            details={"provider": PROVIDER_NAME, "error": str(exc)},
-        ) from exc
-    return claude_agent_sdk
 
 
 class ClaudeAgentSDKProvider:
@@ -39,7 +26,8 @@ class ClaudeAgentSDKProvider:
     profile = PROFILE
 
     def __init__(self, *, model: str | None = None) -> None:
-        _import_sdk()
+        # Preserve legacy model configuration until the stage-selection migration.
+        # Do not initialize the SDK or inherit the user's Claude login/configuration.
         self.model = model or os.environ.get(ENV_MODEL) or None
 
     def complete(
@@ -50,56 +38,11 @@ class ClaudeAgentSDKProvider:
         images: list[Path] | None = None,
         max_tokens: int | None = None,
     ) -> str:
-        if images:
-            # The installed SDK documents string / text-dict prompts only; do not guess the wire
-            # format for image blocks.
-            raise InvalidArgumentError(
-                "claude-agent-sdk provider does not accept image inputs in this version",
-                details={"provider": PROVIDER_NAME, "images": [str(p) for p in images]},
-            )
-        try:
-            return asyncio.run(self._collect(prompt, system))
-        except RuntimeError as exc:
-            raise EngineUnavailableError(
-                "claude-agent-sdk provider must be called outside a running event loop",
-                details={"provider": PROVIDER_NAME, "error": str(exc)},
-            ) from exc
-
-    async def _collect(self, prompt: str, system: str | None) -> str:
-        sdk = _import_sdk()
-        options = sdk.ClaudeAgentOptions(
-            system_prompt=system,
-            max_turns=1,
-            tools=[],
-            allowed_tools=[],
-            permission_mode="dontAsk",
-            model=self.model,
+        raise EngineUnavailableError(
+            "Claude Agent SDK generation is unavailable until isolated API-key authentication "
+            "and disabled history persistence have been verified",
+            details={
+                "provider": PROVIDER_NAME,
+                "reason": "sdk_authentication_and_history_isolation_unverified",
+            },
         )
-        chunks: list[str] = []
-        try:
-            async for message in sdk.query(prompt=prompt, options=options):
-                if isinstance(message, sdk.AssistantMessage):
-                    if message.error is not None:
-                        raise EngineUnavailableError(
-                            f"claude-agent-sdk answered with error {message.error}",
-                            details={"provider": PROVIDER_NAME, "error": message.error},
-                        )
-                    for block in message.content:
-                        if isinstance(block, sdk.TextBlock):
-                            chunks.append(block.text)
-                elif isinstance(message, sdk.ResultMessage) and message.is_error:
-                    raise EngineUnavailableError(
-                        f"claude-agent-sdk run failed: {message.subtype}",
-                        details={"provider": PROVIDER_NAME, "result": message.result},
-                    )
-        except sdk.ClaudeSDKError as exc:
-            raise EngineUnavailableError(
-                f"claude-agent-sdk is unavailable: {exc}",
-                details={"provider": PROVIDER_NAME, "error": type(exc).__name__},
-            ) from exc
-        text = "".join(chunks).strip()
-        if not text:
-            raise EngineUnavailableError(
-                "claude-agent-sdk returned no text", details={"provider": PROVIDER_NAME}
-            )
-        return text

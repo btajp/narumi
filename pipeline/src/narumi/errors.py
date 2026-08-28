@@ -20,6 +20,9 @@ class ErrorCode(StrEnum):
     POLICY_VIOLATION = "policy_violation"
     RECORDER_UNAVAILABLE = "recorder_unavailable"
     ENGINE_UNAVAILABLE = "engine_unavailable"
+    CONFIGURATION_CONFLICT = "configuration_conflict"
+    AUTHENTICATION_REQUIRED = "authentication_required"
+    MODEL_UNAVAILABLE = "model_unavailable"
     INTERNAL = "internal"
 
 
@@ -84,3 +87,15 @@ class RecorderUnavailableError(NarumiError):
 
 class EngineUnavailableError(NarumiError):
     code = ErrorCode.ENGINE_UNAVAILABLE
+
+
+class ConfigurationConflictError(NarumiError):
+    code = ErrorCode.CONFIGURATION_CONFLICT
+
+
+class AuthenticationRequiredError(NarumiError):
+    code = ErrorCode.AUTHENTICATION_REQUIRED
+
+
+class ModelUnavailableError(NarumiError):
+    code = ErrorCode.MODEL_UNAVAILABLE

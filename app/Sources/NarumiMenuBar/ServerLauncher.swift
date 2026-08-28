@@ -206,11 +206,13 @@ final class ServerLauncher {
         discardRuntimeContext()
         syncProcess = nil
         do {
+            try config.validateSecureEndpoint()
+            try await client.configure(config)
             if config.requiresOwnedServer {
                 // Check before any sync/recovery, including when a stale server answers
                 // perfectly valid MCP. Its process and runtime are not ours to change.
                 try LocalServerPort.requireAvailable(config.port)
-            } else if await serverInfo() != nil {
+            } else if try await serverInfo() != nil {
                 try Task.checkCancellation()
                 state = .external(config.serverURL)
                 return
@@ -249,8 +251,9 @@ final class ServerLauncher {
             if mode == .bundled {
                 // Sync may take several minutes; check again immediately before launch.
                 try LocalServerPort.requireAvailable(config.port)
-                await client.reset()
             }
+            _ = try config.validatedKeychainHelper()
+            await client.reset()
             let pid = try await launchAndWait(command, mode: mode, identity: identity)
             try Task.checkCancellation()
             guard let process, process.isRunning, process.processIdentifier == pid else {
@@ -271,9 +274,7 @@ final class ServerLauncher {
         } catch {
             let message = error.localizedDescription
             note("startup failed: \(message)")
-            if config.runtimeMode == .bundled {
-                await stopManagedProcess(timeout: Self.stopTimeout)
-            }
+            await stopManagedProcess(timeout: Self.stopTimeout)
             let recoveryError = recoverFailedInstallation()
             state = .failed(message + (recoveryError.map { "\n" + $0 } ?? ""))
         }
@@ -352,7 +353,7 @@ final class ServerLauncher {
             guard self.process === process, process.isRunning else {
                 throw StartupFailure(message: "サーバーが起動確認前に終了しました（ログ参照）")
             }
-            if let info = await serverInfo() {
+            if let info = try await serverInfo(expectedProcessID: pid) {
                 try Task.checkCancellation()
                 guard self.process === process, process.isRunning else {
                     throw StartupFailure(message: "サーバーが起動確認中に終了しました（ログ参照）")
@@ -364,14 +365,36 @@ final class ServerLauncher {
         throw StartupFailure(message: ServerState.startupTimeoutMessage)
     }
 
-    private func serverInfo() async -> ServerInfo? {
+    private func serverInfo(expectedProcessID: Int32? = nil) async throws -> ServerInfo? {
+        // A legacy runtime directory may need its owner-only migration during startup.
+        // Absence never establishes trust; every present bootstrap still goes through the
+        // descriptor/ACL/pin checks before even the first initialize request.
+        let bootstrapFile = config.bootstrapDataRoot.appendingPathComponent("runtime/server/bootstrap.json")
+        guard FileManager.default.fileExists(atPath: bootstrapFile.path) else { return nil }
         do {
+            try await client.prepareConnection(
+                expectedProcessID: expectedProcessID,
+                expectedProcessGroup: expectedProcessID == nil ? nil : processGroup)
             let result = try await client.callTool(ToolCatalog.getServerInfo, arguments: [:])
-            guard let content = result.structuredContent else { return nil }
-            return try JSONDecoder().decode(ServerInfo.self, from: content.serialized())
-        } catch {
+            guard let content = result.structuredContent else { throw MCPConnectionError.invalidBootstrap }
+            let info = try JSONDecoder().decode(ServerInfo.self, from: content.serialized())
+            guard RecordingPermissionContract.supportsSetup(info.contractVersion) else {
+                throw MCPConnectionError.incompatibleContract
+            }
+            return info
+        } catch MCPConnectionError.bootstrapUnavailable {
             await client.reset()
             return nil
+        } catch MCPConnectionError.serverUnavailable {
+            await client.reset()
+            return nil
+        } catch MCPConnectionError.transportFailed {
+            // The owner may have published bootstrap just before its listening socket is ready.
+            await client.reset()
+            return nil
+        } catch {
+            await client.reset()
+            throw error
         }
     }
 

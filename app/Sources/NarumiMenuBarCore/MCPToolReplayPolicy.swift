@@ -1,18 +1,23 @@
-/// Shared admission rules for automatic MCP retries. Permission setup can open an OS
-/// prompt even when its response is lost, so only a new explicit user action may resend it.
+/// Only known local reads may be replayed after a lost MCP session. Mutations and provider
+/// metadata refreshes reconcile their original operation instead of automatically resending.
 public enum MCPToolReplayPolicy {
     public static func allowsSessionRetry(tool: String, refreshingPermissions: Bool = false) -> Bool {
-        guard tool != ToolCatalog.configureRecordingPermission else { return false }
-        // A replacement session may use an older contract that rejects the refresh input.
-        // Rediscover its version with an empty probe instead of replaying that input.
-        return tool != ToolCatalog.getServerInfo || !refreshingPermissions
+        if tool == ToolCatalog.getServerInfo { return !refreshingPermissions }
+        let reads: Set<String> = [
+            ToolCatalog.getRecordingStatus, ToolCatalog.listMeetings, ToolCatalog.searchTranscripts,
+            ToolCatalog.getMeeting, ToolCatalog.getMinutes, ToolCatalog.getTranscript,
+            ToolCatalog.listExportDestinations, ToolCatalog.getJobStatus, ToolCatalog.listProfiles,
+            ToolCatalog.getProfile, ToolCatalog.getGaiaConnection,
+            ToolCatalog.listProviders, ToolCatalog.listProviderConnections, ToolCatalog.getProviderAuthStatus,
+        ]
+        return reads.contains(tool)
     }
 
     public static func createsJob(
         tool: String, autoProcess: Bool? = nil, autoRegenerate: Bool? = nil
     ) -> Bool {
         switch tool {
-        case ToolCatalog.regenerate, ToolCatalog.exportMinutes:
+        case ToolCatalog.regenerate, ToolCatalog.exportMinutes, ToolCatalog.prepareProviderRuntime:
             return true
         case ToolCatalog.importRecording, ToolCatalog.stopRecording:
             return autoProcess != false

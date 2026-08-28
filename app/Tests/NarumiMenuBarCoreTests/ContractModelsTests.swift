@@ -268,7 +268,7 @@ final class ContractModelsTests: XCTestCase {
     func testGetProfile() throws {
         let responses = try decodeAll(ProfileResponse.self, tool: "get_profile")
         XCTAssertEqual(responses.first?.profile.name, "customer-meetings")
-        XCTAssertEqual(responses.first?.profile.config.externalSendPolicy, "subscription_ok")
+        XCTAssertEqual(responses.first?.profile.config.externalSendPolicy, "api_ok")
     }
 
     func testSetProfile() throws {
@@ -290,6 +290,13 @@ final class ContractModelsTests: XCTestCase {
         XCTAssertEqual(http.serverInstanceID, "00000000-0000-4000-8000-000000000001")
         XCTAssertTrue(http.capabilities.recording)
         XCTAssertFalse(http.capabilities.permissionSetupInProgress)
+        XCTAssertEqual(http.capabilities.workflow?.providerConnections, true)
+        XCTAssertEqual(http.capabilities.workflow?.providerModels, true)
+        XCTAssertEqual(http.capabilities.workflow?.stageModelSelection, false)
+        XCTAssertEqual(http.capabilities.workflow?.ensembleGeneration, false)
+        XCTAssertEqual(http.secureTransport?.mode, "pinned_tls")
+        XCTAssertEqual(http.secureTransport?.tlsRequired, true)
+        XCTAssertEqual(http.secureTransport?.clientAuthRequired, true)
         XCTAssertEqual(http.capabilities.permissions?.screenRecording, "granted")
         XCTAssertEqual(http.diagnostics.ffmpeg?.version, "7.1.1")
         XCTAssertEqual(http.diagnostics.recorderPath, "/Applications/narumi.app/Contents/MacOS/narumi-recorder")
@@ -310,7 +317,8 @@ final class ContractModelsTests: XCTestCase {
         XCTAssertNil(legacy.serverInstanceID)
         let initialized = ServerInfo(
             name: legacy.name, serverVersion: legacy.serverVersion, contractVersion: legacy.contractVersion,
-            capabilities: legacy.capabilities, diagnostics: legacy.diagnostics)
+            capabilities: legacy.capabilities, diagnostics: legacy.diagnostics,
+            secureTransport: legacy.secureTransport)
         XCTAssertEqual(initialized, legacy)
         let roundTrip = try JSONDecoder().decode(ServerInfo.self, from: JSONEncoder().encode(initialized))
         XCTAssertEqual(roundTrip, legacy)

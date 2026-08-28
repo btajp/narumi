@@ -1,6 +1,6 @@
 [project]
 name = "narumi-server"
-version = "0.1.4"
+version = "0.2.0"
 description = "narumi MCP server: contract-driven tool registration over stdio / Streamable HTTP"
 requires-python = ">=3.12"
 dependencies = [
@@ -11,6 +11,9 @@ dependencies = [
   "uvicorn>=0.30",
   "anyio>=4.5",
 ]
+
+[project.optional-dependencies]
+secure = ["cryptography>=44", "httpx2>=2"]
 
 [project.scripts]
 narumi = "narumi_server.cli_tools:main"

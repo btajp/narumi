@@ -75,7 +75,7 @@
     },
     "external_send_policy": {
       "type": "string",
-      "description": "What may leave the machine. local_only: nothing. subscription_ok: subscription providers (Claude Agent SDK / Codex) allowed. api_ok: metered APIs allowed too.",
+      "description": "What may leave the machine. local_only: nothing. subscription_ok: approved subscription authentication routes allowed. api_ok: metered APIs allowed too. The actual authentication route determines billing; Claude Agent SDK API-key use requires api_ok, and unapproved subscription login is unavailable.",
       "enum": ["local_only", "subscription_ok", "api_ok"]
     },
     "job_status": {
@@ -84,7 +84,7 @@
     },
     "job_kind": {
       "type": "string",
-      "enum": ["process", "regenerate", "export"]
+      "enum": ["process", "regenerate", "export", "provider_setup"]
     },
     "job": {
       "type": "object",
@@ -122,6 +122,9 @@
         "policy_violation",
         "recorder_unavailable",
         "engine_unavailable",
+        "configuration_conflict",
+        "authentication_required",
+        "model_unavailable",
         "internal"
       ]
     },

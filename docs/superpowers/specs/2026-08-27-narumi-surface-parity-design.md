@@ -14,9 +14,10 @@
 | 会議一覧（状態・進行中ジョブ・検索） | `list_meetings`（`active_job` を追加）/ `search_transcripts`（新規）/ `get_job_status` | 実装済み |
 | 会議詳細: 議事録プレビュー（版切替）/ 文字起こし / コンテキスト / エクスポート履歴 / バンドルを Finder で開く | `get_meeting` / `get_minutes`（新規）/ `get_transcript` | 実装済み |
 | コンテキスト登録（貼り付け・URL・ファイルドロップ）→ 必要なら再生成 | `register_context` / `regenerate` | 実装済み |
-| 会議設定（エンジン / LLM / 送信ポリシー / 自分の名前 / 語彙 / scope） | `set_meeting_config` | 実装済み |
+| 会議設定（エンジン / LLM / 送信ポリシー / 自分の名前 / 語彙 / scope） | `set_meeting_config` | 旧来の単一プロバイダ選択まで実装済み。モデル適用・工程別設定は未対応 |
 | 既定プロファイル（新規会議の既定設定・既定エクスポート先） | `list_profiles` / `get_profile` / `set_profile` / `delete_profile`（新規） | 実装済み |
 | Gaia 接続（URL・API キーの設定、無効化、接続テスト） | `get_gaia_connection` / `set_gaia_connection` / `test_gaia_connection` | 実装済み（専用シート。キーは write-only） |
+| プロバイダ接続（保存・認証・解除・runtime 検査・モデル候補） | `list_providers` / `list_provider_connections` / `set_provider_connection` / `delete_provider_connection` / `prepare_provider_runtime` / `authenticate_provider_connection` / `get_provider_auth_status` / `test_provider_connection` / `list_provider_models` | 0.2.0 開発版で実装・fake 統合検証済み。Anthropic API / Claude Agent SDK / Ollama。生成への適用は後続 |
 | エクスポート（md / html、保存先選択、後から再エクスポート） | `export_minutes` / `list_export_destinations` | 実装済み |
 | 既存録画ファイルの取り込み（Zoom ローカル録画等） | `import_recording`（新規） | 実装済み |
 | 録画トラック破棄（文字起こし後に動画・音声を消す）/ 会議削除 | `discard_tracks` / `delete_meeting`（新規） | 実装済み |
@@ -25,12 +26,19 @@
 | 診断: マイク・画面収録の許可要求 / macOS 設定を開く / 状態再確認 | `configure_recording_permission` / `get_server_info`（`refresh_permissions`） | 契約 v1.1。録画を伴わない権限設定 |
 | サーバー起動・停止・再起動 / ログ / アップデート確認 | アプリ固有（プロセス管理・Sparkle。データ操作ではない） | 実装済み（メニューバー + 診断シート） |
 
+プロバイダ接続・モデル選択・複数生成の追加設計は
+[プロバイダ・モデル設定と議事録生成方式](2026-08-28-provider-workflow-design.md)を参照。
+接続管理は PR 1、モデル選択・複数生成は後続 PR として進める。
+以下の v1 の「実装済み」は従来の操作範囲についての記録であり、
+ツール名の一致だけで全設定項目の UI パリティが完成したとは扱わない。
+
 ## 契約 v1 への追加（初回リリース前なので contract_version は 1.0.0 のまま）
 
 共通: 既存規約どおり（書き込みは `request_id`、読み取りは `readOnlyHint`、scope セレクタ、error_envelope）。
 
 以下は初期 v1.0 の設計。権限設定の追加で契約は v1.1・28 ツールとなる。
 追加仕様は [録画権限のセットアップ導線](2026-08-28-recording-permission-setup-design.md) を参照。
+未公開 v2 はプロバイダ接続 9 ツールを追加して 37 ツール。常駐通信は TLS と client token を必須とする。
 
 - `get_recording_status` {} → `{active, meeting_id?, meeting_name?, started_at?, elapsed_sec?, tracks?: {name: relpath}}`。readOnly
 - `get_minutes` {meeting_id, version?（既定 latest）, scope?} → `{meeting_id, version, markdown, generated_at, provider, unresolved_speakers: [str], available_versions: [int]}`。readOnly
@@ -52,6 +60,12 @@
 - 出力は JSON（`--pretty` 既定、`--raw` で 1 行）。エラーは error_envelope をそのまま stderr に出し exit 2
 - テスト: 契約の全ツールにサブコマンドがあること、オプション生成がスキーマと一致すること、in-process 実行の代表ケース、HTTP 経由の代表ケース（テスト内で起動したサーバーに接続）
 - v1.1 の `configure_recording_permission` も常駐サーバー必須。in-process の別 controller から許可要求しない。
+
+v2 では接続仕様を変更する。所有者限定 bootstrap の TLS pin と Keychain の token を使用し、
+旧 HTTP・異常な bootstrap・不正な証明書から in-process へ降格しない。
+プロバイダ操作と秘密入力を持つ操作は認証済み常駐サーバーに限定する。
+秘密の CLI 入力は非表示プロンプト / stdin に限り、argv の値や秘密入り `--json` は拒否する。
+他の MCP クライアントからは `narumi-server --stdio-bridge` を使う。
 
 ## パリティ検査
 - 契約 ↔ CLI: 自動生成なので構造的に一致。テストで確認

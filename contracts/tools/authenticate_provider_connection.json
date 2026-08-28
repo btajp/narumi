@@ -1,0 +1,136 @@
+{
+  "name": "authenticate_provider_connection",
+  "title": "Authenticate provider connection",
+  "description": "Start, cancel or log out a connection-scoped authentication operation using approved auth_methods only. PR1 supports API-key verification and local Ollama; it never offers Claude subscription login, reads ambient SDK sessions or accepts caller-supplied URLs, tokens or commands. All actions require request_id and expected_revision. cancel additionally requires operation_id; start and logout reject operation_id. start_request_id maps to the original start receipt and survives response loss. Query get_provider_auth_status rather than automatically starting again. Long-running work returns immediately with a public operation; cancel may remain pending until owned work exits. Logout clears only the chosen connection's credential/session and invalidates its checks. Only official, explicitly supported authentication or metadata requests may leave the machine; no meeting data or generation is sent. On failure returns an error_envelope (isError=true) with code: invalid_argument, not_found, configuration_conflict, busy, authentication_required, engine_unavailable, internal. All provider operations require the authenticated resident server; no implicit in-process or unauthenticated HTTP fallback is allowed.",
+  "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "connection_id": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_connection_id"
+      },
+      "expected_revision": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_connection_revision"
+      },
+      "action": {
+        "type": "string",
+        "enum": [
+          "start",
+          "cancel",
+          "logout"
+        ]
+      },
+      "operation_id": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_auth_operation_id"
+      },
+      "request_id": {
+        "$ref": "../defs/common.json#/$defs/request_id"
+      }
+    },
+    "required": [
+      "connection_id",
+      "expected_revision",
+      "action",
+      "request_id"
+    ],
+    "additionalProperties": false,
+    "allOf": [
+      {
+        "if": {
+          "properties": {
+            "action": {
+              "const": "cancel"
+            }
+          },
+          "required": [
+            "action"
+          ]
+        },
+        "then": {
+          "required": [
+            "operation_id"
+          ]
+        },
+        "else": {
+          "not": {
+            "required": [
+              "operation_id"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "operation": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_auth_operation"
+      }
+    },
+    "required": [
+      "operation"
+    ],
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {
+        "connection_id": "conn-0123456789ab",
+        "expected_revision": 2,
+        "action": "start",
+        "request_id": "provider-request-20260828-001"
+      },
+      {
+        "connection_id": "conn-0123456789ab",
+        "expected_revision": 2,
+        "action": "cancel",
+        "operation_id": "auth-0123456789ab",
+        "request_id": "provider-auth-cancel-002"
+      },
+      {
+        "connection_id": "conn-0123456789ab",
+        "expected_revision": 2,
+        "action": "logout",
+        "request_id": "provider-auth-logout-003"
+      }
+    ],
+    "output": [
+      {
+        "operation": {
+          "operation_id": "auth-0123456789ab",
+          "connection_id": "conn-0123456789ab",
+          "connection_revision": 2,
+          "server_instance_id": "00000000-0000-4000-8000-000000000001",
+          "start_request_id": "provider-request-20260828-001",
+          "action": "start",
+          "state": "succeeded",
+          "authorization_url": null,
+          "reason": null,
+          "created_at": "2026-08-28T09:00:00Z",
+          "updated_at": "2026-08-28T09:00:00Z"
+        }
+      },
+      {
+        "operation": {
+          "operation_id": "auth-0123456789ab",
+          "connection_id": "conn-0123456789ab",
+          "connection_revision": 2,
+          "server_instance_id": "00000000-0000-4000-8000-000000000001",
+          "start_request_id": "provider-request-20260828-001",
+          "action": "start",
+          "state": "unknown",
+          "authorization_url": null,
+          "reason": "authentication_operation_interrupted",
+          "created_at": "2026-08-28T09:00:00Z",
+          "updated_at": "2026-08-28T09:00:00Z"
+        }
+      }
+    ]
+  }
+}

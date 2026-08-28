@@ -1,13 +1,14 @@
 # narumi app（Swift Package）
 
-録画 MVP（Step 1）の Swift 側。4 つのターゲットからなる。
+録画・会議管理・接続設定を扱う Swift アプリ。製品コードは 5 つのターゲットからなる。この README は 0.2.0 の接続管理までを扱う。
 
 | ターゲット | 種別 | 役割 |
 |---|---|---|
 | `NarumiRecorderKit` | ライブラリ | ScreenCaptureKit キャプチャ → AVAssetWriter で **別ファイル** 書き出し。イベント型・引数解析・ディスプレイ選択などの純粋ロジックはこの中の SCK 非依存な型に置き、`swift test` で検証する |
 | `narumi-recorder` | CLI | server がサブプロセスとして起動する録画ヘルパー。stdout に JSON Lines でイベントを出す |
-| `NarumiMenuBarCore` | ライブラリ（Foundation のみ） | メニューバーアプリの純粋ロジック。サーバー設定の解決（`ServerConfig`。ランタイムモード判定を含む）、起動コマンドの組み立て（`ServerCommand`）、サーバー状態と表示文言（`ServerState` / `ServerStatusText`）、同梱ランタイムの manifest と同期手順（`RuntimeManifest` / `RuntimeSyncPlan`）、契約レスポンスのモデル（`ContractModels`）、表示整形（`Formatting`）、議事録 markdown のブロック分割（`MarkdownBlocks`）、ツール名の一覧（`ToolCatalog`）。AppKit にも Sparkle にも依存せず `swift test` で検証する |
-| `NarumiMenuBar` | メニューバーアプリ `narumi.app` | MCP クライアント。メニューバー（録画開始 / 停止）とメインウィンドウ（後述）から server の公開ツール（`ToolCatalog.allUsed` = 契約の全 28 ツール）を呼ぶだけで、ファイルや recorder には触れない（AGENTS.md 絶対原則 3）。加えて `narumi-server` の**プロセス**を起動・停止する（`ServerLauncher`。後述「起動フロー」） |
+| `narumi-keychain` | 専用ヘルパー | プロバイダの API キーと常駐接続トークンを macOS Keychain で扱う。秘密情報は引数や環境変数に置かず、匿名パイプで受け渡す |
+| `NarumiMenuBarCore` | ライブラリ（Foundation / Security） | サーバー設定・起動コマンド・状態表示、同梱ランタイムの同期手順、契約型、表示整形、markdown 分割、ツール名一覧、TLS 起動情報と証明書の検証、Keychain ヘルパーとの通信、プロバイダ設定の状態管理。AppKit / Sparkle に依存せず、I/O を差し替えて `swift test` で検証する |
+| `NarumiMenuBar` | メニューバーアプリ `narumi.app` | MCP クライアント。メニューとメインウィンドウから server の公開ツール（`ToolCatalog.allUsed` = 契約 2.0.0 の全 37 ツール）を呼び、会議バンドルや recorder には直接触れない。加えて `narumi-server` のプロセス管理と、接続のための起動情報・Keychain トークンの取得を行う |
 
 ## 利用者向けの導入・更新
 
@@ -21,18 +22,25 @@
 ```sh
 cd app
 swift build                 # debug
-swift build -c release      # app/.build/release/narumi-recorder を生成（server が探すパス）
+swift build -c release      # narumi-recorder / narumi-keychain / NarumiMenuBar を生成
 swift test                  # XCTest（下記の注意を参照）
-scripts/build-app.sh        # リポジトリ直下から。dist/narumi.app を組み立てて ad-hoc 署名
+cd ..
+scripts/build-app.sh        # dist/narumi.app を組み立て、両ヘルパーを同梱して ad-hoc 署名
 ```
 
 - 要件: macOS 15 以降、Swift 6.0 以降のツールチェーン。外部パッケージ依存は Sparkle（`NarumiMenuBar` のみが依存。初回ビルド時に GitHub から取得）だけで、引数解析は自前。
 - **`swift test` には Xcode が必要**。`xcode-select -p` が `/Library/Developer/CommandLineTools` を指している環境では XCTest が無く `no such module 'XCTest'` になる。切り替えずに実行するには `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test`。ビルド（`swift build`）は Command Line Tools だけで通る。
-- テストは ScreenCaptureKit・TCC・ネットワークに依存しない（イベント JSON の厳密一致、引数解析、ディスプレイ選択、ファイル名、`recorder.json` の書き出し。`NarumiMenuBarCore` はリポジトリ解決の優先順位、起動コマンドの argv / 環境変数、ポートからの URL 導出、ログパス、状態遷移と表示文言）。
+- 通常のテストは実録画・TCC 許可・実 Keychain・プロバイダへの通信を使わない。契約型、起動コマンド、TLS 起動情報、秘密入力の消去、認証・準備ジョブの応答喪失時の状態復旧を fake と一時ファイルで検証する。実 API・SDK 実行・正式署名版の Keychain アクセスは未検証。
 
 ## パリティ検査（アプリ ⊆ 契約）
 
 アプリが呼ぶ MCP ツール名は `NarumiMenuBarCore` の `ToolCatalog` に集約する（`ToolCatalog.startRecording` / `.stopRecording` / `.getServerInfo`、一覧は `ToolCatalog.allUsed`）。`NarumiMenuBar` はツール呼び出しに文字列リテラルではなくこの定数を使う。`ToolCatalogTests` が `#filePath` からリポジトリルート（`contracts/manifest.json` を含むディレクトリ）を探して manifest を読み、`allUsed` の全ツールが契約に存在すること・一覧が空でなく重複もないことを `swift test` で検査する（ネットワーク不要）。アプリに新しいツール呼び出しを足すときは、必ず `ToolCatalog` に定数を追加して `allUsed` に載せる（AGENTS.md 絶対原則 3、`docs/superpowers/specs/2026-08-27-narumi-surface-parity-design.md`）。
+
+## `narumi-keychain` ヘルパー
+
+`scripts/build-app.sh` は `Contents/MacOS/narumi-keychain` を録画ヘルパーと同様に同梱・署名する。Keychain の service は `jp.btajp.narumi.secrets.v1` 固定で、操作は narumi 専用 account の取得・保存・削除に限定する。アプリもサーバーもこのヘルパーを経由し、秘密値をコマンド行や環境変数へ渡さない。
+
+アプリがサーバーへ渡す `NARUMI_KEYCHAIN_HELPER` は実行ファイルの絶対パスであり、秘密値ではない。通常はアプリが解決するため利用者の設定は不要。ヘルパーが見つからない、Keychain が使えないなどの失敗では、平文ファイルへの保存や未認証通信に切り替えずエラーにする。Gaia 接続のキーは従来の `gaia.json` 保存のままで、この変更では移行しない。
 
 ## `narumi-recorder` CLI
 
@@ -99,23 +107,24 @@ server の `RecordingController` は次の順で実行ファイルを探す。
 - `NSStatusItem`: 単色の状態アイコンと `narumi` の名前を表示する。メニューは「narumi を開く」/「録画開始…」「録画停止」/「サーバー: <状態>」/「サーバーを再起動」「リポジトリを選択…」「ログを開く」/「アップデートを確認…」/「終了」。
 - 「録画開始…」は `NSAlert` で会議名（必須）・プロファイル・scope（どちらも空なら既定）を聞き、`start_recording {meeting_name, profile?, scope?, request_id}` を呼ぶ。「録画停止」は `stop_recording {request_id}`。`request_id` は操作ごとに UUID を発番し、成否不明のジョブ要求を再送するときは同じ ID と引数を使う。「録画開始…」はサーバーが稼働中（または外部サーバーに接続中）のときだけ有効。録画中は 5 秒ごとの `get_recording_status` で経過時間を「録画停止（h:mm:ss）」に表示し、他のクライアントが停止した場合も状態が追従する。
 - 「サーバー: …」はサーバーが稼働中 / 外部サーバーに接続中のとき 5 秒ごとに `get_server_info` を呼んで更新する（`server_version` / `contract_version` があれば表示。`capabilities.recording` が false なら「録画不可」）。それ以外の状態（起動中・停止・起動失敗・未設定）はランチャーの状態をそのまま表示する。
-- 接続先は `NARUMI_SERVER_URL` があればそれ、無ければ `http://127.0.0.1:<NARUMI_SERVER_PORT または 8765>/mcp`（起動するサーバーのポートと必ず一致する）。`MCPClient` は `initialize`（protocolVersion `2025-06-18`）→ `notifications/initialized` → `tools/call` を JSON-RPC 2.0 の POST で行い、`Mcp-Session-Id` を保持して送り返す。応答は `application/json` と `text/event-stream`（`data:` 行から同じ id の応答を取り出す）の両方を受け付ける。
+- 接続先の既定は `https://127.0.0.1:<NARUMI_SERVER_PORT または 8765>/mcp`。`NARUMI_SERVER_URL` を指定する場合も数値 loopback の HTTPS に限り、所有者専用の起動情報と一致する必要がある。証明書の pin・有効期限・接続先を検証してから Keychain の Bearer トークンで認証し、環境プロキシやリダイレクトを使わない。`MCPClient` は `initialize`（protocolVersion `2025-06-18`）→ `notifications/initialized` → `tools/call` を JSON-RPC 2.0 の POST で行い、`Mcp-Session-Id` を保持する。応答は `application/json` と `text/event-stream` を受け付ける。契約 2.x と認証付き TLS のメタデータを確認できなければ操作を開始しない。
 - ツールエラー（`isError` / 構造化 `{"error":{code,message}}`）は `NSAlert` で表示する。
 
 ## メインウィンドウ（「narumi を開く」）
 
-起動時に表示する SwiftUI ウィンドウ。閉じた後もメニューバーの「narumi を開く」で再表示できる。パリティ表（`docs/superpowers/specs/2026-08-27-narumi-surface-parity-design.md`「アプリの画面・操作一覧」）の全行を実装し、**データ操作はすべて MCP ツール**（`ToolCatalog` の定数のみ。AGENTS.md 絶対原則 3）。MCP 外の操作は、ツールが返したパスの Finder 表示と、サーバープロセス管理 / Sparkle（`MainWindowModel.HostActions` として AppDelegate が注入）だけ。
+起動時に表示する SwiftUI ウィンドウ。閉じた後もメニューバーの「narumi を開く」で再表示できる。**データ操作はすべて MCP ツール**（`ToolCatalog` の定数のみ。AGENTS.md 絶対原則 3）。MCP 外では、ツールが返したパスの Finder 表示、サーバープロセス管理 / Sparkle、接続のための起動情報と Keychain トークンの取得を行う。プロバイダ設定もアプリから直接ファイルへ保存せず、公開ツールを使う。
 
-- **構成**: `MainWindowView`（`NSWindow` + `NSHostingView`。AppDelegate が生成・保持）。上部に文字付きの録画開始操作と準備状態、録画中は経過時間と停止操作。左に会議一覧サイドバー、右に会議詳細のタブ（議事録 / 文字起こし / コンテキスト / 設定）。ツールバーに「ジョブ」「取り込み」「プロファイル」「Gaia 接続」「診断」。
+- **構成**: `MainWindowView`（`NSWindow` + `NSHostingView`。AppDelegate が生成・保持）。上部に文字付きの録画開始操作と準備状態、録画中は経過時間と停止操作。左に会議一覧サイドバー、右に会議詳細のタブ（議事録 / 文字起こし / コンテキスト / 設定）。ツールバーに「ジョブ」「取り込み」「プロファイル」「AI 接続」「Gaia 接続」「診断」。
 - **アクティベーション**: 起動時にウィンドウを開き `.regular`（Dock に出る）になる。閉じると `.accessory` のメニューバー常駐へ戻る。録画状態はメニューとメイン画面で共有し、操作より古いポーリング応答は採用しない。通信失敗を非録画へ変換せず、状態が確定するまで再開始を抑止する。
 - **会議一覧**: scope フィルタ（空白区切り。空 = scope なしのみ）と検索フィールド。チェックボックスで `list_meetings --query`（会議名・engagement）と `search_transcripts`（カタログ FTS の発話全文検索。ヒットを開くとその会議の文字起こしタブへ）を切り替える。行には状態と進行中ジョブ（`active_job`）のバッジ。
 - **録画中バナー**: `get_recording_status` が active のとき会議名・経過時間と「録画停止」（`stop_recording`）を表示。
 - **議事録タブ**: `get_minutes`（版ピッカーで `available_versions` を切替）。markdown は `MarkdownParser`（NarumiMenuBarCore）でブロック分割して描画。`unresolved_speakers` があれば実名未解決のコールアウト。「再生成」は force / reason 付きで `regenerate` → 返った job_id をジョブ一覧で追跡し、完了時に表示を再読込。「エクスポート」は `list_export_destinations` の宛先メニューで、markdown / html は `NSSavePanel` で保存先を選んで `export_minutes {options: {output_path, overwrite}}`。版の履歴とエクスポート履歴（`get_meeting`）も表示。
 - **文字起こしタブ**: `get_transcript`。ソースピッカー（merged / own-mic / own-system / ext-*）とセグメント表（タイムコード・話者名解決・全文選択可）。
 - **コンテキストタブ**: 登録済み一覧（`get_meeting.contexts`）と登録フォーム（`register_context`）。テキスト貼り付け / URL / ファイル（選択またはウィンドウへのドロップ）、source_type、ラベル、auto_regenerate。
-- **設定タブ**: `set_meeting_config` のフォーム。エンジン / LLM / 送信ポリシーの候補は `get_server_info.capabilities` から。危険な操作として `discard_tracks`（トラック選択 + 確認）と `delete_meeting`（確認。trash/ へ移動）。
+- **設定タブ**: `set_meeting_config` のフォーム。エンジン / LLM / 送信ポリシーの候補は `get_server_info.capabilities` から。現時点では従来のプロバイダ単一選択で、「AI 接続」の接続・モデル候補を工程へ適用する機能はない。危険な操作として `discard_tracks`（トラック選択 + 確認）と `delete_meeting`（確認。trash/ へ移動）。
 - **取り込みシート**: `import_recording`（mic / system / screen のパス、プロファイル、scope、copy / auto_process）。
 - **プロファイルシート**: `list_profiles` / `get_profile` / `set_profile`（make_default・自動エクスポート先を含む）/ `delete_profile`。
+- **AI 接続シート**: Anthropic API / Claude Agent SDK / ローカル Ollama の接続追加・編集・有効化・無効化・削除、認証確認・ログアウト、既存実行環境の検査、モデル候補の取得・参照。`list_providers` / `list_provider_connections` / `set_provider_connection` / `delete_provider_connection` / `prepare_provider_runtime` / `authenticate_provider_connection` / `get_provider_auth_status` / `test_provider_connection` / `list_provider_models` の 9 ツールを使う。認証状態・モデル取得状態・生成状態を別々に表示する。
 - **Gaia 接続シート**: `get_gaia_connection` / `set_gaia_connection` / `test_gaia_connection`。URL・write-only API キーを専用設定へ保存し、保存済み設定だけを接続テストする。同じ URL でキー欄が空なら維持、URL 変更時は旧キーを解除する。キーの明示削除・連携無効化も可能。キー入力は保存成功・失敗・シートを閉じる際に消去し、プロファイルや会議バンドルには渡さない。環境変数由来か保存済みか、接続先の契約版・クライアント名・既定 scope を表示する。
 - **診断シート**: 先頭にマイク・画面収録の状態と `configure_recording_permission` による許可要求・設定画面への導線を表示。設定復帰時と再確認ボタンは `get_server_info {refresh_permissions:true}` を使う。続いて capabilities / diagnostics（ffmpeg・データルートなど）、`rebuild_catalog`、MCP 外のプロセス操作（サーバー再起動 / ログを開く / アップデート確認）を表示する。
 - **ジョブ**: ウィンドウが開始したジョブ + 一覧の `active_job` を追跡し、ツールバーにバッジ表示。ポップオーバーから `cancel_job`。
@@ -123,15 +132,23 @@ server の `RecordingController` は次の順で実行ファイルを探す。
 
 純粋ロジック（契約レスポンスのモデル `ContractModels`、表示整形 `NarumiFormat` / `MeetingRowPresentation`、markdown 分割 `MarkdownParser`）は `NarumiMenuBarCore` にあり、`ContractModelsTests`（`contracts/tools/*.json` の examples.output をそのままデコード）・`FormattingTests`・`MarkdownBlocksTests` で検証する。
 
+### AI 接続の範囲と状態管理
+
+接続操作の手順は [README の AI プロバイダ接続](../README.md#ai-プロバイダの接続) を参照する。`ProviderSettingsStore` は設定の revision を使い、別クライアントとの更新競合を表示して再読み込みを求める。API キーは省略なら維持、明示削除なら解除する。入力は保存成功・失敗・画面を閉じる際に消去し、秘密入力を含む保存を通信断後に自動再送しない。
+
+認証確認は保存済みのキーを使うメタデータ照会で、会議データを送らない。応答が失われた場合は新しい認証操作を始めず、元の `operation_id` / `start_request_id` から状態を確認する。実行環境の準備も `provider_setup` ジョブとして追跡し、取消と状態確認を使う。この版の準備処理は既存依存の検査・検査結果の保存のみで、SDK・Ollama 本体・モデルを新規導入しない。
+
+モデル候補は確認用。工程別のモデル選択・パラメータ設定・議事録への適用、Codex App Server / OpenAI API、OpenAI 音声認識、複数生成からの統合は未対応。Claude Agent SDK は API キー方式のみで、SDK の認証・履歴の隔離を確認できるまで生成を拒否する。API のモデル候補が取得できても、SDK での実行成功や課金額の確認を意味しない。
+
 ## 起動フロー（narumi.app がサーバーを起動する）
 
-`narumi.app` を開くと、メニューバー UI 自身が `narumi-server` の**プロセス**を起動し、終了時に停止する。Terminal は不要（録画ボタンを押すだけ）。データ操作はこれまで通りすべて MCP ツール呼び出しで、アプリはバンドル・カタログ・録画ファイルに触れない（AGENTS.md 絶対原則 3）。新しい責務は「サーバープロセスの起動と停止」だけで、`ServerLauncher`（AppKit 側）と `NarumiMenuBarCore` の純粋ロジックに分かれている。
+`narumi.app` を開くと、メニューバー UI 自身が `narumi-server` のプロセスを起動し、終了時に停止する。Terminal は不要。データ操作はすべて MCP ツール呼び出しで、アプリは会議バンドル・カタログ・録画ファイルに直接触れない。プロセス管理と認証付き接続の準備を `ServerLauncher`（AppKit 側）と `NarumiMenuBarCore` が担当する。
 
-1. **外部サーバーの検出**: repo モードまたは明示的な `NARUMI_SERVER_URL` がある場合は既存サーバーへ接続できる。そのプロセスはアプリの終了時にも停止しない。通常の bundled 起動では未所有の既存サーバーを採用せず、ポート競合として表示する。
+1. **既存サーバーの検出**: repo モードまたは明示的な `NARUMI_SERVER_URL` がある場合は、同じデータルートの信頼できる起動情報を持つ常駐サーバーへ接続できる。そのプロセスはアプリの終了時にも停止しない。通常の bundled 起動では未所有の既存サーバーを採用せず、ポート競合として表示する。HTTP の応答だけで相手を採用せず、起動情報・証明書・認証の不整合はエラーにする。
 2. **リポジトリの解決**（repo モード時。優先順）: 環境変数 `NARUMI_REPO` → `UserDefaults` の `narumi.repoPath` → `<repo>/dist/narumi.app` の配置からの推定 → 未設定。repo モードでは `pyproject.toml` と `server/pyproject.toml` が必要。配布版のモード選択は後述の判定順に従い、保存した repoPath より同梱 runtime を優先する。
-3. **起動コマンド**: `/bin/zsh -lc 'exec uv run --project "$1" narumi-server --http --host 127.0.0.1 --port "$2" --recorder "$3"' narumi-server <repo> <port> <recorder>`。リポジトリ・ポート・recorder はシェル文字列に埋め込まず**位置パラメータ**（argv）で渡す（空白や日本語を含むパスでも壊れない）。環境変数で渡さないのは、ログインシェルの `~/.zshenv` / `~/.zprofile` がアプリの渡した環境の**後**に評価されるため: プロファイルに `export NARUMI_REPO=…` 等があると黙って上書きされ、別チェックアウトの server が起動したり、アプリがポーリングしないポートで bind されたりする。位置パラメータはプロファイルから書き換えられない。ログインシェル（`-l`）なので `~/.local/bin` / `/opt/homebrew/bin` / nix プロファイルなど利用者の PATH にある `uv` が使える（GUI アプリは launchd の最小限の PATH しか継承しない）。`--recorder` は同梱の `Contents/MacOS/narumi-recorder` があるときだけ付け、無ければ server 側の探索（`NARUMI_RECORDER` → `app/.build/{release,debug}/narumi-recorder`）に任せる。`NARUMI_HOME` が設定されていればそのまま引き継ぐ。カレントディレクトリはリポジトリ。stdin は `/dev/null`。
-4. **ポートと URL**: ポートは `NARUMI_SERVER_PORT`（既定 8765）。接続先 URL は `NARUMI_SERVER_URL` があればそれ、無ければ `http://127.0.0.1:<port>/mcp`。`NARUMI_SERVER_URL` だけが設定されている場合はその URL のポートで起動する。
-5. **起動待ち**: 1 秒ごとに `get_server_info` を最大 30 秒試し、応答したら「稼働中 v… 契約 …」。bundled モードは版・契約版・実体パスも照合する。失敗時は自分が起動したサーバーを停止し、未確定の runtime 切替を復元する。repo モードは、タイムアウト時も生きているプロセスを残し、終了または再起動で停止する。起動直後にプロセスが終了した場合も「起動失敗（ログ参照）」、稼働後に終了すると「停止 (exit N)」。
+3. **起動コマンド（repo）**: `/bin/zsh -lc` から `uv run --project <repo> narumi-server --http --host 127.0.0.1 --port <port> --data-root <data-root>` を起動する。リポジトリ・ポート・recorder・データルート・Keychain ヘルパーはシェル文字列に埋め込まず位置パラメータで渡す。ログインシェルで利用者の PATH を読み込んだ後にデータルートとヘルパーを固定し、シェル設定による接続先のずれを防ぐ。同梱 recorder があるときは `--recorder` を追加する。カレントディレクトリはリポジトリ、stdin は `/dev/null`。
+4. **ポート・起動情報・認証**: ポートは `NARUMI_SERVER_PORT`（既定 8765）。URL は明示的な `NARUMI_SERVER_URL` または `https://127.0.0.1:<port>/mcp` で、URL だけが設定されていればそのポートを使う。server はデータルートの `runtime/server/` に所有者専用の証明書・秘密鍵・`bootstrap.json` を用意し、認証トークンを Keychain へ保存する。アプリは起動情報の所有者・権限・通常ファイルであることと証明書を検証してから接続する。`--http` というフラグ名は維持するが、未認証の平文 HTTP ではない。
+5. **起動待ち**: 1 秒ごとに認証付き接続で `get_server_info` を最大 30 秒試し、サーバー識別情報・契約 2.x・TLS 必須のメタデータを確認したら「稼働中 v… 契約 …」。bundled モードは版・契約版・実体パスも照合する。失敗時は自分が起動したサーバーを停止し、未確定の runtime 切替を復元する。repo モードは、タイムアウト時も生きているプロセスを残し、終了または再起動で停止する。起動直後にプロセスが終了した場合も「起動失敗（ログ参照）」、稼働後に終了すると「停止 (exit N)」。
 
 ### サーバー関連のメニュー
 
@@ -155,7 +172,7 @@ server の `RecordingController` は次の順で実行ファイルを探す。
 - **bundled モード**: `.app` は `uv` バイナリ・`wheels/`・ハッシュ付き `requirements.txt`・`contracts/`・`manifest.json` を同梱する。起動時は既定のデータルート（または `NARUMI_HOME`）の `runtime/` に Python と venv を作る。`RuntimeSyncPlan` が Python の取得、relocatable な `venv.new` の作成、ハッシュ付き依存と本体 wheel のインストールを順に実行する。切替は journal に記録し、旧 venv を `venv.previous` に保持したまま新版を起動する。新 server の検証後に `installed.json` を確定し、旧 venv を片付ける。`--relocatable` は、移動後のエントリポイントが移動前のパスを参照しないために必要。
 - **再同期と復旧**: 起動のたびに `Resources/runtime/manifest.json` と `installed.json` を比較し、不一致なら同期する。旧 venv と旧 marker は、新 server の応答・期待版・recorder/contracts の実体確認まで保持する。失敗時は復元し、未完了の切替 journal があれば次回起動時に回復する。旧版へ黙って接続を切り替えることはしない。
 - **進捗・失敗**: 同期中はメニューに「サーバー: 環境を準備中…（<ステップ名>）」、uv の出力は `~/Library/Logs/narumi/runtime.log`。失敗（ネットワーク無しなど）は「起動失敗（ログ参照）」で止まり、「サーバーを再起動」で再試行する。黙って repo モードには落ちない。初回同期はネットワーク必須（Python 取得と PyPI から数百 MB）。
-- **サーバー起動（bundled）**: `<venv>/bin/python3 -I -m narumi_server.cli --http --host 127.0.0.1 --port <port> --recorder <.app>/Contents/MacOS/narumi-recorder`、環境変数 `NARUMI_CONTRACTS_DIR=<.app>/Contents/Resources/runtime/contracts`。Python の環境上書きは除外し、旧 checkout や user site を import しない。`NARUMI_HOME` は引き継ぐ。uv とサーバーは、固定の `/bin/sh` gate で所有情報の保存を待ってから絶対パスで起動する（ログインシェルや PATH 探索は使わない）。異常終了後も前回のプロセスが生きていれば、勝手に停止したり venv を置換したりせず、再同期を止める。
+- **サーバー起動（bundled）**: `<venv>/bin/python3 -I -m narumi_server.cli --http --host 127.0.0.1 --port <port> --data-root <data-root> --recorder <.app>/Contents/MacOS/narumi-recorder`。環境変数 `NARUMI_CONTRACTS_DIR` に同梱 contracts、`NARUMI_KEYCHAIN_HELPER` に同じアプリのヘルパーの絶対パスを渡す。Python の環境上書きは除外し、旧 checkout や user site を import しない。データルートはアプリと同じ値に固定する。uv とサーバーは、固定の `/bin/sh` gate で所有情報の保存を待ってから絶対パスで起動する（ログインシェルや PATH 探索は使わない）。異常終了後も前回のプロセスが生きていれば、勝手に停止したり venv を置換したりせず、再同期を止める。
 
 ## 自動更新（Sparkle）
 

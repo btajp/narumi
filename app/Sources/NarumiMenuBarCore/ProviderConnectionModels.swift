@@ -1,0 +1,189 @@
+import Foundation
+
+public enum ProviderAuthState: String, Codable, Sendable {
+    case unconfigured, unverified, authenticating, authenticated, failed, unknown
+}
+
+public enum ProviderCatalogState: String, Codable, Sendable {
+    case unfetched, ready, stale, failed
+    case authenticationRequired = "authentication_required"
+}
+
+public enum ProviderAuthOperationState: String, Codable, Sendable {
+    case pending, succeeded, failed, cancelled, unknown
+}
+
+public enum ProviderAuthAction: String, Codable, Sendable {
+    case start, cancel, logout
+}
+
+public enum ProviderGenerationState: String, Codable, Sendable {
+    case never, succeeded, failed, cancelled, unknown
+}
+
+public struct ProviderActiveAuth: Decodable, Equatable, Sendable {
+    public let operationID: String
+    public let startRequestID: String
+    public let serverInstanceID: String
+    public let state: ProviderAuthOperationState
+
+    enum CodingKeys: String, CodingKey {
+        case operationID = "operation_id"
+        case startRequestID = "start_request_id"
+        case serverInstanceID = "server_instance_id"
+        case state
+    }
+
+    public init(
+        operationID: String, startRequestID: String, serverInstanceID: String,
+        state: ProviderAuthOperationState
+    ) {
+        self.operationID = operationID
+        self.startRequestID = startRequestID
+        self.serverInstanceID = serverInstanceID
+        self.state = state
+    }
+}
+
+/// Only credential presence is returned; keys and SecretStore identifiers are not response fields.
+public struct ProviderConnection: Decodable, Equatable, Sendable {
+    public let connectionID: String
+    public let revision: Int
+    public let providerID: ProviderID
+    public let displayName: String
+    public let enabled: Bool
+    public let endpoint: String?
+    public let authMethod: ProviderAuthMethod
+    public let credentialPresent: Bool
+    public let authState: ProviderAuthState
+    public let catalogState: ProviderCatalogState
+    public let checkedAt: String?
+    public let activeAuth: ProviderActiveAuth?
+    public let lastGenerationState: ProviderGenerationState
+
+    enum CodingKeys: String, CodingKey {
+        case connectionID = "connection_id"
+        case revision
+        case providerID = "provider_id"
+        case displayName = "display_name"
+        case enabled, endpoint
+        case authMethod = "auth_method"
+        case credentialPresent = "credential_present"
+        case authState = "auth_state"
+        case catalogState = "catalog_state"
+        case checkedAt = "checked_at"
+        case activeAuth = "active_auth"
+        case lastGenerationState = "last_generation_state"
+    }
+
+    public init(
+        connectionID: String, revision: Int, providerID: ProviderID, displayName: String,
+        enabled: Bool, endpoint: String?, authMethod: ProviderAuthMethod,
+        credentialPresent: Bool, authState: ProviderAuthState, catalogState: ProviderCatalogState,
+        checkedAt: String?, activeAuth: ProviderActiveAuth?, lastGenerationState: ProviderGenerationState
+    ) {
+        self.connectionID = connectionID
+        self.revision = revision
+        self.providerID = providerID
+        self.displayName = displayName
+        self.enabled = enabled
+        self.endpoint = endpoint
+        self.authMethod = authMethod
+        self.credentialPresent = credentialPresent
+        self.authState = authState
+        self.catalogState = catalogState
+        self.checkedAt = checkedAt
+        self.activeAuth = activeAuth
+        self.lastGenerationState = lastGenerationState
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        connectionID = try container.decode(String.self, forKey: .connectionID)
+        revision = try container.decode(Int.self, forKey: .revision)
+        providerID = try container.decode(ProviderID.self, forKey: .providerID)
+        displayName = try container.decode(String.self, forKey: .displayName)
+        enabled = try container.decode(Bool.self, forKey: .enabled)
+        endpoint = try container.decode(String?.self, forKey: .endpoint)
+        authMethod = try container.decode(ProviderAuthMethod.self, forKey: .authMethod)
+        credentialPresent = try container.decode(Bool.self, forKey: .credentialPresent)
+        authState = try container.decode(ProviderAuthState.self, forKey: .authState)
+        catalogState = try container.decode(ProviderCatalogState.self, forKey: .catalogState)
+        checkedAt = try container.decode(String?.self, forKey: .checkedAt)
+        activeAuth = try container.decode(ProviderActiveAuth?.self, forKey: .activeAuth)
+        lastGenerationState = try container.decode(ProviderGenerationState.self, forKey: .lastGenerationState)
+        guard revision > 0, authMethod == (providerID == .ollama ? .none : .apiKey),
+            providerID != .ollama || !credentialPresent
+        else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .authMethod, in: container,
+                debugDescription: "Connection revision or authentication metadata violates the contract")
+        }
+    }
+}
+
+public struct ProviderAuthOperation: Decodable, Equatable, Sendable {
+    public let operationID: String
+    public let connectionID: String
+    public let connectionRevision: Int
+    public let serverInstanceID: String
+    public let startRequestID: String
+    public let action: ProviderAuthAction
+    public let state: ProviderAuthOperationState
+    public let authorizationURL: String?
+    public let reason: String?
+    public let createdAt: String
+    public let updatedAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case operationID = "operation_id"
+        case connectionID = "connection_id"
+        case connectionRevision = "connection_revision"
+        case serverInstanceID = "server_instance_id"
+        case startRequestID = "start_request_id"
+        case action, state
+        case authorizationURL = "authorization_url"
+        case reason
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+
+    public init(
+        operationID: String, connectionID: String, connectionRevision: Int,
+        serverInstanceID: String, startRequestID: String, action: ProviderAuthAction,
+        state: ProviderAuthOperationState, authorizationURL: String? = nil, reason: String?,
+        createdAt: String, updatedAt: String
+    ) {
+        self.operationID = operationID
+        self.connectionID = connectionID
+        self.connectionRevision = connectionRevision
+        self.serverInstanceID = serverInstanceID
+        self.startRequestID = startRequestID
+        self.action = action
+        self.state = state
+        self.authorizationURL = authorizationURL
+        self.reason = reason
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        operationID = try container.decode(String.self, forKey: .operationID)
+        connectionID = try container.decode(String.self, forKey: .connectionID)
+        connectionRevision = try container.decode(Int.self, forKey: .connectionRevision)
+        serverInstanceID = try container.decode(String.self, forKey: .serverInstanceID)
+        startRequestID = try container.decode(String.self, forKey: .startRequestID)
+        action = try container.decode(ProviderAuthAction.self, forKey: .action)
+        state = try container.decode(ProviderAuthOperationState.self, forKey: .state)
+        guard try container.decodeNil(forKey: .authorizationURL), connectionRevision > 0 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .authorizationURL, in: container,
+                debugDescription: "This provider contract does not support browser authentication")
+        }
+        authorizationURL = nil
+        reason = try container.decode(String?.self, forKey: .reason)
+        createdAt = try container.decode(String.self, forKey: .createdAt)
+        updatedAt = try container.decode(String.self, forKey: .updatedAt)
+    }
+}

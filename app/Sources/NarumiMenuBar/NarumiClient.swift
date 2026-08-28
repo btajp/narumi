@@ -55,7 +55,7 @@ struct NarumiClient: Sendable {
 
     // MARK: Plumbing
 
-    private func call<T: Decodable>(
+    func call<T: Decodable>(
         _ name: String, _ arguments: [String: JSONNode] = [:], expectedSessionGeneration: UInt64? = nil
     ) async throws -> T {
         let result: ToolCallResult
@@ -84,7 +84,7 @@ struct NarumiClient: Sendable {
         .string(UUID().uuidString)
     }
 
-    private static func arguments<T: Encodable>(_ request: T) throws -> [String: JSONNode] {
+    static func arguments<T: Encodable>(_ request: T) throws -> [String: JSONNode] {
         let data = try JSONEncoder().encode(request)
         guard case .object(let arguments) = try JSONNode.parse(data) else {
             throw ToolFailure(code: "protocol", message: "ツールの入力が JSON オブジェクトではありません")

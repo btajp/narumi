@@ -7,6 +7,7 @@ import time
 import uuid
 from pathlib import Path
 
+import pytest
 from conftest import TRANSPORT
 from narumi.bundle import Bundle
 from narumi.catalog import Catalog
@@ -55,3 +56,31 @@ def test_close_finalizes_recording_before_waiting_for_jobs(home: Path):
         assert job is not None and job["status"] == "succeeded"
     finally:
         catalog.close()
+
+
+def test_provider_shutdown_failure_does_not_skip_jobs_or_catalog(home: Path, monkeypatch):
+    closed = []
+
+    class BrokenProvider:
+        def close(self):
+            closed.append("providers")
+            raise RuntimeError("fixture provider shutdown failure")
+
+    ctx = build_context(home, provider_service=BrokenProvider())
+    shutdown_jobs = ctx.jobs.shutdown
+    close_catalog = ctx.catalog.close
+
+    def jobs(**kwargs):
+        closed.append("jobs")
+        shutdown_jobs(**kwargs)
+
+    def catalog():
+        closed.append("catalog")
+        close_catalog()
+
+    monkeypatch.setattr(ctx.jobs, "shutdown", jobs)
+    monkeypatch.setattr(ctx.catalog, "close", catalog)
+    with pytest.raises(RuntimeError, match="fixture provider shutdown failure"):
+        ctx.close()
+    ctx.close()
+    assert closed == ["providers", "jobs", "catalog"]

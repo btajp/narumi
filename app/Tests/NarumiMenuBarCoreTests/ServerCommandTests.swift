@@ -11,20 +11,22 @@ final class ServerCommandTests: XCTestCase {
     func config(
         recorder: URL? = nil, dataRoot: String? = nil, repository: URL? = nil,
         runtimeMode: ServerConfig.RuntimeMode? = .repo, bundledRuntime: BundledRuntime? = nil,
-        runtimePaths: RuntimePaths? = nil
+        runtimePaths: RuntimePaths? = nil, keychainHelper: URL? = nil
     ) -> ServerConfig {
         ServerConfig(
             repository: repository ?? repo,
             repositorySource: .userDefaults,
             port: 9000,
-            serverURL: URL(string: "http://127.0.0.1:9000/mcp")!,
+            serverURL: URL(string: "https://127.0.0.1:9000/mcp")!,
             recorder: recorder,
             logFile: URL(fileURLWithPath: "/Users/山田 太郎/Library/Logs/narumi/server.log"),
             dataRoot: dataRoot,
             runtimeMode: runtimeMode,
             bundledRuntime: bundledRuntime,
-            runtimePaths: runtimePaths ?? RuntimePaths(dataRoot: dataRootURL),
-            runtimeLogFile: URL(fileURLWithPath: "/Users/山田 太郎/Library/Logs/narumi/runtime.log"))
+            runtimePaths: runtimePaths ?? RuntimePaths(
+                dataRoot: dataRoot.map { URL(fileURLWithPath: $0, isDirectory: true) } ?? dataRootURL),
+            runtimeLogFile: URL(fileURLWithPath: "/Users/山田 太郎/Library/Logs/narumi/runtime.log"),
+            keychainHelper: keychainHelper)
     }
 
     func testArgumentsArePositionalParameters() throws {
@@ -36,28 +38,29 @@ final class ServerCommandTests: XCTestCase {
         XCTAssertEqual(
             script,
             "exec uv run --project \"$1\" narumi-server --http --host 127.0.0.1 --port \"$2\""
-                + " --recorder \"$3\"")
-        // Repo, port and recorder travel as argv after the script ($0 $1 $2 $3): a zsh profile
+                + " --recorder \"$3\" --data-root \"$4\"")
+        // Repo, port, recorder and root travel as argv after the script: a zsh profile
         // (`~/.zshenv` / `~/.zprofile`) can clobber exported variables, never positional
         // parameters — and paths with spaces / Japanese need no quoting either.
         XCTAssertEqual(
             command.arguments,
-            ["-lc", script, "narumi-server", "/Users/山田 太郎/src/narumi", "9000", recorder.path])
+            ["-lc", script, "narumi-server", "/Users/山田 太郎/src/narumi", "9000", recorder.path, dataRootURL.path])
         // Nothing configuration-specific in the shell text, and no env-var indirection.
         XCTAssertFalse(script.contains("/Users"))
         XCTAssertFalse(script.contains("9000"))
         XCTAssertFalse(script.contains("$NARUMI_"))
 
         XCTAssertEqual(command.environment["PATH"], "/usr/bin:/bin")  // inherited
-        XCTAssertNil(command.environment["NARUMI_HOME"])
+        XCTAssertEqual(command.environment["NARUMI_HOME"], dataRootURL.path)
         XCTAssertEqual(command.currentDirectory, repo)
     }
 
     func testRecorderClauseOmittedWhenNil() throws {
         let command = try XCTUnwrap(ServerCommand(config: config(), inheriting: ["PATH": "/bin"]))
-        XCTAssertEqual(command.shellScript, ServerCommand.script)
+        let script = ServerCommand.script + " --data-root \"$3\""
+        XCTAssertEqual(command.shellScript, script)
         XCTAssertFalse(try XCTUnwrap(command.shellScript).contains("--recorder"))
-        XCTAssertEqual(command.arguments, ["-lc", ServerCommand.script, "narumi-server", repo.path, "9000"])
+        XCTAssertEqual(command.arguments, ["-lc", script, "narumi-server", repo.path, "9000", dataRootURL.path])
 
         // An inherited NARUMI_RECORDER is left for the server to honour.
         let inherited = try XCTUnwrap(ServerCommand(config: config(), inheriting: base))
@@ -69,12 +72,29 @@ final class ServerCommandTests: XCTestCase {
         let command = try XCTUnwrap(ServerCommand(config: config(dataRoot: "/tmp/narumi home"), inheriting: base))
         XCTAssertEqual(command.environment["NARUMI_HOME"], "/tmp/narumi home")
         XCTAssertFalse(try XCTUnwrap(command.shellScript).contains("narumi home"))
+        XCTAssertEqual(command.arguments.last, "/tmp/narumi home")
+        XCTAssertTrue(try XCTUnwrap(command.shellScript).contains("--data-root \"$3\""))
+    }
+
+    func testKeychainHelperUsesPositionalParameterAfterTheDataRoot() throws {
+        let helper = repo.appendingPathComponent("app/.build/release/narumi-keychain")
+        let recorder = repo.appendingPathComponent("narumi-recorder")
+        for selectedRecorder in [nil, recorder] {
+            let command = try XCTUnwrap(ServerCommand(
+                config: config(recorder: selectedRecorder, keychainHelper: helper), inheriting: base))
+            let helperIndex = selectedRecorder == nil ? 4 : 5
+            let script = try XCTUnwrap(command.shellScript)
+            XCTAssertTrue(script.hasPrefix("exec env NARUMI_KEYCHAIN_HELPER=\"$\(helperIndex)\" uv "))
+            XCTAssertFalse(script.contains(helper.path))
+            XCTAssertEqual(Array(command.arguments.suffix(2)), [dataRootURL.path, helper.path])
+            XCTAssertEqual(command.environment["NARUMI_KEYCHAIN_HELPER"], helper.path)
+        }
     }
 
     func testNoRepositoryMeansNoCommand() {
         let unconfigured = ServerConfig(
             repository: nil, repositorySource: nil, port: 8765,
-            serverURL: URL(string: "http://127.0.0.1:8765/mcp")!, recorder: nil,
+            serverURL: URL(string: "https://127.0.0.1:8765/mcp")!, recorder: nil,
             logFile: URL(fileURLWithPath: "/tmp/server.log"), dataRoot: nil,
             runtimeMode: nil, bundledRuntime: nil,
             runtimePaths: RuntimePaths(dataRoot: URL(fileURLWithPath: "/tmp/narumi", isDirectory: true)),
@@ -88,10 +108,13 @@ final class ServerCommandTests: XCTestCase {
         let runtime = BundledRuntime(
             root: URL(fileURLWithPath: "/Applications/narumi.app/Contents/Resources/runtime", isDirectory: true))
         let recorder = URL(fileURLWithPath: "/Applications/narumi.app/Contents/MacOS/narumi-recorder")
+        let helper = URL(fileURLWithPath: "/Applications/narumi.app/Contents/MacOS/narumi-keychain")
         let command = try XCTUnwrap(
             ServerCommand.bundled(
-                config: config(recorder: recorder, runtimeMode: .bundled, bundledRuntime: runtime),
-                inheriting: base))
+                config: config(recorder: recorder, runtimeMode: .bundled, bundledRuntime: runtime, keychainHelper: helper),
+                inheriting: base.merging(["NARUMI_HOME": "/stale/root", "NARUMI_KEYCHAIN_HELPER": "/stale/helper"]) {
+                    _, new in new
+                }))
 
         // The venv binary at an absolute path — no shell, no PATH lookup, no positional tricks.
         XCTAssertEqual(command.executable.path, dataRootURL.path + "/runtime/venv/bin/python3")
@@ -99,7 +122,7 @@ final class ServerCommandTests: XCTestCase {
             command.arguments,
             [
                 "-I", "-m", "narumi_server.cli", "--http", "--host", "127.0.0.1",
-                "--port", "9000", "--recorder", recorder.path,
+                "--port", "9000", "--data-root", dataRootURL.path, "--recorder", recorder.path,
             ])
         XCTAssertNil(command.shellScript)
         // The server reads the contracts copied into the .app.
@@ -107,7 +130,8 @@ final class ServerCommandTests: XCTestCase {
             command.environment["NARUMI_CONTRACTS_DIR"],
             "/Applications/narumi.app/Contents/Resources/runtime/contracts")
         XCTAssertEqual(command.environment["PATH"], "/usr/bin:/bin")  // inherited
-        XCTAssertNil(command.environment["NARUMI_HOME"])  // 既定のまま
+        XCTAssertEqual(command.environment["NARUMI_HOME"], dataRootURL.path)
+        XCTAssertEqual(command.environment["NARUMI_KEYCHAIN_HELPER"], helper.path)
         XCTAssertEqual(command.currentDirectory.path, dataRootURL.path + "/runtime")
     }
 
@@ -120,7 +144,8 @@ final class ServerCommandTests: XCTestCase {
                 inheriting: base))
         XCTAssertEqual(
             command.arguments,
-            ["-I", "-m", "narumi_server.cli", "--http", "--host", "127.0.0.1", "--port", "9000"])
+            ["-I", "-m", "narumi_server.cli", "--http", "--host", "127.0.0.1", "--port", "9000",
+                "--data-root", "/tmp/narumi home"])
         XCTAssertEqual(command.environment["NARUMI_HOME"], "/tmp/narumi home")
     }
 
@@ -148,7 +173,9 @@ final class ServerCommandTests: XCTestCase {
             XCTAssertEqual(bundled.environment[key], inherited[key], key)
         }
         let development = try XCTUnwrap(ServerCommand(config: config(), inheriting: inherited))
-        XCTAssertEqual(development.environment, inherited, "Explicit development mode keeps its Python configuration")
+        var expectedDevelopment = inherited
+        expectedDevelopment["NARUMI_HOME"] = dataRootURL.path
+        XCTAssertEqual(development.environment, expectedDevelopment, "Explicit development mode keeps its Python configuration")
     }
 
     func testBundledPythonIgnoresSameVersionCheckoutAndWorkingDirectoryPackages() throws {
@@ -321,7 +348,8 @@ final class ServerCommandTests: XCTestCase {
     /// Regression test for the profile-clobbering bug: run the *actual* command through
     /// `/bin/zsh -l` with a `.zprofile` that exports conflicting `NARUMI_*` values and a fake
     /// `uv` that echoes its argv. The launched server must still get the app's repo, port and
-    /// recorder. No network, no real uv: everything lives in a temp directory.
+    /// recorder, bootstrap root and Keychain helper. No network, no real uv: everything lives
+    /// in a temp directory.
     func testLoginShellProfileCannotOverrideParameters() throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("narumi-cmd-\(UUID().uuidString)")
@@ -333,7 +361,7 @@ final class ServerCommandTests: XCTestCase {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
         let fakeUV = binDir.appendingPathComponent("uv")
-        try Data("#!/bin/sh\nprintf '%s\\n' \"$@\"\n".utf8).write(to: fakeUV)
+        try Data("#!/bin/sh\nprintf '%s\\n' \"$@\" \"$NARUMI_KEYCHAIN_HELPER\"\n".utf8).write(to: fakeUV)
         try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeUV.path)
         // Sourced by `zsh -l` after the app-provided environment: tries to clobber everything,
         // and puts the fake uv first on PATH (after /etc/zprofile's path_helper ran).
@@ -343,13 +371,17 @@ final class ServerCommandTests: XCTestCase {
             export NARUMI_REPO=/from-profile
             export NARUMI_SERVER_PORT=1
             export NARUMI_RECORDER=/from-profile/recorder
+            export NARUMI_HOME=/from-profile/data
+            export NARUMI_KEYCHAIN_HELPER=/from-profile/keychain
             """.utf8
         ).write(to: zdotDir.appendingPathComponent(".zprofile"))
 
         let recorder = repoDir.appendingPathComponent("narumi-recorder")
+        let helper = repoDir.appendingPathComponent("app/.build/release/narumi-keychain")
+        let dataRoot = root.appendingPathComponent("会議 data").path
         let command = try XCTUnwrap(
             ServerCommand(
-                config: config(recorder: recorder, repository: repoDir),
+                config: config(recorder: recorder, dataRoot: dataRoot, repository: repoDir, keychainHelper: helper),
                 inheriting: ["PATH": "/usr/bin:/bin", "ZDOTDIR": zdotDir.path]))
 
         let process = Process()
@@ -371,6 +403,7 @@ final class ServerCommandTests: XCTestCase {
             [
                 "run", "--project", repoDir.path, "narumi-server", "--http",
                 "--host", "127.0.0.1", "--port", "9000", "--recorder", recorder.path,
+                "--data-root", dataRoot, helper.path,
             ])
     }
 }

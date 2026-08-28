@@ -35,6 +35,16 @@ def test_inventory_accepts_runtime_and_tracked_prompts(tmp_path: Path, archive: 
     assert all(not path.startswith("/") for path in files)
 
 
+@pytest.mark.parametrize("archive", [False, True])
+def test_inventory_requires_keychain_helper(tmp_path: Path, archive: bool):
+    app = make_app(tmp_path)
+    (app / "Contents/MacOS/narumi-keychain").unlink()
+    path = app_zip(app, tmp_path / "narumi.zip") if archive else app
+    result = run_inventory("check-zip" if archive else "check-app", path)
+    assert result.returncode == 1
+    assert "narumi-keychain" in result.stderr
+
+
 def test_repo_mode_is_only_accepted_without_require_runtime(tmp_path: Path):
     app = make_app(tmp_path, runtime=False)
     result = run_inventory("check-app", app)

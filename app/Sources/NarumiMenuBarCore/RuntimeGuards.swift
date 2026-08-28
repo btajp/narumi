@@ -47,7 +47,8 @@ public final class RuntimeLease {
     private let descriptor: Int32
 
     public init(paths: RuntimePaths) throws {
-        try FileManager.default.createDirectory(at: paths.root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: paths.root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let file = paths.root.appendingPathComponent("installation.lock")
         let fd = open(file.path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, mode_t(0o600))
         guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }

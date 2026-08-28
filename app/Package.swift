@@ -8,6 +8,7 @@ let package = Package(
         .library(name: "NarumiRecorderKit", targets: ["NarumiRecorderKit"]),
         .library(name: "NarumiMenuBarCore", targets: ["NarumiMenuBarCore"]),
         .executable(name: "narumi-recorder", targets: ["narumi-recorder"]),
+        .executable(name: "narumi-keychain", targets: ["narumi-keychain"]),
         .executable(name: "NarumiMenuBar", targets: ["NarumiMenuBar"]),
     ],
     dependencies: [
@@ -18,10 +19,11 @@ let package = Package(
     ],
     targets: [
         .target(name: "NarumiRecorderKit"),
-        // Foundation-only logic of the menu bar app (server config / launch command / state),
+        // Non-UI logic of the menu bar app (Foundation and Security),
         // kept free of AppKit so `swift test` covers it.
         .target(name: "NarumiMenuBarCore"),
         .executableTarget(name: "narumi-recorder", dependencies: ["NarumiRecorderKit"]),
+        .executableTarget(name: "narumi-keychain", dependencies: ["NarumiMenuBarCore"]),
         .executableTarget(
             name: "NarumiMenuBar",
             dependencies: [

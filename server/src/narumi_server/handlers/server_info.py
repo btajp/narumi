@@ -50,6 +50,12 @@ def get_server_info(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
         "recording": permissions is not None and permissions["microphone"] != "denied",
         "permission_setup_in_progress": permission_snapshot.in_progress,
         "transports": list(ctx.transports),
+        "workflow": {
+            "provider_connections": "streamable-http" in ctx.transports,
+            "provider_models": "streamable-http" in ctx.transports,
+            "stage_model_selection": False,
+            "ensemble_generation": False,
+        },
         **capability_names(),
     }
     if permissions is not None:
@@ -60,6 +66,17 @@ def get_server_info(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
         "server_instance_id": ctx.server_instance_id,
         "contract_version": ctx.contracts.contract_version,
         "capabilities": capabilities,
+        "secure_transport": {
+            "mode": (
+                "pinned_tls"
+                if "streamable-http" in ctx.transports
+                else "stdio"
+                if "stdio" in ctx.transports
+                else "unavailable"
+            ),
+            "tls_required": "streamable-http" in ctx.transports,
+            "client_auth_required": "streamable-http" in ctx.transports,
+        },
         "diagnostics": diagnostics(ctx),
     }
 

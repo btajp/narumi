@@ -4,6 +4,8 @@ narumi は、macOS 上でローカルに会議を録画し、終了後に議事�
 
 相棒の **gaia-library**（記憶の索引 MCP）とは任意連携です。gaia-library が無くても narumi 単体で完結し、接続すると語彙・参加者・前回要点などを会議ブリーフに取り込みます。議事録の書き戻しは提案キューへの登録だけで、人間の承認は gaia-library 側で行います。設計の正本は Notion「議事録生成システム」ページで、リポジトリ内の要約と開発ルールは [AGENTS.md](AGENTS.md)、基盤の具体設計は [docs/superpowers/specs/](docs/superpowers/specs/) にあります。
 
+**0.2.0** では「AI 接続」と認証付き TLS 通信を追加します。接続管理・認証・モデル候補の参照までが対象で、工程別モデル適用と複数生成は後続のバージョンで対応します。
+
 ## インストールと録画
 
 配布版は Apple Silicon（arm64）・macOS 15 以降に対応します。
@@ -30,7 +32,7 @@ ffmpeg / ffprobe は別途必要です。アプリの「診断」で検出状態
 git clone <this repo> narumi && cd narumi
 uv sync                      # Python 依存（pipeline + server。dev グループに軽量 extras 込み）
 uv run narumi-dev doctor     # ffmpeg / recorder / エンジンの状態を確認
-cd app && swift build -c release && cd ..   # 録画ヘルパー narumi-recorder（app/ が揃ってから）
+cd app && swift build -c release && cd ..   # 録画・Keychain ヘルパーも生成
 ```
 
 `uv run narumi-dev doctor` は ffmpeg / ffprobe が見つからないと終了コード 1 で失敗します。録画ヘルパーは `NARUMI_RECORDER` 環境変数、無ければ `app/.build/{release,debug}/narumi-recorder` の順で探します。
@@ -42,13 +44,13 @@ scripts/build-app.sh     # app/ を release ビルドし、dist/narumi.app を�
 open dist/narumi.app     # メイン画面と、名前付きのメニューバー項目を表示
 ```
 
-`narumi.app` は起動時に `narumi-server`（Streamable HTTP、`http://127.0.0.1:8765/mcp`）を自分で起動し、終了時に停止します。Terminal でサーバーを起動しておく必要はありません。起動方法は 2 モードあります（詳細は [app/README.md](app/README.md) の「ランタイムモード」）。
+`narumi.app` は起動時に `narumi-server`（認証付き Streamable HTTP、既定 `https://127.0.0.1:8765/mcp`）を自分で起動し、終了時に停止します。アプリは所有者専用の起動情報から証明書とサーバー識別情報を確認し、Keychain のトークンで認証します。Terminal でサーバーを起動しておく必要はありません。起動方法は 2 モードあります（詳細は [app/README.md](app/README.md) の「ランタイムモード」）。
 
 - **repo モード**（開発用。上の `scripts/build-app.sh` のとおりオプション無しでビルドした場合）: アプリがリポジトリの `uv run narumi-server` を起動します。動かすマシンには **uv と、このリポジトリのチェックアウト（`uv sync` 済み）** が必要です。
 - **bundled モード**（配布用。`scripts/build-app.sh --runtime` でビルドした場合）: `.app` が同梱の uv・wheels・requirements から `NARUMI_HOME/runtime/` に venv を自分で作って起動します。**リポジトリのチェックアウトも uv のインストールも不要**です（初回はネットワーク必須。後述「配布」参照）。
 
 - `NARUMI_RUNTIME_MODE=repo|bundled` と明示的な `NARUMI_REPO` 指定を除き、同梱ランタイムがあれば bundled モードを優先します。以前保存したリポジトリ設定だけでは配布版を開発モードへ切り替えません。
-- 開発用 repo モード、または `NARUMI_SERVER_URL` で明示した外部サーバーには接続できます。通常の bundled 起動で既存サーバーがポートを使用している場合は、誤接続を避けるため競合として表示します。
+- 開発用 repo モード、または `NARUMI_SERVER_URL` を明示した場合は、同じデータルートの起動情報を持つローカル常駐サーバーへ接続できます。URL は起動情報と一致する数値 loopback の HTTPS に限ります。通常の bundled 起動で既存サーバーがポートを使用している場合は、競合として表示します。
 - ポートは `NARUMI_SERVER_PORT`、データルートは `NARUMI_HOME` で変えられます。ログは `~/Library/Logs/narumi/server.log`（メニューの「ログを開く」）。
 - 詳細（起動コマンド、状態表示、終了時の録画確定）は [app/README.md](app/README.md) の「起動フロー」を参照してください。
 
@@ -75,9 +77,9 @@ open dist/narumi.app     # メイン画面と、名前付きのメニューバ�
 | 項目 | 状態 |
 |---|---|
 | セッションバンドル / manifest / 冪等ステージ実行 | 実装済み |
-| 契約（`contracts/`）と MCP サーバー（v1.1 の 28 ツール、stdio / Streamable HTTP） | 実装済み |
+| 契約（`contracts/`）と MCP サーバー（契約 2.0.0・37 ツール） | 実装済み（常駐は認証付き TLS、外部 MCP クライアント向け stdio bridge、開発用 stdio） |
 | 操作面パリティ拡張（録画状態・議事録取得・全文検索・既存録画の取り込み・プロファイル＋自動エクスポート・トラック破棄・会議削除・ジョブ取消・カタログ再構築） | 実装済み（MCP ツール＋CLI＋アプリ本体ウィンドウ） |
-| 製品 CLI `narumi`（契約から自動生成の 1:1 写像。サーバー自動検出、無ければ in-process） | 実装済み |
+| 製品 CLI `narumi`（契約から自動生成の 1:1 写像） | 実装済み（常駐サーバーの証明書・認証を検証。条件を満たすローカル操作のみ in-process 可） |
 | 録画アプリ / `narumi-recorder` | 実装済み（メイン画面とメニューバーから同じ MCP 録画操作を利用） |
 | `narumi.app` によるサーバーの起動・停止（Terminal 不要） | 実装済み（repo モード＝uv とチェックアウトが必要 / bundled モード＝`--runtime` ビルドで自己完結） |
 | ランタイム同梱 .app と Sparkle 自動更新 | 実装済み（Developer ID 署名・公証・公開物照合を行う配布手順。ffmpeg / ffprobe は別途必要） |
@@ -86,8 +88,13 @@ open dist/narumi.app     # メイン画面と、名前付きのメニューバ�
 | キースライド抽出（pHash）/ Vision 読解 / 第 3 層話者判定 | 実装済み（pHash は pillow の自前実装、議事録へ画像埋め込みまで。第 3 層は vision 対応プロバイダが送信ポリシーで許可されたときだけ実行。実 vision プロバイダでの実機確認は未了） |
 | gaia-library 照会によるコンテキスト注入（会議ブリーフ） | 実装済み（実契約の scope 付き照会と案件名から ID への解決。参照結果を `context/brief.json` に保存し、語彙・参加者・背景を注入。契約版とクライアントの識別情報も確認） |
 | Gaia 接続設定 | 実装済み（アプリの「Gaia 接続」から URL・API キーの保存、無効化、接続テスト。MCP と CLI にも同じ操作を公開） |
+| AI プロバイダ接続・認証・モデル候補 | 実装済み（「AI 接続」から Anthropic API / Claude Agent SDK / ローカル Ollama を設定。キーは Keychain。モデル候補の参照までで、会議への適用は未対応） |
 | Notion / gaia-library エクスポーター | 実装済み（Notion は REST でページ作成＋Markdown→ブロック変換。スライド画像のアップロードと実環境検証は未対応。gaia-library は `propose_update` の提案キューのみ＝絶対原則 5。実プロセスで認証・scope・提案の重複防止・agent の承認拒否を検証） |
 | アップグレード再生成（影響区間だけ第 2 段を再実行） | 実装済み（`merged/integrate_cache.json` の区間フィンガープリントで、追加ソースが触れた区間だけ LLM を再実行） |
+
+プロバイダ対応は接続管理までです。**工程別の接続・モデル選択、モデルパラメータの適用、複数プロバイダでの生成・統合は未対応**です。Codex App Server、OpenAI による生成・音声認識も未実装です。Claude Agent SDK は API キー方式のみを扱い、認証・履歴の隔離を確認できるまで生成を停止しています。接続テストの成功やモデル候補の表示は、議事録を生成できることの確認ではありません。後続の範囲は [設定画面・処理方式の設計](docs/superpowers/specs/2026-08-28-provider-workflow-design.md) と [実装計画](docs/superpowers/plans/2026-08-28-provider-workflow.md) を参照してください。
+
+新しい接続管理は fake とローカル TLS を使って検証する構成です。実 API、実 Keychain、Claude SDK 実行、正式署名版での Keychain アクセスは未検証です。
 
 ## コマンド
 
@@ -97,13 +104,27 @@ uv run pytest                                            # Python 全テスト�
 uv run ruff check . && uv run ruff format --check .      # Lint / フォーマット
 uv run narumi --help                                     # 製品 CLI（契約から自動生成。サーバー自動検出）
 uv run narumi-dev --help                                 # dev CLI（ライブラリ直叩き。デバッグ用）
-uv run narumi-server --stdio                             # MCP サーバー（stdio dev モード）
-uv run narumi-server --http --port 8765                  # MCP サーバー（Streamable HTTP 常駐）
-scripts/dev.sh                                           # HTTP サーバー起動（GAIA_LIBRARY_CMD があれば gaia-library も）
+uv run narumi-server --stdio                             # 独立した開発用サーバー（接続管理・秘密入力は不可）
+uv run narumi-server --stdio-bridge                      # 起動済みの常駐サーバーへ接続（MCP クライアント用）
+uv run narumi-server --http --port 8765                  # 認証付き TLS で常駐（narumi-keychain が必要）
+scripts/dev.sh                                           # 同じ常駐サーバーを起動（GAIA_LIBRARY_CMD があれば gaia-library も）
 scripts/build-app.sh && open dist/narumi.app             # メニューバーアプリ（サーバーはアプリが起動する）
 scripts/gen-types.sh                                     # 契約 → pydantic 型生成（生成物はコミットしない）
 cd app && swift build && swift test                      # 録画アプリ / recorder CLI
 ```
+
+### AI プロバイダの接続
+
+メインウィンドウ上部の「AI 接続」から、接続を保存し、認証とモデル候補を確認します。保存した接続や候補を会議の生成設定へ適用する機能は、まだありません。
+
+1. **プロバイダと接続名**: 「接続を追加」で Anthropic API / Claude Agent SDK / Ollama を選び、用途を区別できる名前を入力します（例: `議事録用 Anthropic`）。同じプロバイダの接続を複数保存できます。
+2. **認証情報・接続先**: Anthropic API と Claude Agent SDK は API キー方式で、送信先は `https://api.anthropic.com` 固定です。キーが未準備なら空欄で保存でき、既存接続では空欄で現在のキーを維持します。Claude サブスクリプションのログインは未対応です。Ollama は認証不要で、既定の接続先 `http://127.0.0.1:11434` を使えます。変更する場合も `127.0.0.0/8` または `[::1]` の数値 loopback URL（HTTP / HTTPS）のみで、`localhost`・外部ホスト・URL 内の認証情報・クエリは使えません。クラウド実行モデルは対象外です。
+3. **保存して接続を確認**: 「接続を追加して保存」または「接続設定を保存」の後に「接続テスト」「認証確認を開始」を使います。保存自体は外部照会せず、確認操作では保存済みの認証情報でメタデータだけを照会します。会議データの送信や生成は行いません。
+4. **実行環境とモデル候補**: 「確認・準備」は既存の Python 依存を検査し、narumi 専用領域へ検査結果を保存します。SDK・Ollama 本体・モデルのインストールやダウンロードは行いません。「接続先から候補を更新」でモデル ID、対応能力、確認状態を表示します。取得できない上限・料金は未確認として表示し、生成可能とは扱いません。
+
+API キーは専用の `narumi-keychain` ヘルパーを介して Keychain に保存し、画面へ読み戻しません。入力欄は保存の成功・失敗・画面を閉じる際に消去します。「この接続を有効にする」をオフにすると設定とキーを残して無効化します。「保存時に API キーを削除」「この接続からログアウト」はその接続のキーだけを削除し、ほかのアプリのログインには触れません。
+
+保存の応答を失った場合は、一覧を再読込して保存済み接続の現在の内容を確認し、明示的に採用して再編集できます。接続を特定できない場合は、元の要求 ID で保存を再確認・再試行します。キーを送った要求では前回と同じキーの再入力が必要で、自動再送はしません。同じアプリ起動中は、画面を閉じ直しても非秘密の復旧情報を保持します。
 
 ### gaia-library との接続（任意）
 
@@ -121,7 +142,7 @@ gaia-library の HTTP サーバーを起動し、narumi 用の agent クライ�
 
 ### 製品 CLI `narumi`
 
-`narumi` は MCP ツールの **1:1 写像** です（`docs/superpowers/specs/2026-08-27-narumi-surface-parity-design.md`）。サブコマンドは `contracts/` から自動生成され（ツール名の `_` を `-` に置換）、オプションは `inputSchema` から型付きで生成されます（string / integer / number / boolean はそのまま、array / object は JSON 文字列、`scope` セレクタは名前 1 つか JSON 配列）。`request_id` は省略すると UUID4 を自動発番します。
+`narumi` は MCP ツールの **1:1 写像** です（`docs/superpowers/specs/2026-08-27-narumi-surface-parity-design.md`）。サブコマンドは `contracts/` から自動生成され（ツール名の `_` を `-` に置換）、オプションは `inputSchema` から型付きで生成されます（string / integer / number / boolean はそのまま、array / object は JSON 文字列、`scope` セレクタは名前 1 つか JSON 配列）。秘密入力は後述の非表示プロンプトか stdin を使います。`request_id` は省略すると UUID4 を自動発番します。
 
 nullable な項目は `--clear-<項目>` で JSON `null` を明示できます。例えば `narumi set-gaia-connection --clear-url` は連携を無効化し、`--clear-api-key` はキーだけを削除します。省略は既存値を保持し、文字列 `null` を値として渡しても削除にはなりません。値と clear の同時指定は拒否します。既存オプション名と衝突する場合は clear 側に接尾辞を付けるため、正確な名前は `--help` で確認してください。
 
@@ -129,18 +150,31 @@ nullable な項目は `--clear-<項目>` で JSON `null` を明示できます�
 uv run narumi list-meetings --scope cloudnative --limit 10
 uv run narumi configure-recording-permission --permission microphone --action request
 uv run narumi get-server-info --refresh-permissions
+uv run narumi list-providers
+uv run narumi list-provider-connections
 uv run narumi search-transcripts --query "オンボーディング"
 uv run narumi get-minutes --meeting-id <meeting_id> [--version N]
 uv run narumi import-recording --meeting-name "定例" --mic-path /abs/mic.m4a --system-path /abs/system.m4a
 uv run narumi delete-meeting --meeting-id <meeting_id> --confirm
-uv run narumi tool <tool_name> --json '{"...": "..."}'   # 汎用エスケープハッチ（任意のツールを生 JSON で）
+uv run narumi tool list_meetings --json '{"limit": 5}'    # 秘密情報を含まない JSON 引数
 ```
 
-接続先は `--server-url`（既定 `NARUMI_SERVER_URL` → `http://127.0.0.1:8765/mcp`）です。サーバーが応答すればそこへ MCP（Streamable HTTP）で送り、応答が無ければ同じディスパッチ経路を in-process で実行します（`--require-server` / `--in-process` で強制。録画系と権限設定ツールは常駐サーバーが必須で、in-process では拒否）。出力は結果 JSON（`--pretty` 既定、`--raw` で 1 行）で、エラーは契約の `error_envelope` を stderr に出し終了コード 2 で終わります。`--data-root PATH`（または `NARUMI_HOME`）は in-process 実行のデータルートを切り替えます。
+接続先はデータルート内の `runtime/server/bootstrap.json` から取得します。`--server-url` または `NARUMI_SERVER_URL` を指定する場合も、起動情報と一致する数値 loopback の HTTPS URL が必要です。Keychain のトークンで認証する TLS 接続を使い、証明書・サーバー識別情報・契約メジャー版を確認してから操作を送ります。常駐サーバーとの全通信で環境プロキシとリダイレクトを使いません。
+
+自動で in-process 実行へ切り替えるのは、起動情報がなく、接続先も明示していない場合の一部のローカル操作だけです。録画・権限設定・プロバイダ関連の 9 ツール・秘密入力を持つツールは常駐サーバー必須です。`--require-server` は常駐接続を必須にし、`--in-process` でもこれらの制約は解除されません。起動情報の不正、証明書・認証エラー、通信断では in-process に切り替えず、実行要求も自動再送しません。
+
+出力は結果 JSON（`--pretty` 既定、`--raw` で 1 行）で、エラーは契約の `error_envelope` を stderr に出し終了コード 2 で終わります。`--data-root PATH`（または `NARUMI_HOME`）は、常駐接続の起動情報と in-process 実行のデータルートを指定します。アプリと同じデータルートを使ってください。
+
+API キーを保存する場合、`--api-key` は値を引数に取らず、非表示の入力プロンプトを開きます。自動処理では `--api-key-stdin`、ツール引数全体の JSON は `tool <tool_name> --json-stdin` を使います。キーをコマンド行、環境変数、`--json` の文字列に書かないでください。`--json` に秘密入力を含めると拒否します。キーの削除は `--clear-api-key`、省略は既存値の保持です。
+
+```sh
+uv run narumi set-provider-connection --provider-id anthropic-api \
+    --display-name "議事録用 Anthropic" --auth-method api_key --api-key
+```
 
 権限設定はサーバーが動く Mac 上の操作です。`--action open_settings` は対象のプライバシー設定を開くだけで、許可を自動付与しません。応答が不明になった場合は要求を自動再送せず、`get-server-info --refresh-permissions` で、操作前と同じ `server_instance_id` の `permission_setup_in_progress` と権限の状態を確認します。別サーバーの未処理表示は、元の操作の終了証明にはなりません。この機能は契約版 1.1.0 以降が必要です。
 
-Gaia のキー保存など、契約に `writeOnly` 入力を持つツールの HTTP 通信は同じ Mac 上の loopback HTTP に限定します。`localhost` は数値アドレスへ固定し、接続確認・初期化から終了まで環境プロキシとリダイレクトを使いません。それ以外のツールの接続方法は変わりません。
+この CLI とアプリは契約 2.x と認証付き TLS を前提にします。旧版の未認証 HTTP への接続やダウングレードは行いません。Gaia のキー保存も常駐サーバー経由になりましたが、保存形式は引き続き上記の `gaia.json` で、Keychain へは移行していません。
 
 ### dev CLI `narumi-dev`
 
@@ -169,6 +203,9 @@ uv run narumi-dev doctor                                 # 環境診断
 $NARUMI_HOME/
 ├── narumi.db                 # 再構築可能なカタログ＋検索索引（`narumi-dev catalog rebuild`）
 ├── gaia.json                 # 任意の Gaia 接続設定・API キー（0600。会議データとは別）
+├── providers/registry.json  # プロバイダ接続・認証状態・モデル情報（キー本体は含まない）
+├── providers/runtime/      # 既存プロバイダ依存の検査記録
+├── runtime/server/         # 所有者専用の TLS 起動情報・証明書・秘密鍵
 └── meetings/<meeting_id>/    # セッションバンドル（ファイルが正本）
     ├── manifest.json
     ├── tracks/               # 原録音・録画（破棄可）
@@ -181,17 +218,18 @@ $NARUMI_HOME/
 
 `narumi.db` が壊れてもバンドルから全再構築できます。逆にバンドルを消すとその会議は失われます。
 
+プロバイダの API キーと常駐接続トークンは Keychain に保存します。`bootstrap.json` は証明書・サーバー識別情報・不透明な Keychain account を持ちますが、トークン本体は含みません。これらの起動情報や秘密鍵を MCP クライアント設定へコピーする必要はありません。
+
 ## MCP クライアント設定例
 
-サーバー名は `narumi`、HTTP のエンドポイントは `http://127.0.0.1:8765/mcp` です。stdio では `uv run narumi-server --stdio` をリポジトリのディレクトリで起動する必要があるため、`uv --directory <repo>` を使います。
+一般の MCP クライアントには **stdio bridge** を使います。先に `narumi.app` を起動し、同じデータルートの常駐サーバーへ `narumi-server --stdio-bridge` で接続します。bridge が起動情報・証明書・Keychain 認証を扱うため、設定にトークンや証明書を書きません。サーバーが使えない場合はエラーで止まり、独立したサーバーを自動起動しません。
+
+以下はソース環境の例です。`/path/to/narumi` は `uv sync` と Swift ビルド済みのリポジトリへ置き換えます。`NARUMI_HOME` を変更している場合は、bridge にも同じ値を渡します。開発用の `--stdio` は別プロセスで実行するモードで、プロバイダ接続管理と秘密入力には使えません。
 
 ### Claude Code
 
 ```sh
-# stdio
-claude mcp add --transport stdio narumi -- uv --directory /path/to/narumi run narumi-server --stdio
-# Streamable HTTP（narumi.app を起動しておく、または scripts/dev.sh で常駐させておく）
-claude mcp add --transport http narumi http://127.0.0.1:8765/mcp
+claude mcp add --transport stdio narumi -- uv --directory /path/to/narumi run narumi-server --stdio-bridge
 ```
 
 `.mcp.json` に書く場合:
@@ -201,7 +239,7 @@ claude mcp add --transport http narumi http://127.0.0.1:8765/mcp
   "mcpServers": {
     "narumi": {
       "command": "uv",
-      "args": ["--directory", "/path/to/narumi", "run", "narumi-server", "--stdio"]
+      "args": ["--directory", "/path/to/narumi", "run", "narumi-server", "--stdio-bridge"]
     }
   }
 }
@@ -214,11 +252,7 @@ claude mcp add --transport http narumi http://127.0.0.1:8765/mcp
 ```toml
 [mcp_servers.narumi]
 command = "uv"
-args = ["--directory", "/path/to/narumi", "run", "narumi-server", "--stdio"]
-
-# Streamable HTTP を使う場合（リモート MCP 対応版の Codex CLI）
-# [mcp_servers.narumi]
-# url = "http://127.0.0.1:8765/mcp"
+args = ["--directory", "/path/to/narumi", "run", "narumi-server", "--stdio-bridge"]
 ```
 
 ## 配布（ランタイム同梱 .app と自動更新）
@@ -239,6 +273,7 @@ scripts/build-app.sh --runtime    # dist/narumi.app（ランタイム同梱、ad
 
 Developer ID 署名 → Apple 公証 → DMG・Sparkle フィード生成 → GitHub Release（draft）までを行います。
 署名・公証・配布物照合を通した draft を公開し、その後にインストール・更新・実機確認を行います。
+確認可能な機能単位でコミット・push・新バージョン公開まで進めます。後続機能の完成や、配布前のアプリ画面確認を待ってリリースをまとめません。
 
 1. clean な `main` と `origin/main` の一致、版、lock、既存リリース、署名鍵を検査します。Sparkle ツールは SwiftPM が取得したものを自動検出します。別の既存配置を使う場合だけ `SPARKLE_BIN` を指定します。
 2. 署名には `APPLE_SIGNING_IDENTITY` / `APPLE_API_KEY` / `APPLE_API_ISSUER` / `APPLE_API_KEY_PATH` を使います。ローカル設定 `~/.config/narumi/release.env` があれば読み込みます。設定ファイルの場所を変える場合は `NARUMI_RELEASE_ENV` を指定します。秘密情報をリポジトリやログに記録しないでください。
