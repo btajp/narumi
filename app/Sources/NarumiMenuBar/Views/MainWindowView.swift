@@ -19,12 +19,13 @@ struct MainWindowView: View {
                     MeetingDetailView(model: model)
                 } else {
                     ContentUnavailableView(
-                        "会議を選択してください", systemImage: "list.bullet.rectangle",
-                        description: Text("左の一覧から会議を選ぶか、ツールバーの「取り込み」で既存録画を追加します。"))
+                        "会議を録画して議事録をつくる", systemImage: "waveform",
+                        description: Text("上の「録画開始」で会議を録画できます。保存済みの会議は左の一覧から、既存の録画は「取り込み」から開けます。"))
                 }
             }
         }
         .frame(minWidth: 860, minHeight: 520)
+        .disabled(model.desktopSession.installingUpdate || model.desktopSession.terminating)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 JobsToolbarButton(model: model)
@@ -127,8 +128,13 @@ struct JobsListView: View {
                 }
                 .disabled(model.jobs.allSatisfy(\.isActive))
             }
+            if model.unresolvedJobRequestCount > 0 {
+                Text("操作結果を再確認中です。確認が終わるまでアップデートを延期します。")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
             if model.jobs.isEmpty {
-                Text("ジョブはありません")
+                Text(model.activeJobCount > 0 ? "ジョブの状態を確認中…" : "ジョブはありません")
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(model.jobs) { job in

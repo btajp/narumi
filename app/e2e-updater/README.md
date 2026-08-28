@@ -1,8 +1,17 @@
 # 更新 E2E（ローカル、Apple 資格情報不要）
 
+現在は実行停止中。`run-e2e.sh` はビルド・鍵生成・プロセス操作より前に終了する。
+候補版 `99.0.0` と Python wheel の版が一致せず、新しい readiness 検証を通らないこと、
+更新後の再起動で既定データルートを使うことが未対応のため。以下は改修時の参考となる
+旧ハーネスの設計であり、現行版で実行できる手順や検証成功を示すものではない。
+
 Sparkle 自動更新の一連の流れ（更新ダイアログ → DL・検証 → 差し替え → 再起動 → ランタイム再同期）を、
 GitHub Releases も Apple 公証も使わずローカルだけで検証する（設計
 `docs/superpowers/specs/2026-08-27-narumi-app-distribution-design.md` §4）。
+
+このハーネスは専用の macOS 検証ユーザーでのみ実行する。更新後の再起動で環境変数が
+引き継がれず、既定のデータルートを使うため、`E2E_DIR` だけでは普段の会議データや
+正式インストール済みアプリから隔離できない。日常利用中のユーザーでは実行しない。
 
 - 署名は ad-hoc。EdDSA 鍵は **E2E 専用の使い捨てシードファイル**（`head -c 32 /dev/urandom | base64`）を
   `sign_update` / `generate_appcast` の `--ed-key-file` に渡す。`generate_keys` は使わない —
@@ -16,14 +25,13 @@ GitHub Releases も Apple 公証も使わずローカルだけで検証する（
 
 ## 前提
 
-- Sparkle 2.9.6 のツール（`generate_appcast` / `sign_update`）:
+- SwiftPM が取得した Sparkle 2.9.6 のツール（`generate_appcast` / `sign_update`）:
 
   ```sh
-  mkdir -p ~/.sparkle/2.9.6
-  gh release download --repo sparkle-project/Sparkle 2.9.6 \
-    --pattern 'Sparkle-2.9.6.tar.xz' --output ~/.sparkle/Sparkle-2.9.6.tar.xz
-  tar xf ~/.sparkle/Sparkle-2.9.6.tar.xz -C ~/.sparkle/2.9.6
-  export SPARKLE_BIN=~/.sparkle/2.9.6/bin
+  cd app
+  swift package resolve
+  cd ..
+  export SPARKLE_BIN="$PWD/app/.build/artifacts/sparkle/Sparkle/bin"
   ```
 
 - Swift 側の Sparkle 統合（`Package.swift` の Sparkle 依存 + `SPUStandardUpdaterController` +
@@ -34,7 +42,7 @@ GitHub Releases も Apple 公証も使わずローカルだけで検証する（
 ## 実行
 
 ```sh
-SPARKLE_BIN=~/.sparkle/2.9.6/bin app/e2e-updater/run-e2e.sh
+app/e2e-updater/run-e2e.sh
 ```
 
 スクリプトが行うこと（更新ダイアログで「Install Update」を押す操作だけ手動）:

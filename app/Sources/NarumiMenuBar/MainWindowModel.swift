@@ -22,14 +22,15 @@ final class MainWindowModel: ObservableObject {
         var id: String { rawValue }
     }
 
-    /// Actions that are app-specific by design (process management / Sparkle), injected by
-    /// the AppDelegate. They are not data operations.
+    /// Host actions plus the shared recording entry points. Recording still uses the same
+    /// public MCP calls; its state and start dialog are owned by the AppDelegate.
     struct HostActions {
         var restartServer: () -> Void = {}
         var openServerLog: () -> Void = {}
         var checkForUpdates: () -> Void = {}
-        /// Lets the menu bar state (recording flag) follow a stop issued from the window.
-        var recordingStopped: () -> Void = {}
+        var startRecording: () -> Void = {}
+        var stopRecording: () -> Void = {}
+        var jobActivityChanged: (Bool) -> Void = { _ in }
     }
 
     let client: NarumiClient
@@ -48,8 +49,8 @@ final class MainWindowModel: ObservableObject {
 
     // MARK: Recording banner
 
-    @Published var recordingStatus = RecordingStatus(active: false)
-    @Published var stoppingRecording = false
+    @Published private(set) var desktopSession = DesktopSessionState()
+    var recordingStatus: RecordingStatus { desktopSession.recording }
 
     // MARK: Detail
 
@@ -72,8 +73,9 @@ final class MainWindowModel: ObservableObject {
     // MARK: Jobs
 
     @Published var jobs: [Job] = []
-    private var trackedJobIDs: [String] = []
-    private var lastJobStatuses: [String: String] = [:]
+    @Published var unresolvedJobRequestCount = 0
+    var jobState = DesktopJobState()
+    var pendingJobRequests = 0
 
     // MARK: Feedback / sheets
 
@@ -91,8 +93,36 @@ final class MainWindowModel: ObservableObject {
     // MARK: Polling lifecycle (owned by the window controller)
 
     private var pollTask: Task<Void, Never>?
+    private var serverWideLoadRevision: UInt64 = 0
+    private var loadedServerGeneration: UInt64?
+    private var readyRefreshTask: Task<Void, Never>?
 
     var isPolling: Bool { pollTask != nil }
+
+    func applyDesktopSession(_ session: DesktopSessionState) {
+        let generationChanged = session.connectionGeneration != desktopSession.connectionGeneration
+        let becameReady = session.serverReachable && !desktopSession.serverReachable
+        desktopSession = session
+        if generationChanged {
+            readyRefreshTask?.cancel()
+            readyRefreshTask = nil
+            jobState.invalidateRefresh()
+            loadedServerGeneration = nil
+            serverInfo = nil
+            profilesList = nil
+            exportDestinations = []
+        }
+        if session.serverReachable && readyRefreshTask == nil
+            && (becameReady || loadedServerGeneration != session.connectionGeneration) {
+            let generation = session.connectionGeneration
+            readyRefreshTask = Task {
+                await initialLoad()
+                if desktopSession.connectionGeneration == generation {
+                    readyRefreshTask = nil
+                }
+            }
+        }
+    }
 
     /// Start the 5 s refresh loop while the window is visible. Idempotent.
     func startPolling(interval: Duration = .seconds(5)) {
@@ -169,41 +199,63 @@ final class MainWindowModel: ObservableObject {
     }
 
     func refreshServerWideData() async {
+        guard desktopSession.serverReachable else { return }
+        let generation = desktopSession.connectionGeneration
+        serverWideLoadRevision &+= 1
+        let revision = serverWideLoadRevision
+        var complete = true
         do {
-            serverInfo = try await client.serverInfo()
+            let info = try await client.serverInfo()
+            guard isCurrentServerLoad(generation, revision) else { return }
+            serverInfo = info
         } catch {
+            guard isCurrentServerLoad(generation, revision) else { return }
+            complete = false
             lastRefreshError = (error as? ToolFailure)?.message ?? error.localizedDescription
         }
         do {
-            exportDestinations = try await client.exportDestinations()
+            let destinations = try await client.exportDestinations()
+            guard isCurrentServerLoad(generation, revision) else { return }
+            exportDestinations = destinations
         } catch {
-            // Non-fatal: the export menu just stays empty until the next open.
+            complete = false
         }
         do {
-            profilesList = try await client.profiles()
+            let profiles = try await client.profiles()
+            guard isCurrentServerLoad(generation, revision) else { return }
+            profilesList = profiles
         } catch {
-            // Non-fatal: profile pickers fall back to free text.
+            complete = false
         }
+        guard isCurrentServerLoad(generation, revision) else { return }
+        loadedServerGeneration = complete ? generation : nil
+    }
+
+    private func isCurrentServerLoad(_ generation: UInt64, _ revision: UInt64) -> Bool {
+        !Task.isCancelled && desktopSession.connectionGeneration == generation
+            && serverWideLoadRevision == revision && desktopSession.serverReachable
     }
 
     func refresh() async {
+        guard desktopSession.serverReachable else { return }
+        let generation = desktopSession.connectionGeneration
         let query = searchText.trimmingCharacters(in: .whitespaces)
         do {
             if showsSearchHits {
-                searchHits = try await client.searchTranscripts(query: query, scope: scopeValues, limit: 50)
+                let hits = try await client.searchTranscripts(query: query, scope: scopeValues, limit: 50)
+                guard !Task.isCancelled, generation == desktopSession.connectionGeneration else { return }
+                searchHits = hits
             } else {
-                meetings = try await client.listMeetings(
+                let listed = try await client.listMeetings(
                     query: query.isEmpty ? nil : query, scope: scopeValues)
+                guard !Task.isCancelled, generation == desktopSession.connectionGeneration else { return }
+                meetings = listed
                 searchHits = []
             }
             lastRefreshError = nil
         } catch {
+            guard !Task.isCancelled, generation == desktopSession.connectionGeneration else { return }
             lastRefreshError = (error as? ToolFailure)?.message ?? error.localizedDescription
-        }
-        do {
-            recordingStatus = try await client.recordingStatus()
-        } catch {
-            recordingStatus = RecordingStatus(active: false)
         }
         await refreshJobs()
     }
@@ -324,17 +376,12 @@ final class MainWindowModel: ObservableObject {
 
     // MARK: Recording banner
 
-    func stopRecordingFromBanner() async {
-        stoppingRecording = true
-        defer { stoppingRecording = false }
-        do {
-            try await client.stopRecording()
-            hostActions.recordingStopped()
-            showToast("録画を停止しました（処理ジョブを開始）")
-            await refresh()
-        } catch {
-            report(error, title: "録画を停止できません")
-        }
+    func startRecordingFromWindow() {
+        hostActions.startRecording()
+    }
+
+    func stopRecordingFromBanner() {
+        hostActions.stopRecording()
     }
 
     // MARK: Minutes actions
@@ -343,6 +390,8 @@ final class MainWindowModel: ObservableObject {
         guard let meetingID = selectedMeetingID else {
             return
         }
+        beginJobRequest()
+        defer { endJobRequest() }
         do {
             let response = try await client.regenerate(
                 meetingID: meetingID, scope: scopeFor(meetingID: meetingID), force: force,
@@ -373,6 +422,8 @@ final class MainWindowModel: ObservableObject {
             }
             options = ["output_path": .string(url.path), "overwrite": .bool(true)]
         }
+        beginJobRequest()
+        defer { endJobRequest() }
         do {
             let response = try await client.exportMinutes(
                 meetingID: meetingID, scope: scopeFor(meetingID: meetingID),
@@ -388,31 +439,6 @@ final class MainWindowModel: ObservableObject {
         } catch {
             report(error, title: "エクスポートできません")
         }
-    }
-
-    /// Exporters whose ref is a local file (their output path). Others (URL / page id) get no
-    /// save panel and no Finder reveal.
-    static func fileExtension(forDestination name: String) -> String? {
-        switch name {
-        case "markdown": return "md"
-        case "html": return "html"
-        default: return nil
-        }
-    }
-
-    /// Reveal a tool-returned absolute path in Finder (allowed non-MCP convenience).
-    func revealRef(_ ref: String) {
-        guard ref.hasPrefix("/"), FileManager.default.fileExists(atPath: ref) else {
-            return
-        }
-        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: ref)])
-    }
-
-    func openBundleInFinder() {
-        guard let path = detail?.bundlePath else {
-            return
-        }
-        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
     }
 
     // MARK: Context actions
@@ -467,6 +493,8 @@ final class MainWindowModel: ObservableObject {
             }
             payload = .filePath(path)
         }
+        beginJobRequest()
+        defer { endJobRequest() }
         do {
             let response = try await client.registerContext(
                 meetingID: meetingID, scope: scopeFor(meetingID: meetingID),
@@ -602,6 +630,8 @@ final class MainWindowModel: ObservableObject {
     }
 
     func submitImport(_ form: ImportForm) async -> Bool {
+        beginJobRequest()
+        defer { endJobRequest() }
         do {
             let response = try await client.importRecording(
                 NarumiClient.ImportRequest(
@@ -761,70 +791,6 @@ final class MainWindowModel: ObservableObject {
         }
     }
 
-    // MARK: Jobs
-
-    func track(jobID: String) {
-        if !trackedJobIDs.contains(jobID) {
-            trackedJobIDs.insert(jobID, at: 0)
-        }
-        Task { await refreshJobs() }
-    }
-
-    var activeJobCount: Int { jobs.filter(\.isActive).count }
-
-    private func refreshJobs() async {
-        // Jobs the window started + the queued/running jobs the list reported.
-        var ids = trackedJobIDs
-        for meeting in meetings {
-            if let job = meeting.activeJob, !ids.contains(job.jobID) {
-                ids.append(job.jobID)
-                trackedJobIDs.append(job.jobID)
-            }
-        }
-        var refreshed: [Job] = []
-        var selectedMeetingJobFinished = false
-        for id in ids {
-            guard let job = try? await client.jobStatus(jobID: id) else {
-                continue  // expired / unknown: drop from the list
-            }
-            refreshed.append(job)
-            let previous = lastJobStatuses[id]
-            lastJobStatuses[id] = job.status
-            if let previous, previous != job.status, !job.isActive,
-                job.meetingID == selectedMeetingID {
-                selectedMeetingJobFinished = true
-            }
-        }
-        trackedJobIDs = refreshed.map(\.jobID)
-        if trackedJobIDs.count > 20 {
-            // Keep the newest 20; prune only finished jobs from the tail.
-            let keep = refreshed.prefix(20).map(\.jobID) + refreshed.dropFirst(20).filter(\.isActive).map(\.jobID)
-            trackedJobIDs = Array(keep)
-            refreshed = refreshed.filter { trackedJobIDs.contains($0.jobID) }
-        }
-        jobs = refreshed
-        if selectedMeetingJobFinished {
-            await loadDetail()
-            minutes = nil
-            transcript = nil
-            await loadTabContent()
-        }
-    }
-
-    func cancel(jobID: String) async {
-        do {
-            let job = try await client.cancelJob(jobID: jobID)
-            showToast("ジョブをキャンセルしました (\(job.jobID): \(NarumiFormat.jobStatusLabel(job.status)))")
-            await refreshJobs()
-        } catch {
-            report(error, title: "ジョブをキャンセルできません")
-        }
-    }
-
-    func clearFinishedJobs() {
-        trackedJobIDs = jobs.filter(\.isActive).map(\.jobID)
-        jobs = jobs.filter(\.isActive)
-    }
 }
 
 extension String {

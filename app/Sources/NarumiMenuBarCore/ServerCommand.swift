@@ -56,8 +56,10 @@ public struct ServerCommand: Equatable, Sendable {
     }
 
     /// Bundled mode (spec `2026-08-27-narumi-app-distribution-design.md` §1): run the synced
-    /// venv's `narumi-server` directly — no login shell and no PATH lookup, since uv and the
-    /// venv live at absolute paths. `NARUMI_CONTRACTS_DIR` points the server at the contracts
+    /// venv's Python in isolated mode — no login shell, PATH lookup, user site, working-directory
+    /// import, or inherited Python overrides. Otherwise an old checkout on PYTHONPATH could
+    /// pass readiness checks with the same version as the bundled package. The CLI module is
+    /// the same entry point as `narumi-server`. `NARUMI_CONTRACTS_DIR` points at the contracts
     /// copied into the .app; `NARUMI_HOME` passes through exactly like repo mode. `nil` when
     /// the .app carries no `Resources/runtime`.
     public static func bundled(
@@ -66,19 +68,25 @@ public struct ServerCommand: Equatable, Sendable {
         guard let runtime = config.bundledRuntime else {
             return nil
         }
-        var environment = base
+        // `-I` protects this interpreter; remove import/startup overrides as well so Python
+        // subprocesses cannot reintroduce them. Keep unrelated settings (auth, proxy, locale,
+        // etc.). macOS's launcher override is consumed before normal Python flag handling.
+        var environment = base.filter { key, _ in
+            !key.hasPrefix("PYTHON") && !key.hasPrefix("_PYTHON") && key != "__PYVENV_LAUNCHER__"
+        }
         environment[ServerConfig.Env.contractsDir] = runtime.contractsDir.path
         if let dataRoot = config.dataRoot {
             environment[ServerConfig.Env.home] = dataRoot
         }
         var arguments = [
+            "-I", "-m", "narumi_server.cli",
             "--http", "--host", ServerConfig.defaultHost, "--port", String(config.port),
         ]
         if let recorder = config.recorder {
             arguments += ["--recorder", recorder.path]
         }
         return ServerCommand(
-            executable: config.runtimePaths.serverExecutable,
+            executable: config.runtimePaths.venv.appendingPathComponent("bin/python3"),
             arguments: arguments,
             // Exists whenever the launch is reached: the venv (inside it) was just synced.
             currentDirectory: config.runtimePaths.root,

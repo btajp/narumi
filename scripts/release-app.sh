@@ -1,32 +1,20 @@
 #!/usr/bin/env bash
-# scripts/release-app.sh — narumi.app の署名・公証・GitHub Releases 公開（設計 §3）。
-#
-# Usage: scripts/release-app.sh <version> [--allow-pubkey-rotation]
-#
-# 手順: 1 前提検査 → 2 版整合 → 3 鍵ポリシー → 4 ビルド（ランタイム同梱・Developer ID 署名）→
-#       5 検証 → 6 公証 + staple → 7 appcast 生成・署名検証 → 8 GitHub Release（draft）
-# タグ v<version> は gh release create が作る（先に手で打たない）。draft の公開は手動。
-#
-# Env（必須）:
-#   APPLE_SIGNING_IDENTITY  "Developer ID Application: ..."
-#   APPLE_API_KEY           App Store Connect API キー ID
-#   APPLE_API_ISSUER        App Store Connect API issuer ID
-#   APPLE_API_KEY_PATH      .p8 キーファイルのパス
-# Env（任意）:
-#   SPARKLE_VERSION         Sparkle ツールの版（既定 2.9.6）
-#   SPARKLE_BIN             generate_appcast / sign_update / generate_keys のディレクトリ
-#                           （既定 ~/.sparkle/<SPARKLE_VERSION>/bin）
-#   RELEASE_DIR             作業ディレクトリ（既定 <repo>/dist/release/v<version>）
-#
-# 秘密情報（Apple API キー・Sparkle 秘密鍵）はリポ・ログに書かない。env と Keychain のみ。
+# Build, notarize, validate, and upload a draft. This script never publishes a release.
+# Usage: scripts/release-app.sh <version> [--verify-draft|--verify-published]
+# Required env: APPLE_SIGNING_IDENTITY, APPLE_API_KEY, APPLE_API_ISSUER, APPLE_API_KEY_PATH.
+# Optional env:
+#   NARUMI_RELEASE_ENV  Local shell settings (default ~/.config/narumi/release.env if present).
+#   SPARKLE_BIN        Existing tools; otherwise use app/.build/artifacts/*/*/bin.
+#   SPARKLE_KEY_ACCOUNT  Existing signing account (default jp.btajp.narumi).
+#   RELEASE_DIR        Unused absolute directory (default <repo>/dist/release/v<version>).
+# --verify-* only checks an existing release; it never overwrites or publishes anything.
+set +x
+set +v
 set -euo pipefail
+umask 077
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SPARKLE_VERSION="${SPARKLE_VERSION:-2.9.6}"
-SPARKLE_BIN="${SPARKLE_BIN:-$HOME/.sparkle/$SPARKLE_VERSION/bin}"
-APP="$ROOT/dist/narumi.app"
-PUBLIC_KEY_FILE="$ROOT/app/sparkle-public-key.txt"
-DOWNLOAD_URL_PREFIX_BASE="https://github.com/btajp/narumi/releases/download"
+source "$ROOT/scripts/release-common.sh"
 
 fail() {
   echo "release-app: $*" >&2
@@ -34,202 +22,133 @@ fail() {
 }
 
 step() {
-  echo
-  echo "===> $*"
+  echo "release-app: $*"
 }
 
 usage() {
-  sed -n '2,/^set -euo pipefail/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
+  echo "Usage: scripts/release-app.sh <version> [--verify-draft|--verify-published]"
 }
 
-VERSION_ARG=""
-ALLOW_ROTATION=0
+VERSION=""
+MODE="create"
 for arg in "$@"; do
   case "$arg" in
-    --allow-pubkey-rotation) ALLOW_ROTATION=1 ;;
-    -h|--help) usage; exit 0 ;;
-    -*) fail "unknown argument: ${arg}（--help 参照）" ;;
-    *)
-      [[ -z "$VERSION_ARG" ]] || fail "版は 1 つだけ指定してください"
-      VERSION_ARG="$arg"
+    --verify-draft|--verify-published)
+      [[ "$MODE" == "create" ]] || fail "検証モードは 1 つだけ指定してください"
+      MODE="${arg#--}"
       ;;
+    --allow-pubkey-rotation) fail "鍵不一致での出荷は許可しません" ;;
+    -h|--help) usage; exit 0 ;;
+    -*) fail "unknown argument（--help 参照）" ;;
+    *) [[ -z "$VERSION" ]] || fail "版は 1 つだけ指定してください"; VERSION="$arg" ;;
   esac
 done
-[[ -n "$VERSION_ARG" ]] || { usage >&2; exit 2; }
+[[ -n "$VERSION" ]] || { usage >&2; exit 2; }
+[[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+  || fail "安定版 semver（X.Y.Z、先頭ゼロなし）を指定してください"
 
-# --- 1. 前提検査 ---------------------------------------------------------------------------
-step "1/8 前提検査"
-
-command -v gh >/dev/null 2>&1 || fail "gh がありません（brew install gh）"
-command -v uv >/dev/null 2>&1 || fail "uv がありません（https://docs.astral.sh/uv/）"
-command -v python3 >/dev/null 2>&1 || fail "python3 がありません"
-command -v xcrun >/dev/null 2>&1 || fail "xcrun がありません（Xcode / CLT）"
-
-gh auth status >/dev/null || fail "gh が未認証です（gh auth login）"
-
-branch="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
-[[ "$branch" == "main" ]] || fail "main ブランチでのみリリースできます（現在: ${branch}）"
-[[ -z "$(git -C "$ROOT" status --porcelain)" ]] || fail "作業ツリーが clean ではありません"
-git -C "$ROOT" fetch --quiet origin main
-[[ "$(git -C "$ROOT" rev-parse HEAD)" == "$(git -C "$ROOT" rev-parse origin/main)" ]] \
-  || fail "HEAD が origin/main と一致しません（push 済みの main からのみリリース）"
-
-for tool in generate_appcast sign_update generate_keys; do
-  if [[ ! -x "$SPARKLE_BIN/$tool" ]]; then
-    fail "Sparkle ツールがありません: $SPARKLE_BIN/$tool
-  取得方法:
-    mkdir -p ~/.sparkle/$SPARKLE_VERSION
-    gh release download --repo sparkle-project/Sparkle $SPARKLE_VERSION \\
-      --pattern 'Sparkle-$SPARKLE_VERSION.tar.xz' --output ~/.sparkle/Sparkle-$SPARKLE_VERSION.tar.xz
-    tar xf ~/.sparkle/Sparkle-$SPARKLE_VERSION.tar.xz -C ~/.sparkle/$SPARKLE_VERSION
-  （bin/ が ~/.sparkle/$SPARKLE_VERSION/bin に展開される。別の場所なら SPARKLE_BIN で指定）"
-  fi
-done
-
-[[ -n "${APPLE_SIGNING_IDENTITY:-}" ]] || fail "APPLE_SIGNING_IDENTITY が未設定です"
-[[ -n "${APPLE_API_KEY:-}" ]] || fail "APPLE_API_KEY が未設定です"
-[[ -n "${APPLE_API_ISSUER:-}" ]] || fail "APPLE_API_ISSUER が未設定です"
-[[ -n "${APPLE_API_KEY_PATH:-}" ]] || fail "APPLE_API_KEY_PATH が未設定です"
-[[ -f "$APPLE_API_KEY_PATH" ]] || fail "APPLE_API_KEY_PATH のファイルがありません"
-
-"$SPARKLE_BIN/generate_keys" -p >/dev/null \
-  || fail "Keychain に Sparkle 秘密鍵がありません。初回はリリース担当者が generate_keys を一度だけ実行し、
-  公開鍵を app/sparkle-public-key.txt にコミット、generate_keys -x で秘密鍵をバックアップする（README「配布」参照）"
-
-# --- 2. 版整合 -----------------------------------------------------------------------------
-step "2/8 版整合（VERSION が正本）"
-version_file="$(tr -d '[:space:]' < "$ROOT/VERSION")"
-[[ "$VERSION_ARG" == "$version_file" ]] \
-  || fail "指定の版 $VERSION_ARG が VERSION ファイル（${version_file}）と一致しません"
-"$ROOT/scripts/check-version.sh"
-VERSION="$version_file"
+release_load_env || fail "リリース設定を読み込めません"
+SPARKLE_BIN="$(release_sparkle_bin "$ROOT")" \
+  || fail "Sparkle ツールがありません。SwiftPM の依存解決後、または SPARKLE_BIN 指定で再実行してください"
+SPARKLE_KEY_ACCOUNT="${SPARKLE_KEY_ACCOUNT:-jp.btajp.narumi}"
 RELEASE_DIR="${RELEASE_DIR:-$ROOT/dist/release/v$VERSION}"
+PUBLIC_KEY_FILE="$ROOT/app/sparkle-public-key.txt"
+BUILD_DIR="$RELEASE_DIR/build"
+APP="$BUILD_DIR/narumi.app"
 FEED_DIR="$RELEASE_DIR/feed"
 ZIP="$FEED_DIR/narumi-$VERSION.zip"
+VERIFY="$ROOT/scripts/release_verify.py"
+INVENTORY="$ROOT/scripts/bundle_inventory.py"
+REPO="btajp/narumi"
+export SPARKLE_BIN SPARKLE_KEY_ACCOUNT
 
-if (cd "$ROOT" && gh release view "v$VERSION" >/dev/null 2>&1); then
-  fail "リリース v$VERSION は既に存在します"
+for tool in gh git python3; do
+  command -v "$tool" >/dev/null 2>&1 || fail "$tool がありません。既存のツール管理方針に沿って準備してください"
+done
+gh auth status >/dev/null 2>&1 || fail "gh の認証を確認できません"
+"$ROOT/scripts/check-version.sh"
+"$ROOT/scripts/check-updater-key-policy.sh"
+verify_args=(--root "$ROOT" --release-dir "$RELEASE_DIR" --version "$VERSION"
+  --sparkle-bin "$SPARKLE_BIN" --account "$SPARKLE_KEY_ACCOUNT")
+
+if [[ "$MODE" != "create" ]]; then
+  python3 "$VERIFY" "$MODE" "${verify_args[@]}"
+  exit 0
 fi
 
-# --- 3. 鍵ポリシー -------------------------------------------------------------------------
-step "3/8 鍵ポリシー"
-rotation_args=()
-if [[ $ALLOW_ROTATION -eq 1 ]]; then
-  rotation_args+=(--allow-pubkey-rotation)
-fi
-SPARKLE_BIN="$SPARKLE_BIN" "$ROOT/scripts/check-updater-key-policy.sh" ${rotation_args[@]+"${rotation_args[@]}"}
+step "1/8 出荷元と既存リリースを確認"
+for tool in uv xcrun codesign spctl ditto; do
+  command -v "$tool" >/dev/null 2>&1 || fail "$tool がありません"
+done
+[[ "${APPLE_SIGNING_IDENTITY:-}" == "Developer ID Application: "* ]] \
+  || fail "Developer ID Application の署名 identity が必要です"
+[[ -n "${APPLE_API_KEY:-}" && -n "${APPLE_API_ISSUER:-}" && -n "${APPLE_API_KEY_PATH:-}" ]] \
+  || fail "Apple 公証用の設定が不足しています"
+[[ -f "$APPLE_API_KEY_PATH" ]] || fail "Apple 公証用キーファイルがありません"
+source_info="$(python3 "$VERIFY" preflight "${verify_args[@]}")"
+IFS=$'\t' read -r SOURCE_COMMIT BUILD_NUMBER <<< "$source_info"
 
-# --- 4. ビルド -----------------------------------------------------------------------------
-step "4/8 ビルド（swift build + ランタイム同梱 + Developer ID 署名）"
-"$ROOT/scripts/build-app.sh" --release --runtime
-
-# --- 5. 検証 -------------------------------------------------------------------------------
-step "5/8 検証"
+step "2/8 専用ディレクトリへビルド・署名"
+# Do not inherit a caller's DIST_DIR or public-key override. The live dist app is untouched.
+DIST_DIR="$BUILD_DIR" SPARKLE_PUBLIC_KEY_FILE="$PUBLIC_KEY_FILE" \
+  NARUMI_TRACKED_SOURCES="$RELEASE_DIR/tracked-sources.nul" \
+  "$ROOT/scripts/build-app.sh" --release --runtime --build-override "$BUILD_NUMBER"
+python3 "$VERIFY" check-app "${verify_args[@]}"
+python3 "$INVENTORY" check-app "$APP" --require-runtime \
+  --tracked-sources "$RELEASE_DIR/tracked-sources.nul" > "$RELEASE_DIR/pre-notary-inventory.json"
 codesign --verify --deep --strict "$APP"
-# spctl は公証前は rejected が正常。ここでは参考表示のみ、staple 後に必須検査する。
-spctl -a -t exec -vv "$APP" || echo "release-app: spctl は公証前のため rejected（staple 後に再検査）"
 
-plist_version="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP/Contents/Info.plist")"
-[[ "$plist_version" == "$VERSION" ]] \
-  || fail "Info.plist の CFBundleShortVersionString（${plist_version}）が $VERSION と一致しません"
-plist_pubkey="$(/usr/libexec/PlistBuddy -c 'Print SUPublicEDKey' "$APP/Contents/Info.plist")" \
-  || fail "Info.plist に SUPublicEDKey がありません"
-committed_pubkey="$(tr -d '[:space:]' < "$PUBLIC_KEY_FILE")"
-[[ "$plist_pubkey" == "$committed_pubkey" ]] \
-  || fail "Info.plist の SUPublicEDKey が app/sparkle-public-key.txt と一致しません"
-
-# --- 6. 公証 + staple ----------------------------------------------------------------------
-step "6/8 公証（notarytool submit --wait → stapler staple → zip 再作成）"
-mkdir -p "$FEED_DIR"
-rm -f "$ZIP"
-ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
-xcrun notarytool submit "$ZIP" \
+step "3/8 Apple 公証"
+mkdir "$FEED_DIR"
+NOTARY_ZIP="$RELEASE_DIR/notary-submission.zip"
+ditto -c -k --norsrc --noextattr --noqtn --keepParent "$APP" "$NOTARY_ZIP"
+if ! xcrun notarytool submit "$NOTARY_ZIP" \
   --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" \
-  --wait
+  --wait --output-format json > "$RELEASE_DIR/notary-result.json" 2> "$RELEASE_DIR/notary-error.log"; then
+  fail "公証に失敗しました。出荷は中止し、専用ディレクトリに診断を保存しました"
+fi
+python3 "$VERIFY" check-notary "${verify_args[@]}"
+
+step "4/8 staple 後の最終 ZIP を検査"
 xcrun stapler staple "$APP"
-rm -f "$ZIP"
-ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
-spctl -a -t exec -vv "$APP" || fail "spctl の評価に失敗しました（公証後）"
+xcrun stapler validate "$APP"
+codesign --verify --deep --strict "$APP"
+spctl -a -t exec -vv "$APP"
+ditto -c -k --norsrc --noextattr --noqtn --keepParent "$APP" "$ZIP"
+python3 "$INVENTORY" check-zip "$ZIP" --require-runtime \
+  --tracked-sources "$RELEASE_DIR/tracked-sources.nul" > "$RELEASE_DIR/final-zip-inventory.json"
+# Verify that ZIP creation preserved the stapled ticket and signatures.
+UNPACKED_DIR="$RELEASE_DIR/verify-unpacked"
+mkdir "$UNPACKED_DIR"
+ditto -x -k "$ZIP" "$UNPACKED_DIR"
+xcrun stapler validate "$UNPACKED_DIR/narumi.app"
+codesign --verify --deep --strict "$UNPACKED_DIR/narumi.app"
+spctl -a -t exec -vv "$UNPACKED_DIR/narumi.app"
 
-# --- 7. appcast ----------------------------------------------------------------------------
-step "7/8 appcast 生成（minimumSystemVersion / hardwareRequirements 付与、署名検証）"
-"$SPARKLE_BIN/generate_appcast" \
-  --download-url-prefix "$DOWNLOAD_URL_PREFIX_BASE/v$VERSION/" \
-  -o "$FEED_DIR/appcast.xml" \
-  "$FEED_DIR"
+step "5/8 ZIP の EdDSA 署名と appcast を生成"
+"$SPARKLE_BIN/sign_update" --account "$SPARKLE_KEY_ACCOUNT" -p "$ZIP" \
+  > "$RELEASE_DIR/archive-signature.txt"
+"$SPARKLE_BIN/generate_appcast" --account "$SPARKLE_KEY_ACCOUNT" \
+  --maximum-versions 1 --maximum-deltas 0 \
+  --download-url-prefix "https://github.com/$REPO/releases/download/v$VERSION/" \
+  -o "$FEED_DIR/appcast.xml" "$FEED_DIR"
 
-# generate_appcast はバンドルから最小 OS / アーキテクチャを推定するが、欠けていた場合に備えて
-# sparkle:minimumSystemVersion 15.0 / sparkle:hardwareRequirements arm64 を必ず付与する（冪等）。
-# 対象は enclosure の EdDSA 署名であって appcast.xml 自体ではないため、この編集で署名は壊れない。
-python3 - "$FEED_DIR/appcast.xml" <<'PY'
-import sys
-import xml.etree.ElementTree as ET
-
-NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
-ET.register_namespace("sparkle", NS)
-tree = ET.parse(sys.argv[1])
-changed = False
-for item in tree.getroot().iter("item"):
-    for tag, value in ((f"{{{NS}}}minimumSystemVersion", "15.0"),
-                       (f"{{{NS}}}hardwareRequirements", "arm64")):
-        if item.find(tag) is None:
-            ET.SubElement(item, tag).text = value
-            changed = True
-tree.write(sys.argv[1], encoding="UTF-8", xml_declaration=True)
-print("appcast.xml:", "requirements injected" if changed else "requirements already present")
-PY
-
-# enclosure（zip / delta）の sparkle:edSignature を検証する。sign_update --verify は Keychain の
-# 秘密鍵から導出した公開鍵で検証する — 手順 3 で app/sparkle-public-key.txt との整合を確認済み
-# （ローテーション時は旧鍵での検証 = 既存ユーザーの検証経路そのもの）。
-python3 - "$FEED_DIR/appcast.xml" <<'PY' > "$RELEASE_DIR/enclosures.tsv"
-import sys
-import urllib.parse
-import xml.etree.ElementTree as ET
-
-NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
-tree = ET.parse(sys.argv[1])
-count = 0
-for enclosure in tree.getroot().iter("enclosure"):
-    url = enclosure.get("url")
-    sig = enclosure.get(f"{{{NS}}}edSignature")
-    if not url or not sig:
-        sys.exit(f"enclosure に url / sparkle:edSignature がありません: {url}")
-    name = urllib.parse.unquote(url.rsplit("/", 1)[-1])
-    print(f"{name}\t{sig}")
-    count += 1
-if count == 0:
-    sys.exit("appcast.xml に enclosure がありません")
-PY
-while IFS=$'\t' read -r asset signature; do
-  [[ -f "$FEED_DIR/$asset" ]] || fail "appcast が参照する $asset が $FEED_DIR にありません"
-  "$SPARKLE_BIN/sign_update" --verify "$FEED_DIR/$asset" "$signature" \
-    || fail "$asset の sparkle:edSignature を検証できません"
-  echo "release-app: edSignature OK: $asset"
-done < "$RELEASE_DIR/enclosures.tsv"
-
-# --- 8. 公開（draft） ----------------------------------------------------------------------
-step "8/8 GitHub Release（draft 作成。タグはここで作られる）"
+step "6/8 版・署名・公開鍵・SHA256 を封印"
+python3 "$VERIFY" seal "${verify_args[@]}"
 notes_file="$RELEASE_DIR/notes.md"
 awk -v ver="$VERSION" '
   /^## / { emit = ($2 == ver); next }
   emit { print }
 ' "$ROOT/CHANGELOG.md" > "$notes_file"
-[[ -s "$notes_file" ]] || fail "CHANGELOG.md に ## $VERSION のセクションがありません"
+[[ -s "$notes_file" ]] || fail "CHANGELOG.md に指定版のセクションがありません"
 
-assets=("$ZIP" "$FEED_DIR/appcast.xml")
-shopt -s nullglob
-assets+=("$FEED_DIR"/*.delta)
-shopt -u nullglob
+step "7/8 出荷直前の再照合と draft 作成"
+python3 "$VERIFY" verify-ready "${verify_args[@]}"
+# The target is the captured full SHA, never a moving branch. No globs or delta assets.
+gh release create "v$VERSION" --repo "$REPO" --draft --target "$SOURCE_COMMIT" \
+  --title "v$VERSION" --notes-file "$notes_file" "$ZIP" "$FEED_DIR/appcast.xml"
 
-(cd "$ROOT" && gh release create "v$VERSION" \
-  --draft \
-  --target "$(git rev-parse HEAD)" \
-  --title "v$VERSION" \
-  --notes-file "$notes_file" \
-  "${assets[@]}")
-
-echo
-echo "release-app: draft v$VERSION を作成しました。内容を確認してから publish してください:"
-echo "  gh release view v$VERSION --web"
-echo "  （appcast.xml の SUFeedURL は releases/latest/download を指すため、publish 後に有効になる）"
+step "8/8 draft を再取得して照合"
+python3 "$VERIFY" verify-draft "${verify_args[@]}"
+echo "release-app: v$VERSION の draft 準備が完了しました。まだ公開していません。"
+echo "実機検証後、同じ RELEASE_DIR で --verify-draft を再実行してから公開してください。"

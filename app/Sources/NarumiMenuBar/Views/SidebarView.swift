@@ -125,35 +125,3 @@ struct MeetingRowView: View {
         .padding(.vertical, 2)
     }
 }
-
-/// Banner across the top of the window while a recording is running (`get_recording_status`),
-/// with the stop button (`stop_recording`).
-struct RecordingBannerView: View {
-    @ObservedObject var model: MainWindowModel
-
-    var body: some View {
-        if model.recordingStatus.active {
-            HStack(spacing: 10) {
-                Image(systemName: "record.circle.fill")
-                    .foregroundStyle(.red)
-                Text("録画中: \(model.recordingStatus.meetingName ?? model.recordingStatus.meetingID ?? "会議")")
-                    .bold()
-                if let elapsed = model.recordingStatus.elapsedSec {
-                    Text(NarumiFormat.duration(elapsed))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button {
-                    Task { await model.stopRecordingFromBanner() }
-                } label: {
-                    Label("録画停止", systemImage: "stop.circle")
-                }
-                .disabled(model.stoppingRecording)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(.red.opacity(0.1))
-        }
-    }
-}

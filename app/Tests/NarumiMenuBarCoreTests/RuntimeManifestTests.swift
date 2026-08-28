@@ -85,8 +85,8 @@ final class RuntimeManifestTests: XCTestCase {
         XCTAssertTrue(sample.needsSync(installed: newApp))
     }
 
-    /// The sync's last step copies the bundle manifest to installed.json byte-for-byte, so the
-    /// decoded values must round-trip to equality regardless of key order / formatting.
+    /// A post-readiness commit copies the bundle manifest byte-for-byte, so the decoded
+    /// values must round-trip to equality regardless of key order / formatting.
     func testInstalledCopyOfBundleManifestComparesEqual() throws {
         let reordered = """
             {"requirements_sha256":"cccc","python":"3.13","uv_version":"0.11.25",

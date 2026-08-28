@@ -31,6 +31,9 @@ jobs:
       - name: Sync workspace
         run: uv sync --locked
 
+      - name: Version consistency
+        run: scripts/check-version.sh
+
       - name: Lint
         run: uv run ruff check .
 

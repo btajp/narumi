@@ -31,10 +31,10 @@ public struct ServerConfig: Equatable, Sendable {
 
     /// How `narumi-server` is run (spec `2026-08-27-narumi-app-distribution-design.md` §1).
     ///
-    /// Precedence: `NARUMI_RUNTIME_MODE` override → `.repo` when a repository resolves
-    /// (development: `uv run` in the checkout) → `.bundled` when the .app carries
-    /// `Resources/runtime` → `nil` (not configured). A forced mode wins even when its inputs
-    /// are missing — the launcher then reports the failure instead of silently switching.
+    /// Precedence: `NARUMI_RUNTIME_MODE` → explicit `NARUMI_REPO` → bundled resources →
+    /// saved / inferred repository → not configured. A release must not silently run an old
+    /// checkout just because a development app previously saved its path. Explicit developer
+    /// overrides still win, even if their inputs are missing (a visible startup failure).
     public enum RuntimeMode: String, Equatable, Sendable {
         case repo
         case bundled
@@ -71,6 +71,9 @@ public struct ServerConfig: Equatable, Sendable {
     public var port: Int
     /// MCP endpoint the client talks to (`NARUMI_SERVER_URL`, else derived from `port`).
     public var serverURL: URL
+    /// Whether the user explicitly selected a server endpoint. A bundled release may only
+    /// attach to an already-running, unowned server when this is true.
+    public var hasExplicitServerURL: Bool
     /// `narumi-recorder` shipped inside the .app, when present.
     public var recorder: URL?
     /// stdout + stderr of the launched server.
@@ -97,12 +100,14 @@ public struct ServerConfig: Equatable, Sendable {
         runtimeMode: RuntimeMode?,
         bundledRuntime: BundledRuntime?,
         runtimePaths: RuntimePaths,
-        runtimeLogFile: URL
+        runtimeLogFile: URL,
+        hasExplicitServerURL: Bool = false
     ) {
         self.repository = repository
         self.repositorySource = repositorySource
         self.port = port
         self.serverURL = serverURL
+        self.hasExplicitServerURL = hasExplicitServerURL
         self.recorder = recorder
         self.logFile = logFile
         self.dataRoot = dataRoot
@@ -157,7 +162,14 @@ public struct ServerConfig: Equatable, Sendable {
                 environment: environment, repository: repository, bundledRuntime: bundledRuntime),
             bundledRuntime: bundledRuntime,
             runtimePaths: RuntimePaths(dataRoot: dataRootURL),
-            runtimeLogFile: homeDirectory.appendingPathComponent(runtimeLogPathInHome))
+            runtimeLogFile: homeDirectory.appendingPathComponent(runtimeLogPathInHome),
+            hasExplicitServerURL: explicitServerURL(environment) != nil)
+    }
+
+    /// An implicitly configured bundled app must own the server it uses. In particular,
+    /// finding a development server on the default port is a conflict, not readiness.
+    public var requiresOwnedServer: Bool {
+        runtimeMode == .bundled && !hasExplicitServerURL
     }
 
     /// Whether `url` looks like the narumi repository (both markers present).
@@ -187,21 +199,20 @@ public struct ServerConfig: Equatable, Sendable {
         return (nil, nil)
     }
 
-    /// See `RuntimeMode`: override env var → repo when a repository resolves → bundled when
-    /// the .app carries `Resources/runtime` → nil.
+    /// See `RuntimeMode`: explicit developer overrides → bundled → saved / inferred repo.
     static func resolveRuntimeMode(
         environment: [String: String], repository: URL?, bundledRuntime: BundledRuntime?
     ) -> RuntimeMode? {
         if let raw = nonEmpty(environment[Env.runtimeMode]), let forced = RuntimeMode(rawValue: raw) {
             return forced
         }
-        if repository != nil {
+        if nonEmpty(environment[Env.repo]) != nil {
             return .repo
         }
         if bundledRuntime != nil {
             return .bundled
         }
-        return nil
+        return repository == nil ? nil : .repo
     }
 
     static func resolvePort(environment: [String: String]) -> Int {

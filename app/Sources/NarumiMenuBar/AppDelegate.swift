@@ -1,7 +1,6 @@
 import AppKit
 import Foundation
 import NarumiMenuBarCore
-import Sparkle
 import SwiftUI
 
 /// Menu bar UI. An MCP client for every data operation; the only thing it does besides calling
@@ -9,10 +8,10 @@ import SwiftUI
 /// app updates through Sparkle.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    static let appVersion = "0.1.0"
+    static var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
+    }
     static let displayName = "narumi"
-    static let idleIcon = "🕵️"
-    static let recordingIcon = "⏺"
     static let pollInterval: TimeInterval = 5
 
     private var statusItem: NSStatusItem!
@@ -22,53 +21,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var restartItem: NSMenuItem!
     private var chooseRepoItem: NSMenuItem!
     private var openLogItem: NSMenuItem!
+    private var updateItem: NSMenuItem!
     private var pollTimer: Timer?
+    private var statusRefreshTask: Task<Void, Never>?
     private var signalSources: [DispatchSourceSignal] = []
-    private var recording = false
-    private var busy = false
-    private var terminating = false
+    private var session = DesktopSessionState()
+    private var recording: Bool { session.recording.active }
+    private var busy: Bool { session.operation != nil }
+    private var terminating: Bool { session.terminating }
+    private var knownJobsBusy = false
+    private var lastJobRequestPublication: UInt64 = 0
     private var shutdownDone = false
-    private var currentMeetingID: String?
+    private var userRequestedQuit = false
     private var lastInfo: ServerInfoSummary?
-    private var serverReachable = false
     private var client: MCPClient!
     private var launcher: ServerLauncher!
-    private var updaterController: SPUStandardUpdaterController!
+    private var updater: DesktopUpdater!
     private var mainWindow: NSWindow?
     private var mainWindowModel: MainWindowModel?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        // Scheduled checks are Sparkle's business (SUEnableAutomaticChecks /
-        // SUScheduledCheckInterval in Info.plist); Sparkle quits the app before applying an
-        // update, so the normal applicationShouldTerminate path stops the managed server.
-        updaterController = SPUStandardUpdaterController(
-            startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
         let config = ServerConfig.resolve(
             storedRepoPath: UserDefaults.standard.string(forKey: ServerConfig.repoPathDefaultsKey))
-        let client = MCPClient(serverURL: config.serverURL, clientVersion: AppDelegate.appVersion)
+        let client = MCPClient(
+            serverURL: config.serverURL, clientVersion: AppDelegate.appVersion,
+            jobRequestObserver: { [weak self] publication, count, pendingStop, jobIDs in
+                guard let self, publication > self.lastJobRequestPublication else { return }
+                self.lastJobRequestPublication = publication
+                let model = self.ensureMainWindowModel()
+                for jobID in jobIDs { model.track(jobID: jobID) }
+                self.session.setJobRequestState(pending: count > 0, pendingStop: pendingStop)
+                model.unresolvedJobRequestCount = count
+                self.applyState()
+            })
         self.client = client
         launcher = ServerLauncher(config: config, client: client)
         launcher.onStateChange = { [weak self] state in
             guard let self else {
                 return
             }
+            session.connectionChanged(to: state)
+            lastInfo = nil
+            applyServerState()
             if state.pollsServerInfo {
-                serverReachable = true  // the launcher just got an answer
                 Task { await self.refreshServerStatus() }
             }
-            applyServerState()
         }
 
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = AppDelegate.idleIcon
-        statusItem.button?.toolTip = AppDelegate.displayName
+        updater = DesktopUpdater(
+            blockReason: { [weak self] in
+                guard let self else { return "アプリを準備中です" }
+                return updateBlockReason
+            },
+            refreshSafety: { [weak self] in
+                await self?.refreshServerStatus()
+                await self?.mainWindowModel?.refreshJobs()
+            },
+            installationChanged: { [weak self] installing in
+                self?.session.setInstallingUpdate(installing)
+                self?.applyState()
+            })
+
+        statusItem = NSStatusBar.system.statusItem(withLength: 88)
+        statusItem.button?.title = AppDelegate.displayName
+        statusItem.button?.imagePosition = .imageLeading
         statusItem.menu = buildMenu()
         installSignalHandlers()
         applyServerState()
+        openMainWindow()
 
         Task {
             await launcher.start()
+            applyServerState()
         }
         pollTimer = Timer.scheduledTimer(withTimeInterval: AppDelegate.pollInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -92,6 +117,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if terminating {
             return .terminateCancel  // one shutdown is already in progress
         }
+        // An updater must never turn its Quit request into the normal "stop recording"
+        // flow. A late active/unknown state cancels the relaunch without stopping anything.
+        if session.shouldDeferUpdateTermination(
+            updateOwnsTermination: updater?.ownsTermination == true,
+            updateInstalling: updater?.installing == true, userRequestedQuit: userRequestedQuit,
+            launcherBusy: launcher?.isBusy ?? true, knownJobsBusy: knownJobsBusy)
+        {
+            updater.installationTerminationDenied()
+            return .terminateCancel
+        }
+        guard !busy else {
+            if userRequestedQuit {
+                presentMessage(
+                    title: "録画の操作中です",
+                    text: "録画の開始・停止が完了してから、もう一度「終了」を選んでください。")
+            }
+            return .terminateCancel
+        }
         if recording && !confirmStopRecordingBeforeQuit() {
             return .terminateCancel
         }
@@ -102,7 +145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard recording || stopServer else {
             return .terminateNow
         }
-        terminating = true
+        session.beginTermination()
         pollTimer?.invalidate()
         mainWindowModel?.stopPolling()
         applyState()
@@ -119,8 +162,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         "request_id": .string(UUID().uuidString),
                         "auto_process": .bool(!stopServer),
                     ])
-                    recording = false
-                    currentMeetingID = nil
+                    session.confirmStoppedForShutdown()
                 } catch {
                     // The managed server finalizes the recording itself at shutdown (without the
                     // process job); an external one does not, so the user must know.
@@ -178,10 +220,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(openLogItem)
 
         menu.addItem(.separator())
-        let updateItem = NSMenuItem(
+        updateItem = NSMenuItem(
             title: "アップデートを確認…",
-            action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), keyEquivalent: "")
-        updateItem.target = updaterController
+            action: #selector(checkForUpdates), keyEquivalent: "")
+        updateItem.target = self
         menu.addItem(updateItem)
 
         menu.addItem(.separator())
@@ -226,18 +268,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.hostActions = MainWindowModel.HostActions(
             restartServer: { [weak self] in self?.restartServer() },
             openServerLog: { [weak self] in self?.openLog() },
-            checkForUpdates: { [weak self] in
-                self?.updaterController.checkForUpdates(nil)
-            },
-            recordingStopped: { [weak self] in
-                guard let self else {
-                    return
-                }
-                self.recording = false
-                self.currentMeetingID = nil
-                self.applyState()
+            checkForUpdates: { [weak self] in self?.checkForUpdates() },
+            startRecording: { [weak self] in self?.startRecording() },
+            stopRecording: { [weak self] in self?.stopRecording() },
+            jobActivityChanged: { [weak self] active in
+                self?.knownJobsBusy = active
+                self?.applyState()
             })
         mainWindowModel = model
+        model.applyDesktopSession(session)
         return model
     }
 
@@ -250,13 +289,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func applyState() {
-        statusItem.button?.title = recording ? AppDelegate.recordingIcon : AppDelegate.idleIcon
-        if !recording {
-            stopItem.title = "録画停止"  // drop a stale elapsed-time suffix
+        guard statusItem != nil else { return }
+        let image = NSImage(systemSymbolName: session.menuSymbolName, accessibilityDescription: session.accessibilityLabel)
+        image?.isTemplate = true
+        image?.size = NSSize(width: 18, height: 18)
+        statusItem.button?.image = image
+        statusItem.button?.toolTip = session.accessibilityLabel
+        statusItem.button?.setAccessibilityLabel(session.accessibilityLabel)
+        if recording, let elapsed = session.recording.elapsedSec {
+            stopItem.title = "録画停止（\(NarumiFormat.duration(elapsed))）"
+        } else {
+            stopItem.title = "録画停止"
         }
-        let serving = launcher?.state.pollsServerInfo ?? false
-        startItem.isEnabled = !recording && !busy && !terminating && serving
-        stopItem.isEnabled = recording && !busy && !terminating
+        startItem.isEnabled = session.canStart
+        stopItem.isEnabled = session.canStop
+        updateItem.isEnabled = updater?.canCheckForUpdates == true
+        mainWindowModel?.applyDesktopSession(session)
+        updater?.stateDidChange()
     }
 
     private func applyServerState() {
@@ -264,10 +313,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let state = launcher.state
-        serverItem.title = ServerStatusText.title(for: state, info: lastInfo, reachable: serverReachable)
+        serverItem.title = ServerStatusText.title(for: state, info: lastInfo, reachable: session.serverReachable)
         serverItem.toolTip = state.detail
-        restartItem.isEnabled = state.canRestart && !launcher.isBusy && !terminating
-        chooseRepoItem.isEnabled = !launcher.isBusy && !terminating
+        restartItem.isEnabled = state.canRestart && !launcher.isBusy && !busy && !terminating && !session.installingUpdate
+        chooseRepoItem.isEnabled = !launcher.isBusy && !busy && !recording && !terminating && !session.installingUpdate
         applyState()
     }
 
@@ -297,18 +346,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Recording actions
 
     @objc private func startRecording() {
-        guard !recording, !busy else {
+        guard let token = session.beginStart() else {
             return
         }
-        guard let options = promptForRecordingOptions() else {
-            return
-        }
-        busy = true
         applyState()
+        guard let options = promptForRecordingOptions() else {
+            session.cancelStart(token)
+            applyState()
+            return
+        }
         Task {
+            guard session.isCurrentOperation(token) else {
+                presentMessage(
+                    title: "録画は開始していません",
+                    text: "接続が切り替わったため、開始要求を送信しませんでした。準備が整ってからもう一度「録画開始」を選んでください。")
+                return
+            }
             defer {
-                busy = false
                 applyState()
+                Task { await refreshServerStatus() }
             }
             do {
                 var arguments: [String: JSONNode] = [
@@ -322,35 +378,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     arguments["scope"] = .string(scope)
                 }
                 let result = try await client.callTool(ToolCatalog.startRecording, arguments: arguments)
-                currentMeetingID = result.structuredContent?["meeting_id"]?.stringValue
-                recording = true
+                let accepted = session.finishStart(
+                    token,
+                    recording: RecordingStatus(
+                        active: true,
+                        meetingID: result.structuredContent?["meeting_id"]?.stringValue,
+                        meetingName: options.meetingName,
+                        startedAt: result.structuredContent?["started_at"]?.stringValue,
+                        elapsedSec: 0))
+                if accepted {
+                    mainWindowModel?.showToast("録画を開始しました")
+                } else {
+                    mainWindowModel?.showToast("接続が切り替わったため、現在の録画状態を再確認しています")
+                }
             } catch {
-                presentError(title: "録画を開始できません", error: error)
+                if session.failOperation(token) {
+                    presentError(title: "録画を開始できません", error: error)
+                }
             }
         }
     }
 
     @objc private func stopRecording() {
-        guard recording, !busy else {
+        guard let token = session.beginStop() else {
             return
         }
-        busy = true
         applyState()
         Task {
+            guard session.isCurrentOperation(token) else { return }
             defer {
-                busy = false
                 applyState()
+                Task { await refreshServerStatus() }
             }
             // stop_recording's contract takes only request_id (+ auto_process / discard_video);
             // the server tracks the single running recording itself.
             do {
-                _ = try await client.callTool(ToolCatalog.stopRecording, arguments: [
+                let result = try await client.callTool(ToolCatalog.stopRecording, arguments: [
                     "request_id": .string(UUID().uuidString),
                 ])
-                recording = false
-                currentMeetingID = nil
+                if session.finishStop(token) {
+                    if let jobID = result.structuredContent?["job_id"]?.stringValue {
+                        ensureMainWindowModel().track(jobID: jobID)
+                    }
+                    mainWindowModel?.showToast("録画を停止して保存しました")
+                    await mainWindowModel?.refresh()
+                }
             } catch {
-                presentError(title: "録画を停止できません", error: error)
+                if session.failOperation(token) {
+                    presentError(title: "録画を停止できません", error: error)
+                }
             }
         }
     }
@@ -358,7 +434,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Server actions
 
     @objc private func restartServer() {
-        guard launcher.state.canRestart, !launcher.isBusy, !terminating else {
+        guard launcher.state.canRestart, !launcher.isBusy, !busy, !terminating, !session.installingUpdate else {
             return
         }
         if recording {
@@ -369,18 +445,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             else {
                 return
             }
-            recording = false  // the server finalizes it at shutdown
-            currentMeetingID = nil
         }
+        session.connectionChanged(to: .starting(since: Date()))
         applyServerState()
         Task {
             await launcher.restart()
+            applyServerState()
             await refreshServerStatus()
         }
     }
 
     @objc private func chooseRepository() {
-        guard !launcher.isBusy, !terminating else {
+        guard !launcher.isBusy, !busy, !recording, !terminating, !session.installingUpdate else {
             return
         }
         NSApp.activate(ignoringOtherApps: true)
@@ -411,7 +487,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 text: "選択したリポジトリは保存しましたが、NARUMI_REPO=\(launcher.config.repository?.path ?? "") が設定されている間はそちらが使われます。")
         }
         Task {
+            session.connectionChanged(to: .starting(since: Date()))
+            applyState()
             await launcher.restart()
+            applyServerState()
             await refreshServerStatus()
         }
     }
@@ -428,48 +507,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func quit() {
+        // A menu-selected Quit is an explicit user action, unlike Sparkle's otherwise
+        // indistinguishable OS Quit request. It retains the normal recording confirmation.
+        userRequestedQuit = true
+        defer { userRequestedQuit = false }
         NSApp.terminate(nil)
+    }
+
+    private var updateBlockReason: String? {
+        session.updateBlockReason(launcherBusy: launcher?.isBusy ?? true, knownJobsBusy: knownJobsBusy)
+    }
+
+    @objc private func checkForUpdates() {
+        if let reason = updateBlockReason {
+            mainWindowModel?.showToast(reason)
+            return
+        }
+        updater.checkForUpdates()
     }
 
     // MARK: Server status
 
     private func refreshServerStatus() async {
-        guard let launcher, launcher.state.pollsServerInfo, !terminating else {
+        if let statusRefreshTask {
+            await statusRefreshTask.value
+            return
+        }
+        let task = Task { await performServerStatusRefresh() }
+        statusRefreshTask = task
+        await task.value
+        if statusRefreshTask == task {
+            statusRefreshTask = nil
+        }
+    }
+
+    private func performServerStatusRefresh() async {
+        guard let launcher, launcher.state.pollsServerInfo, let token = session.beginPoll() else {
             applyServerState()
             return
         }
         do {
             let result = try await client.callTool(ToolCatalog.getServerInfo, arguments: [:])
-            lastInfo = ServerInfoSummary(node: result.structuredContent)
-            serverReachable = true
+            guard session.isCurrentPoll(token) else { return }
+            let info = ServerInfoSummary(node: result.structuredContent)
+            let status = try await NarumiClient(mcp: client).recordingStatus()
+            guard session.finishPoll(token, info: info, recording: status) else { return }
+            lastInfo = info
         } catch {
-            serverReachable = false
+            guard session.failPoll(token) else { return }
+            applyServerState()
             await client.reset()
         }
-        if serverReachable {
-            await refreshRecordingStatus()
-        }
         applyServerState()
-    }
-
-    /// Follow the server's recording state on the 5 s tick: elapsed time on the stop item, and
-    /// the recording flag itself (a stop from the main window or another MCP client counts).
-    private func refreshRecordingStatus() async {
-        guard let result = try? await client.callTool(ToolCatalog.getRecordingStatus, arguments: [:]),
-            let active = result.structuredContent?["active"]?.boolValue
-        else {
-            return
-        }
-        recording = active
-        if !active {
-            currentMeetingID = nil
-        } else if currentMeetingID == nil {
-            currentMeetingID = result.structuredContent?["meeting_id"]?.stringValue
-        }
-        if active, case .number(let elapsed)? = result.structuredContent?["elapsed_sec"] {
-            stopItem.title = "録画停止（\(NarumiFormat.duration(elapsed))）"
-        } else {
-            stopItem.title = "録画停止"
+        if session.serverReachable {
+            // Continue tracking jobs after the window closes, so a deferred update can
+            // resume when transcription/export has finished.
+            await client.recoverPendingJobCalls()
+            await mainWindowModel?.refreshJobs()
         }
     }
 
@@ -572,19 +666,6 @@ extension AppDelegate: NSWindowDelegate {
         }
         mainWindowModel?.stopPolling()
         NSApp.setActivationPolicy(.accessory)
-    }
-}
-
-extension AppDelegate: SPUUpdaterDelegate {
-    /// `NARUMI_SPARKLE_FEED_URL` overrides the appcast for the local updater E2E (never set
-    /// in production); `nil` falls back to Info.plist `SUFeedURL`.
-    nonisolated func feedURLString(for updater: SPUUpdater) -> String? {
-        guard let raw = ProcessInfo.processInfo.environment[ServerConfig.Env.sparkleFeedURL],
-            !raw.isEmpty
-        else {
-            return nil
-        }
-        return raw
     }
 }
 

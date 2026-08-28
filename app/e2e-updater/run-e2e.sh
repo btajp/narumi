@@ -19,6 +19,10 @@
 #   E2E_TIMEOUT  更新適用〜ランタイム再同期完了の待ち秒数（既定 1800。初回は数百 MB の DL を含む）
 set -euo pipefail
 
+# Keep the legacy harness inert until both restart isolation and wheel versions match.
+printf '%s\n' 'run-e2e: 現在は実行停止中です。データルートの隔離と候補版 wheel の版合わせが未対応です（README 参照）。' >&2
+exit 2
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 E2E_DIR="${E2E_DIR:-/private/tmp/narumi-e2e}"

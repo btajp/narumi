@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>narumi</title>
+  <desc>A rounded white N and a vermilion recording dot on a deep teal tile.</desc>
+  <defs>
+    <linearGradient id="tile" x1="128" y1="96" x2="896" y2="960" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#20565B"/>
+      <stop offset="1" stop-color="#102F38"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#tile)"/>
+  <polyline points="320,724 320,348 704,724 704,348" fill="none" stroke="#F7FAF7"
+            stroke-width="112" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="792" cy="248" r="56" fill="#F36C51"/>
+</svg>
