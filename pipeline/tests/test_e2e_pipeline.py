@@ -310,30 +310,73 @@ def test_refresh_runs_missing_and_changed_deterministic_stages(home: Path, tmp_p
     assert retried.minutes_version is not None and reopen(bundle).manifest.status == "ready"
 
 
-def test_codex_model_change_regenerates_only_minutes(home: Path, tmp_path: Path) -> None:
-    """A saved Codex selection never becomes the ASR/integration/vision provider."""
+@pytest.mark.parametrize(
+    "provider_id", ["codex-app-server", "openai-api", "anthropic-api", "ollama"]
+)
+def test_connected_model_change_regenerates_only_minutes(
+    home: Path, tmp_path: Path, provider_id: str
+) -> None:
+    """A saved minutes selection never becomes the ASR/integration/vision provider."""
     from copy import deepcopy
 
     from narumi.model_selection import ModelSelection
     from narumi.providers.generation import MinutesResolver
     from narumi.providers.service import ProviderService
 
-    from .provider_fakes import FakeCodexBackend, MemorySecretStore, prepared_codex_connection
+    from .provider_fakes import (
+        FakeCodexBackend,
+        FakeHTTPBackend,
+        FakeMetadata,
+        FakeRuntimeInspector,
+        MemorySecretStore,
+        prepared_codex_connection,
+        prepared_http_connection,
+    )
 
-    backend = FakeCodexBackend()
-    alternate = deepcopy(backend.models[0])
-    alternate["model_id"] = "codex-alternate-model"
-    service = ProviderService(home, secret_store=MemorySecretStore(), codex_backend=backend)
+    is_codex = provider_id == "codex-app-server"
+    backend = FakeCodexBackend() if is_codex else FakeHTTPBackend()
+    service = ProviderService(
+        home,
+        secret_store=MemorySecretStore(),
+        metadata_client=FakeMetadata(),
+        runtime_inspector=FakeRuntimeInspector(),
+        **({"codex_backend": backend} if is_codex else {"http_backend": backend}),
+    )
+
+    def sent_model_ids():
+        return [
+            call[2] if is_codex else call[4]["model_id"]
+            for call in backend.calls
+            if call[0] == "complete"
+        ]
+
     try:
-        record = prepared_codex_connection(service, models=[backend.models[0], alternate])
+        record = (
+            prepared_codex_connection(service)
+            if is_codex
+            else prepared_http_connection(service, provider_id)
+        )
+        original = service.store.read()["catalogs"][record["connection_id"]]["models"][0]
+        alternate = deepcopy(original)
+        alternate["model_id"] = (
+            "gpt-4.1-mini" if provider_id == "openai-api" else "alternate-fixture-model"
+        )
+        with service.store.transaction() as document:
+            document["catalogs"][record["connection_id"]]["models"].append(alternate)
         bundle = import_meeting(home, tmp_path)
-        bundle.manifest.config.external_send_policy = ExternalSendPolicy.SUBSCRIPTION_OK
+        bundle.manifest.config.external_send_policy = (
+            ExternalSendPolicy.SUBSCRIPTION_OK
+            if is_codex
+            else ExternalSendPolicy.LOCAL_ONLY
+            if provider_id == "ollama"
+            else ExternalSendPolicy.API_OK
+        )
         bundle.manifest.config.minutes_model = ModelSelection(
-            provider="codex-app-server",
+            provider=provider_id,
             connection_id=record["connection_id"],
             connection_revision=record["revision"],
-            model_id=backend.models[0]["model_id"],
-            parameters={"reasoning_effort": "medium"},
+            model_id=original["model_id"],
+            parameters={"reasoning_effort": "medium"} if is_codex else {"max_tokens": 512},
         )
         bundle.save()
         resolver = MinutesResolver(service)
@@ -346,10 +389,10 @@ def test_codex_model_change_regenerates_only_minutes(home: Path, tmp_path: Path)
             for key, item in bundle.manifest.artifacts.items()
             if not key.startswith("minutes/")
         }
-        before_calls = len([call for call in backend.calls if call[0] == "complete"])
+        before_calls = len(sent_model_ids())
         same = refresh_meeting(bundle, minutes_resolver=resolver)
         assert same.stages == [] and same.minutes_version == 1
-        assert len([call for call in backend.calls if call[0] == "complete"]) == before_calls
+        assert len(sent_model_ids()) == before_calls
         bundle.manifest.config.minutes_model.model_id = alternate["model_id"]
         bundle.save()
         changed = refresh_meeting(reopen(bundle), minutes_resolver=resolver)
@@ -362,9 +405,9 @@ def test_codex_model_change_regenerates_only_minutes(home: Path, tmp_path: Path)
             for key, item in bundle.manifest.artifacts.items()
             if not key.startswith("minutes/")
         } == upstream
-        assert [call[2] for call in backend.calls if call[0] == "complete"] == [
-            backend.models[0]["model_id"],
-            backend.models[0]["model_id"],
+        assert sent_model_ids() == [
+            original["model_id"],
+            original["model_id"],
             alternate["model_id"],
             alternate["model_id"],
         ]

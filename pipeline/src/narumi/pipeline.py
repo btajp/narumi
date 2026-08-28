@@ -284,7 +284,7 @@ def refresh_meeting(
 def _check_minutes_force(bundle: Bundle, force: bool) -> None:
     if force and bundle.manifest.config.minutes_model is not None:
         raise InvalidArgumentError(
-            "Codex minutes cannot use force; start a new cache epoch instead"
+            "Connected minutes cannot use force; start a new cache epoch instead"
         )
 
 

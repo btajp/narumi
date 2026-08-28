@@ -2,7 +2,8 @@
 
 Character budgets are local adapter limits, not claims about undocumented model capacity.
 Unknown context sizes use half the adapter's maximum input, including prompt instructions and
-the meeting brief. A finite request budget and shrinking reductions bound subscription use.
+the meeting brief. A finite request budget and shrinking reductions bound provider calls;
+these application limits are not a guarantee of a monetary spending limit.
 """
 
 from __future__ import annotations

@@ -19,7 +19,18 @@ from narumi.errors import CancelledError, EngineUnavailableError, NarumiError
 from narumi.generate.bounded import MinutesLimits
 from narumi.llm.base import LLMProvider
 
-OUTCOME_UNKNOWN = "codex_generation_outcome_unknown"
+OUTCOME_UNKNOWN = "provider_generation_outcome_unknown"
+LEGACY_OUTCOME_UNKNOWN = "codex_generation_outcome_unknown"
+_USAGE_FIELDS = frozenset(
+    {
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "reasoning_output_tokens",
+    }
+)
 
 
 def check_cancelled(should_cancel: Callable[[], bool] | None) -> None:
@@ -121,8 +132,15 @@ class MinutesCheckpoints:
             except Exception:
                 raise _unknown_result() from None
             raise
-        entries[key] = {"state": "succeeded", "answer": answer, "sha256": _digest(answer)}
         try:
+            if not isinstance(answer, str) or not answer.strip():
+                raise _unknown_result()
+            entries[key] = {
+                "state": "succeeded",
+                "answer": answer,
+                "sha256": _digest(answer),
+                **_completion_metadata(self.provider),
+            }
             self._save()
         except Exception:
             raise _unknown_result() from None
@@ -158,7 +176,7 @@ def _digest(text: str) -> str:
 def _outcome_unknown(error: BaseException) -> bool:
     if isinstance(error, NarumiError):
         return bool(error.details.get("outcome_unknown")) or (
-            error.details.get("reason") == OUTCOME_UNKNOWN
+            error.details.get("reason") in {OUTCOME_UNKNOWN, LEGACY_OUTCOME_UNKNOWN}
         )
     # An unexpected exception after dispatch cannot prove that the request was not sent.
     return True
@@ -166,7 +184,29 @@ def _outcome_unknown(error: BaseException) -> bool:
 
 def _unknown_result() -> EngineUnavailableError:
     return EngineUnavailableError(
-        "The previous Codex generation outcome is unknown; "
-        "explicitly start a new attempt to resend",
-        details={"reason": OUTCOME_UNKNOWN},
+        "The previous generation outcome is unknown; explicitly start a new attempt to resend",
+        details={"reason": OUTCOME_UNKNOWN, "outcome_unknown": True},
     )
+
+
+def _completion_metadata(provider: LLMProvider) -> dict[str, Any]:
+    """Store only the adapter's non-secret completion facts, never request parameters.
+
+    A missing usage object remains unknown; it does not imply zero usage. Metadata is
+    deliberately outside the input fingerprint and old Codex receipts need no migration.
+    """
+    metadata = getattr(provider, "last_completion_metadata", None)
+    if metadata is None:
+        return {}
+    if not isinstance(metadata, dict) or set(metadata) != {"returned_model", "usage"}:
+        raise _unknown_result()
+    model, usage = metadata["returned_model"], metadata["usage"]
+    if not isinstance(model, str) or not model or len(model) > 256 or not model.isprintable():
+        raise _unknown_result()
+    if usage is not None and (
+        not isinstance(usage, dict)
+        or set(usage) - _USAGE_FIELDS
+        or any(type(value) is not int or not 0 <= value <= 2**53 - 1 for value in usage.values())
+    ):
+        raise _unknown_result()
+    return {"returned_model": model, "usage": None if usage is None else dict(usage)}
