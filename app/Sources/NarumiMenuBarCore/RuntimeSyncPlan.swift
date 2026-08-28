@@ -28,7 +28,8 @@ public struct BundledRuntime: Equatable, Sendable {
 }
 
 /// Where the synced runtime lives under the effective data root (`NARUMI_HOME`, default
-/// `~/Library/Application Support/narumi`): `runtime/{python, venv, venv.new, installed.json}`.
+/// `~/Library/Application Support/narumi`). Only runtime artifacts live under this directory;
+/// the installation transaction never reads or changes meeting data or preferences.
 /// Files under here carry no quarantine attribute, so Gatekeeper never sees them.
 public struct RuntimePaths: Equatable, Sendable {
     /// `<data root>/runtime`.
@@ -44,7 +45,11 @@ public struct RuntimePaths: Equatable, Sendable {
     /// Staging venv: fully built here, then swapped into `venv`, so a failed sync (no
     /// network, bad wheel) never destroys a previously working venv.
     public var venvStaging: URL { root.appendingPathComponent("venv.new", isDirectory: true) }
-    /// Copy of the bundle manifest written after a successful sync.
+    /// The previous venv is retained until the replacement server passes its identity check.
+    public var venvPrevious: URL { root.appendingPathComponent("venv.previous", isDirectory: true) }
+    /// Recovery journal, atomically written before changing either the venv or its marker.
+    public var transactionJournal: URL { root.appendingPathComponent("installation.json") }
+    /// Copy of the bundle manifest written only after the new server is ready.
     public var installedManifest: URL { root.appendingPathComponent("installed.json") }
     /// The bundled-mode server entry point.
     public var serverExecutable: URL { venv.appendingPathComponent("bin/narumi-server") }
@@ -53,8 +58,8 @@ public struct RuntimePaths: Equatable, Sendable {
 /// The ordered steps that (re)build the bundled venv (spec §1 手順 1–4). Pure data: the
 /// launcher executes the steps, tests inspect the argv without running uv.
 ///
-/// Every uv step targets `venv.new`; the swap into `venv` and the `installed.json` write come
-/// last, so any failure leaves the old venv (and the "needs sync" marker) intact.
+/// Every uv step targets `venv.new`. The last step activates the candidate while retaining
+/// the old venv and marker; `RuntimeInstallation.commit()` is a separate, post-readiness step.
 public struct RuntimeSyncPlan: Equatable, Sendable {
     /// A subprocess to run. `environment` holds only the *additions* the executor merges over
     /// the app's environment (uv still needs HOME / PATH-adjacent variables from it).
@@ -73,15 +78,13 @@ public struct RuntimeSyncPlan: Equatable, Sendable {
     public enum Step: Equatable, Sendable {
         /// Run a subprocess (uv), output appended to runtime.log.
         case run(name: String, Command)
-        /// Remove `to` when present, then rename `from` → `to` (venv.new → venv).
-        case replaceDirectory(name: String, from: URL, to: URL)
-        /// Copy the bundle's manifest.json bytes to installed.json (marks the sync done).
-        case copyFile(name: String, from: URL, to: URL)
+        /// Journal and activate the candidate, keeping the old venv / installed marker.
+        case activate(name: String)
 
         /// Progress label: menu shows 「サーバー: 環境を準備中…（<name>）」.
         public var name: String {
             switch self {
-            case .run(let name, _), .replaceDirectory(let name, _, _), .copyFile(let name, _, _):
+            case .run(let name, _), .activate(let name):
                 return name
             }
         }
@@ -123,8 +126,7 @@ public struct RuntimeSyncPlan: Equatable, Sendable {
                     "アプリ本体インストール",
                     ["pip", "install", "--python", paths.venvStaging.path, "--no-deps"] + wheelPaths))
         }
-        steps.append(.replaceDirectory(name: "venv 差し替え", from: paths.venvStaging, to: paths.venv))
-        steps.append(.copyFile(name: "同期の記録", from: bundle.manifest, to: paths.installedManifest))
+        steps.append(.activate(name: "venv 切り替え（旧版を保持）"))
         self.steps = steps
     }
 }

@@ -5,8 +5,8 @@ import Foundation
 ///
 /// The whole value is compared against `<data root>/runtime/installed.json`: any difference —
 /// or a missing / unreadable installed.json — means the venv must be (re)synced. After a
-/// successful sync the bundle manifest is copied to installed.json, so "installed == bundled"
-/// is exactly "nothing to do".
+/// successful sync AND server identity check the bundle manifest is copied to installed.json.
+/// The previous marker remains recoverable until the installation transaction commits.
 public struct RuntimeManifest: Codable, Equatable, Sendable {
     public var appVersion: String
     /// Python version for `uv python install` / `uv venv --python` (e.g. "3.13").

@@ -1,10 +1,21 @@
 # narumi
 
-narumi は、macOS 上でローカルに会議を録画し、終了後に議事録を自動生成するシステムです。メニューバーのワンボタンで画面・マイク・システム音声を **別トラック** で録画し、ffmpeg による分離 → 文字起こし → 話者分離 → 突合 → 生成 → エクスポートの工程を、会議ごとの「セッションバンドル」（ファイルが正本）に積み上げます。決定的な処理はスクリプトで固定手順として実行し、LLM は読解・統合・生成にだけ使います。既定はローカル完結（Whisper 系）で、音声やテキストを外部へ送るエンジン / LLM は会議ごとの `external_send_policy` で明示的にオプトインしない限り使えません。
+narumi は、macOS 上でローカルに会議を録画し、終了後に議事録を自動生成するシステムです。アプリから画面・マイク・システム音声を **別トラック** で録画し、ffmpeg による分離 → 文字起こし → 話者分離 → 突合 → 生成 → エクスポートの工程を、会議ごとの「セッションバンドル」（ファイルが正本）に積み上げます。決定的な処理はスクリプトで固定手順として実行し、LLM は読解・統合・生成にだけ使います。既定はローカル完結（Whisper 系）で、音声やテキストを外部へ送るエンジン / LLM は会議ごとの `external_send_policy` で明示的にオプトインしない限り使えません。
 
 相棒の **gaia-library**（記憶の索引 MCP）とは任意連携です。gaia-library が無くても narumi 単体で完結し、接続すると語彙・参加者・前回要点などを会議ブリーフに取り込みます。議事録の書き戻しは提案キューへの登録だけで、人間の承認は gaia-library 側で行います。設計の正本は Notion「議事録生成システム」ページで、リポジトリ内の要約と開発ルールは [AGENTS.md](AGENTS.md)、基盤の具体設計は [docs/superpowers/specs/](docs/superpowers/specs/) にあります。
 
-## 動作要件
+## インストールと録画
+
+配布版は Apple Silicon（arm64）・macOS 15 以降に対応します。
+
+1. [GitHub Releases](https://github.com/btajp/narumi/releases/latest) の ZIP を展開し、`narumi.app` を「アプリケーション」へ移します。
+2. `narumi.app` を開きます。初回は同梱ランタイムの準備が終わるまで待ちます。Python や uv、ソースコードの別途導入は不要ですが、初回の依存・モデル取得にはネットワークが必要です。
+3. メイン画面の「録画開始」を押し、会議名を入力します。プロファイルと scope は空欄なら既定設定を使います。macOS が画面収録・マイクの許可を求めた場合は設定します。
+4. 録画中は同じ画面に経過時間と「録画停止」が表示されます。終了後は会議一覧から結果を開けます。
+
+ffmpeg / ffprobe は別途必要です。アプリの「診断」で検出状態を確認できます。更新は GitHub Releases を自動確認し、利用者の操作で適用します。録画中やアプリが把握している処理の実行中は更新を延期します。別の CLI / MCP クライアントから処理している間は更新しないでください。会議データはアプリ本体とは別の Application Support 配下に保存するため、通常の更新で削除されません。
+
+## 開発環境の要件
 
 - macOS 15 以降（マイク取り込みに ScreenCaptureKit の `captureMicrophone` を使うため）
 - [uv](https://docs.astral.sh/uv/)（Python 3.12 以降を管理。`.venv` はリポジトリ直下に作られます）
@@ -12,7 +23,7 @@ narumi は、macOS 上でローカルに会議を録画し、終了後に議事�
 - Xcode Command Line Tools（`xcode-select --install`。録画アプリのビルドに Swift 6.3 相当のツールチェーンが必要）。`swift test` だけは XCTest を含む Xcode 本体が必要で、`xcode-select` が CLT を指す環境では `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` で実行する（`swift build` は CLT だけで通る）
 - 任意: gaia-library（無くてもテストは全て通ります）
 
-## セットアップ
+## 開発環境のセットアップ
 
 ```sh
 git clone <this repo> narumi && cd narumi
@@ -23,11 +34,11 @@ cd app && swift build -c release && cd ..   # 録画ヘルパー narumi-recorder
 
 `uv run narumi-dev doctor` は ffmpeg / ffprobe が見つからないと終了コード 1 で失敗します。録画ヘルパーは `NARUMI_RECORDER` 環境変数、無ければ `app/.build/{release,debug}/narumi-recorder` の順で探します。
 
-## デスクトップアプリの使い方
+## 開発用デスクトップビルド
 
 ```sh
 scripts/build-app.sh     # app/ を release ビルドし、dist/narumi.app を組み立てて ad-hoc 署名
-open dist/narumi.app     # メニューバーに 🕵️ が出る。「録画開始…」で録画
+open dist/narumi.app     # メイン画面と、名前付きのメニューバー項目を表示
 ```
 
 `narumi.app` は起動時に `narumi-server`（Streamable HTTP、`http://127.0.0.1:8765/mcp`）を自分で起動し、終了時に停止します。Terminal でサーバーを起動しておく必要はありません。起動方法は 2 モードあります（詳細は [app/README.md](app/README.md) の「ランタイムモード」）。
@@ -35,8 +46,8 @@ open dist/narumi.app     # メニューバーに 🕵️ が出る。「録画�
 - **repo モード**（開発用。上の `scripts/build-app.sh` のとおりオプション無しでビルドした場合）: アプリがリポジトリの `uv run narumi-server` を起動します。動かすマシンには **uv と、このリポジトリのチェックアウト（`uv sync` 済み）** が必要です。
 - **bundled モード**（配布用。`scripts/build-app.sh --runtime` でビルドした場合）: `.app` が同梱の uv・wheels・requirements から `NARUMI_HOME/runtime/` に venv を自分で作って起動します。**リポジトリのチェックアウトも uv のインストールも不要**です（初回はネットワーク必須。後述「配布」参照）。
 
-- リポジトリは `NARUMI_REPO` → 「リポジトリを選択…」で保存した設定 → `.app` が `<repo>/dist/narumi.app` にあるならそのリポジトリ、の順で決まります。`scripts/build-app.sh` の出力をそのまま `open` する限り追加設定は要りません。リポジトリが解決できたら repo モード、できなければ同梱ランタイムがあるときだけ bundled モードです（`NARUMI_RUNTIME_MODE=repo|bundled` で強制可）。
-- `scripts/dev.sh` などで先にサーバーを起動しておくと、アプリはそれに接続するだけで自分では起動も停止もしません。
+- `NARUMI_RUNTIME_MODE=repo|bundled` と明示的な `NARUMI_REPO` 指定を除き、同梱ランタイムがあれば bundled モードを優先します。以前保存したリポジトリ設定だけでは配布版を開発モードへ切り替えません。
+- 開発用 repo モード、または `NARUMI_SERVER_URL` で明示した外部サーバーには接続できます。通常の bundled 起動で既存サーバーがポートを使用している場合は、誤接続を避けるため競合として表示します。
 - ポートは `NARUMI_SERVER_PORT`、データルートは `NARUMI_HOME` で変えられます。ログは `~/Library/Logs/narumi/server.log`（メニューの「ログを開く」）。
 - 詳細（起動コマンド、状態表示、終了時の録画確定）は [app/README.md](app/README.md) の「起動フロー」を参照してください。
 
@@ -66,9 +77,9 @@ open dist/narumi.app     # メニューバーに 🕵️ が出る。「録画�
 | 契約（`contracts/`）と MCP サーバー（v1 の 27 ツール、stdio / Streamable HTTP） | 実装済み |
 | 操作面パリティ拡張（録画状態・議事録取得・全文検索・既存録画の取り込み・プロファイル＋自動エクスポート・トラック破棄・会議削除・ジョブ取消・カタログ再構築） | 実装済み（MCP ツール＋CLI＋アプリ本体ウィンドウ） |
 | 製品 CLI `narumi`（契約から自動生成の 1:1 写像。サーバー自動検出、無ければ in-process） | 実装済み |
-| 録画アプリ / `narumi-recorder` | 実装済み（ScreenCaptureKit の実キャプチャ経路は実機での手動確認が未了） |
+| 録画アプリ / `narumi-recorder` | 実装済み（メイン画面とメニューバーから同じ MCP 録画操作を利用） |
 | `narumi.app` によるサーバーの起動・停止（Terminal 不要） | 実装済み（repo モード＝uv とチェックアウトが必要 / bundled モード＝`--runtime` ビルドで自己完結） |
-| 自己完結 .app（ランタイム同梱）と Sparkle 自動更新 | 実装済み（`build-app.sh --runtime` / `release-app.sh`。Developer ID 署名・公証・実リリースは未実施） |
+| ランタイム同梱 .app と Sparkle 自動更新 | 実装済み（Developer ID 署名・公証・公開物照合を行う配布手順。ffmpeg / ffprobe は別途必要） |
 | ffmpeg 分離 → Whisper → プレーン議事録（`narumi.pipeline`） | 実装済み（`fake` エンジンで E2E テスト済み。実エンジンは `-m real` の opt-in smoke） |
 | 外部トランスクリプト突合（Notion AI / Zoom / Meet / Teams） | 実装済み（WebVTT / SRT / Zoom txt / プレーンの決定的パーサ。`register_context` が即時パースして `transcripts/ext-*` として突合に参加、話者名は第 4 層で実名解決。URL は参照保存のみで取得は未実装） |
 | キースライド抽出（pHash）/ Vision 読解 / 第 3 層話者判定 | 実装済み（pHash は pillow の自前実装、議事録へ画像埋め込みまで。第 3 層は vision 対応プロバイダが送信ポリシーで許可されたときだけ実行。実 vision プロバイダでの実機確認は未了） |
@@ -205,43 +216,44 @@ args = ["--directory", "/path/to/narumi", "run", "narumi-server", "--stdio"]
 # url = "http://127.0.0.1:8765/mcp"
 ```
 
-## 配布（自己完結 .app と自動更新）
+## 配布（ランタイム同梱 .app と自動更新）
 
 設計の正本は [docs/superpowers/specs/2026-08-27-narumi-app-distribution-design.md](docs/superpowers/specs/2026-08-27-narumi-app-distribution-design.md)。対象は Apple Silicon（arm64）・macOS 15 以降、配布経路は GitHub Releases のみ。
 
-### 自己完結 .app のビルド
+### ランタイム同梱 .app のビルド
 
 ```sh
 scripts/build-app.sh --runtime    # dist/narumi.app（ランタイム同梱、ad-hoc 署名）
 ```
 
-`--runtime` は `Contents/Resources/runtime/` に uv 単体バイナリ（版と sha256 は `scripts/runtime.lock.json` に固定）・`uv build` した narumi / narumi-server の wheel・`uv export` によるハッシュ付き `requirements.txt`・`contracts/` のコピー・`manifest.json` を同梱します。この .app は初回起動（および更新後の manifest 差分検出時）に `NARUMI_HOME/runtime/` へ Python 3.13 と venv を自分で作るため、**リポジトリのチェックアウトも uv のインストールも不要**になります（初回はネットワーク必須。数百 MB のダウンロードが発生。進捗はメニューの「サーバー: 環境を準備中…」、ログは `~/Library/Logs/narumi/runtime.log`）。
+`--runtime` は `Contents/Resources/runtime/` に uv 単体バイナリ（版と sha256 は `scripts/runtime.lock.json` に固定）・narumi / narumi-server の wheel・ハッシュ付き `requirements.txt`・契約 manifest に列挙された契約ファイル・runtime manifest を同梱します。初回起動と更新時に、必要に応じて `NARUMI_HOME/runtime/` の Python 3.13 と venv を準備します。**リポジトリのチェックアウトも uv の事前インストールも不要**ですが、初回の依存取得にはネットワークが必要で、ffmpeg / ffprobe は別途必要です。スライド処理の依存も含みます。進捗はアプリに表示し、ログは `~/Library/Logs/narumi/runtime.log` に保存します。
 
-版は `VERSION` ファイルが正本（`CFBundleShortVersionString`）、`CFBundleVersion` は `git rev-list --count HEAD`。`pipeline/pyproject.toml` / `server/pyproject.toml` / `CHANGELOG.md` の最新見出しとの一致は `scripts/check-version.sh` で検査します。
+版は `VERSION` ファイルが正本（`CFBundleShortVersionString`）、`CFBundleVersion` は `git rev-list --count HEAD` です。Python パッケージ、サーバー、録画ヘルパー、`CHANGELOG.md` の版との一致は `scripts/check-version.sh` で検査します。
 
 ### リリース（`scripts/release-app.sh <version>`）
 
-Developer ID 署名 → Apple 公証 → Sparkle フィード生成 → GitHub Release（draft）までを 1 コマンドで行います。
+Developer ID 署名 → Apple 公証 → Sparkle フィード生成 → GitHub Release（draft）までを行い、公開前に停止します。
 
-1. 前提検査: clean で push 済みの `main`、`gh` 認証、Sparkle ツール（`SPARKLE_BIN`、既定 `~/.sparkle/2.9.6/bin`）、署名 env（`APPLE_SIGNING_IDENTITY` / `APPLE_API_KEY` / `APPLE_API_ISSUER` / `APPLE_API_KEY_PATH`）、Keychain の Sparkle 秘密鍵
-2. 版整合（`scripts/check-version.sh`）と鍵ポリシー（`scripts/check-updater-key-policy.sh`）
-3. `build-app.sh --release --runtime`（ランタイム同梱 + hardened runtime + timestamp 署名）
-4. `codesign --verify --deep --strict` / `Info.plist` 検証 → `notarytool submit --wait` → `stapler staple` → zip 再作成 → `spctl` 検査
-5. `generate_appcast`（`--download-url-prefix` 付き、`sparkle:minimumSystemVersion 15.0` / `sparkle:hardwareRequirements arm64` を保証）→ enclosure の EdDSA 署名を `sign_update --verify` で検証
-6. `gh release create v<version> --draft`（タグはここで作られる。内容確認後に手動で publish）
+1. clean な `main` と `origin/main` の一致、版、lock、既存リリース、署名鍵を検査します。Sparkle ツールは SwiftPM が取得したものを自動検出します。別の既存配置を使う場合だけ `SPARKLE_BIN` を指定します。
+2. 署名には `APPLE_SIGNING_IDENTITY` / `APPLE_API_KEY` / `APPLE_API_ISSUER` / `APPLE_API_KEY_PATH` を使います。ローカル設定 `~/.config/narumi/release.env` があれば読み込みます。設定ファイルの場所を変える場合は `NARUMI_RELEASE_ENV` を指定します。秘密情報をリポジトリやログに記録しないでください。
+3. 専用の `dist/release/v<version>/build/narumi.app` へビルドし、同梱 uv を含めて署名します。使用中の `dist/narumi.app` は置き換えません。wheel とアプリの収録ファイルも検査します。
+4. 公証・staple 後に最終 ZIP を作り、再展開して署名と公証チケットを検証します。その ZIP から EdDSA 署名と appcast を作り、版・build・公開 URL・長さ・SHA256 を照合します。
+5. 出荷元に変更がないことを再検査し、固定したコミット SHA を指定して draft を作成します。アップロードするのは ZIP と appcast のみです。draft を再取得してハッシュまで照合します。
+6. 録画・処理がないことを確認し、旧アプリを正常終了します。管理していたプロセスと待受ポートの停止を確認してから、同じ ZIP を `/Applications` にインストールし、起動・同梱サーバー・診断を検証します。`scripts/release-app.sh <version> --verify-draft` が成功してから公開します。
+7. 公開後に `scripts/release-app.sh <version> --verify-published` で公開タグ・latest・匿名ダウンロードの内容を照合し、アプリの更新確認も行います。失敗時は公開を取り下げて調査し、公開済み asset を上書きして修正しません。
 
-秘密情報（Apple API キー・Sparkle 秘密鍵）はリポジトリ・ログに書かず、env と Keychain だけで扱います。
+別の出力先を使う場合は、最初から最後まで同じ `RELEASE_DIR` を指定します。初回出荷での「最新です」という表示は、旧版から新版への更新適用を検証したことにはなりません。
 
 ### Sparkle 鍵の管理（重要）
 
-- 秘密鍵は**初回リリースを行う人が手元で一度だけ** `generate_keys` を実行して作ります（ログイン Keychain に保存される）。スクリプトが鍵を暗黙に生成・登録することはありません。
+- 秘密鍵は初回に一度だけ `generate_keys --account jp.btajp.narumi` で作り、ログイン Keychain に保存します。リリース処理が暗黙に鍵を作ることはありません。
 - 公開鍵は `app/sparkle-public-key.txt` にコミットし、`Info.plist` の `SUPublicEDKey` として全ビルドに埋め込まれます。
-- **必ず `generate_keys -x <退避先>` で秘密鍵をバックアップしてください。** 秘密鍵を失うと、配布済みの全ユーザーに対する更新手段を**永久に失います**（新しい鍵で署名した更新は既存アプリが検証できない）。
-- 鍵の入れ替えは `release-app.sh <version> --allow-pubkey-rotation` による「橋渡し版」（旧鍵で署名し、新公開鍵を同梱）でのみ行います。
+- `generate_keys --account jp.btajp.narumi -x <退避先>` で秘密鍵を安全な場所にバックアップしてください。読み取り権限を所有者に限定し、リポジトリや配布物に含めないでください。同じ Mac 上のコピーだけでは端末紛失への備えにはなりません。
+- `SPARKLE_KEY_ACCOUNT` の既定は `jp.btajp.narumi` です。Keychain の鍵とコミット済み公開鍵の不一致は出荷エラーにします。鍵の変更・紛失時の移行は別途設計が必要で、`--allow-pubkey-rotation` による検査回避は認めません。
 
 ### 更新の E2E（ローカル）
 
-Apple 資格情報なしで「更新ダイアログ → 適用 → 再起動 → ランタイム再同期」を検証できます。使い捨ての鍵ファイルだけを使い、Keychain には触れません。手順は [app/e2e-updater/README.md](app/e2e-updater/README.md)（実行は `SPARKLE_BIN=~/.sparkle/2.9.6/bin app/e2e-updater/run-e2e.sh`）。
+旧開発用ハーネスは、更新後のデータルート隔離と候補版の Python wheel の版合わせが未対応のため、現在は副作用が起きる前に実行を停止します。詳細は [app/e2e-updater/README.md](app/e2e-updater/README.md) を参照してください。正式な GitHub 配布物の検証とは別の手順であり、現行版の旧版→新版の実更新は未検証です。
 
 ## 開発ルール
 

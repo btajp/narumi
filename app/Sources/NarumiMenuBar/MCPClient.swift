@@ -31,6 +31,7 @@ struct ToolCallResult: Sendable {
 /// Handles `initialize` → `notifications/initialized` once, keeps `Mcp-Session-Id`, and accepts
 /// both `application/json` and `text/event-stream` responses.
 actor MCPClient {
+    typealias JobRequestObserver = @MainActor @Sendable (UInt64, Int, Bool, Set<String>) -> Void
     static let protocolVersion = "2025-06-18"
     static let clientName = "narumi-menubar"
 
@@ -40,10 +41,15 @@ actor MCPClient {
     private var sessionID: String?
     private var initialized = false
     private var nextID = 1
+    var jobRequests = DesktopJobRequestState()
+    let jobRequestObserver: JobRequestObserver?
+    var jobRequestPublication: UInt64 = 0
+    var unpublishedJobIDs: [String: UInt64] = [:]
 
-    init(serverURL: URL, clientVersion: String) {
+    init(serverURL: URL, clientVersion: String, jobRequestObserver: JobRequestObserver? = nil) {
         self.serverURL = serverURL
         self.clientVersion = clientVersion
+        self.jobRequestObserver = jobRequestObserver
         transport = MCPHTTPTransport()
     }
 
@@ -64,7 +70,7 @@ actor MCPClient {
             if confidential {
                 _ = try MCPHTTPTransport.confidentialEndpoint(serverURL)
             }
-            return try await performToolCall(name, arguments: arguments, confidential: confidential)
+            return try await performJobTrackedToolCall(name, arguments: arguments, confidential: confidential)
         } catch {
             guard confidential else { throw error }
             // Servers and URLSession errors may reflect the write-only input. Keep only a
@@ -83,7 +89,7 @@ actor MCPClient {
         }
     }
 
-    private func performToolCall(
+    func performToolCall(
         _ name: String, arguments: [String: JSONNode], confidential: Bool
     ) async throws -> ToolCallResult {
         try await ensureInitialized(confidential: confidential)

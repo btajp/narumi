@@ -1,4 +1,5 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# Use the macOS system shell independently of the user's package-manager PATH.
 # Build the Swift package in release mode and assemble dist/narumi.app
 # (menu bar UI + narumi-recorder + Sparkle.framework, optionally the bundled Python runtime).
 #
@@ -22,6 +23,8 @@
 #                            無ければ警告してキーを埋め込まない。--release では必須）
 #   NARUMI_UV_CACHE_DIR      uv 配布物のダウンロードキャッシュ
 #                            （既定 ~/Library/Caches/narumi-build/uv。sha256 は毎回検証）
+#   NARUMI_TRACKED_SOURCES   wheel と照合する Git 管理下の source path（NUL 区切り）。
+#                            release-app.sh が作成する。指定時は未管理ファイル混入を拒否
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -31,6 +34,8 @@ APP_NAME="narumi"
 BUNDLE_ID="jp.btajp.narumi"
 BUNDLE="$DIST_DIR/$APP_NAME.app"
 RUNTIME_LOCK="$ROOT/scripts/runtime.lock.json"
+APP_ICON="$APP_DIR/Assets/AppIcon.icns"
+INVENTORY="$ROOT/scripts/bundle_inventory.py"
 PUBLIC_KEY_FILE="${SPARKLE_PUBLIC_KEY_FILE:-$APP_DIR/sparkle-public-key.txt}"
 UV_CACHE_DIR="${NARUMI_UV_CACHE_DIR:-$HOME/Library/Caches/narumi-build/uv}"
 FEED_URL="https://github.com/btajp/narumi/releases/latest/download/appcast.xml"
@@ -79,6 +84,23 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+# --- asset and packaging preflight ----------------------------------------------------------
+# 既存 bundle を変更する前に、必須アセットと検査プログラムを検証する。
+[[ -f "$APP_ICON" && ! -L "$APP_ICON" ]] || fail "app icon がありません: $APP_ICON"
+ICON_HEADER="$(od -An -v -tx1 -N8 "$APP_ICON" | tr -d '[:space:]')"
+[[ "${#ICON_HEADER}" -eq 16 && "$ICON_HEADER" == 69636e73* ]] \
+  || fail "AppIcon.icns のヘッダーが不正です"
+ICON_SIZE="$(wc -c < "$APP_ICON" | tr -d '[:space:]')"
+ICON_DECLARED_SIZE=$((16#${ICON_HEADER:8:8}))
+[[ "$ICON_SIZE" -gt 8 && "$ICON_SIZE" -eq "$ICON_DECLARED_SIZE" ]] \
+  || fail "AppIcon.icns のサイズがヘッダーと一致しません"
+command -v python3 >/dev/null 2>&1 || fail "python3 が必要です（bundle inventory）"
+[[ -f "$INVENTORY" ]] || fail "bundle inventory helper がありません"
+python3 "$INVENTORY" --help >/dev/null || fail "bundle inventory helper を起動できません"
+if [[ -n "${NARUMI_TRACKED_SOURCES:-}" ]]; then
+  [[ -f "$NARUMI_TRACKED_SOURCES" ]] || fail "NARUMI_TRACKED_SOURCES のファイルがありません"
+fi
+
 # --- versions ------------------------------------------------------------------------------
 [[ -f "$ROOT/VERSION" ]] || fail "VERSION ファイルがありません"
 VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
@@ -99,7 +121,7 @@ fi
 IDENTITY="${APPLE_SIGNING_IDENTITY:--}"
 SIGN_FLAGS=(--force --sign "$IDENTITY")
 if [[ $RELEASE -eq 1 ]]; then
-  [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]] \
+  [[ "$IDENTITY" == "Developer ID Application: "* ]] \
     || fail "--release には APPLE_SIGNING_IDENTITY（Developer ID Application）が必要です"
   SIGN_FLAGS+=(--options runtime --timestamp)
 fi
@@ -133,6 +155,7 @@ rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
 cp "$BIN_DIR/NarumiMenuBar" "$BUNDLE/Contents/MacOS/NarumiMenuBar"
 cp "$BIN_DIR/narumi-recorder" "$BUNDLE/Contents/MacOS/narumi-recorder"
+cp "$APP_ICON" "$BUNDLE/Contents/Resources/AppIcon.icns"
 chmod 755 "$BUNDLE/Contents/MacOS/NarumiMenuBar" "$BUNDLE/Contents/MacOS/narumi-recorder"
 
 # --- Sparkle.framework ---------------------------------------------------------------------
@@ -196,9 +219,18 @@ if [[ $WITH_RUNTIME -eq 1 ]]; then
 
   # wheels（narumi / narumi-server 本体）
   echo "==> uv build (wheels)"
-  rm -rf "$RUNTIME_DIR/wheels"
-  uv build --project "$ROOT" --package narumi --wheel --out-dir "$RUNTIME_DIR/wheels"
-  uv build --project "$ROOT" --package narumi-server --wheel --out-dir "$RUNTIME_DIR/wheels"
+  (
+    WHEELS_TMP="$(mktemp -d)"
+    trap 'rm -rf "$WHEELS_TMP"' EXIT
+    # uv が生成する .gitignore などの sidecar は bundle へ持ち込まない。
+    uv build --project "$ROOT" --package narumi --wheel --out-dir "$WHEELS_TMP"
+    uv build --project "$ROOT" --package narumi-server --wheel --out-dir "$WHEELS_TMP"
+    COPY_WHEELS_ARGS=(copy-wheels "$WHEELS_TMP" "$RUNTIME_DIR/wheels")
+    if [[ -n "${NARUMI_TRACKED_SOURCES:-}" ]]; then
+      COPY_WHEELS_ARGS+=(--tracked-sources "$NARUMI_TRACKED_SOURCES")
+    fi
+    python3 "$INVENTORY" "${COPY_WHEELS_ARGS[@]}" >/dev/null
+  )
 
   # requirements.txt（サードパーティ依存の完全固定。2 つの export を結合・重複排除、ハッシュ維持）
   echo "==> uv export (requirements.txt)"
@@ -206,7 +238,7 @@ if [[ $WITH_RUNTIME -eq 1 ]]; then
   (cd "$ROOT" && uv export --frozen --no-dev --no-emit-workspace --format requirements-txt \
     --package narumi-server > "$EXPORT_TMP/server.txt")
   (cd "$ROOT" && uv export --frozen --no-dev --no-emit-workspace --format requirements-txt \
-    --package narumi --extra whisper-mlx --extra claude --extra anthropic --extra html \
+    --package narumi --extra whisper-mlx --extra claude --extra anthropic --extra html --extra slides \
     > "$EXPORT_TMP/pipeline.txt")
   python3 - "$EXPORT_TMP/server.txt" "$EXPORT_TMP/pipeline.txt" "$RUNTIME_DIR/requirements.txt" <<'PY'
 """Merge uv-export requirements files: join continuation lines, drop comments, dedupe.
@@ -278,7 +310,7 @@ for path in sys.argv[1:3]:
 with open(sys.argv[3], "w", encoding="utf-8") as out:
     out.write("# Merged from `uv export --frozen --no-dev --no-emit-workspace` for\n")
     out.write("# --package narumi-server and --package narumi --extra whisper-mlx --extra claude"
-              " --extra anthropic --extra html\n")
+              " --extra anthropic --extra html --extra slides\n")
     for name in sorted(merged):
         pin, marker, hashes = merged[name]
         parts = [pin]
@@ -292,8 +324,7 @@ PY
 
   # contracts（サーバーが起動時に読む契約。NARUMI_CONTRACTS_DIR で指す）
   echo "==> contracts"
-  rm -rf "$RUNTIME_DIR/contracts"
-  ditto "$ROOT/contracts" "$RUNTIME_DIR/contracts"
+  python3 "$INVENTORY" copy-contracts "$ROOT/contracts" "$RUNTIME_DIR/contracts" >/dev/null
 
   # manifest.json（再同期要否の判定材料）
   echo "==> runtime manifest.json"
@@ -345,6 +376,8 @@ cat > "$BUNDLE/Contents/Info.plist" <<PLIST
   <string>ja</string>
   <key>CFBundleExecutable</key>
   <string>NarumiMenuBar</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundleIdentifier</key>
   <string>${BUNDLE_ID}</string>
   <key>CFBundleInfoDictionaryVersion</key>
@@ -384,10 +417,25 @@ PLIST
 plutil -lint -s "$BUNDLE/Contents/Info.plist" || fail "Info.plist が不正です"
 printf 'APPL????' > "$BUNDLE/Contents/PkgInfo"
 
+# --- artifact inventory --------------------------------------------------------------------
+echo "==> checking bundle inventory"
+INVENTORY_ARGS=(check-app "$BUNDLE")
+if [[ $WITH_RUNTIME -eq 1 ]]; then
+  INVENTORY_ARGS+=(--require-runtime)
+fi
+if [[ -n "${NARUMI_TRACKED_SOURCES:-}" ]]; then
+  INVENTORY_ARGS+=(--tracked-sources "$NARUMI_TRACKED_SOURCES")
+fi
+python3 "$INVENTORY" "${INVENTORY_ARGS[@]}" >/dev/null \
+  || fail "配布対象外のファイル、または不正な runtime が bundle に含まれています"
+
 # --- codesign ------------------------------------------------------------------------------
 # Sparkle 公式の順: Autoupdate → Updater.app → Sparkle.framework → 同梱バイナリ → .app。
 # .app への codesign が主実行ファイル NarumiMenuBar の署名そのもの。--deep は使わない。
 echo "==> codesign (identity: ${IDENTITY})"
+if [[ $WITH_RUNTIME -eq 1 ]]; then
+  codesign "${SIGN_FLAGS[@]}" "$RUNTIME_DIR/uv"
+fi
 if [[ -d "$SPARKLE_DST" ]]; then
   codesign "${SIGN_FLAGS[@]}" "$SPARKLE_DST/Versions/B/Autoupdate"
   codesign "${SIGN_FLAGS[@]}" "$SPARKLE_DST/Versions/B/Updater.app"

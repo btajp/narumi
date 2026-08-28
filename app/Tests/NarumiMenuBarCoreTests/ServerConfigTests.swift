@@ -139,17 +139,33 @@ final class ServerConfigTests: XCTestCase {
 
     var runtimeResources: String { bundleURL.appendingPathComponent("Contents/Resources/runtime").path }
 
-    func testRepoModeWhenRepositoryResolves() {
-        // Even with bundled runtime resources present: a resolvable repo wins (development).
+    func testExplicitRepositoryOverridesBundledRuntime() {
+        // Only an explicit developer override beats the payload in a release.
         let config = resolve(
             env: ["NARUMI_REPO": "/env/repo"], bundle: bundleURL,
             files: markers(in: bundleRepo) + [runtimeResources])
         XCTAssertEqual(config.runtimeMode, .repo)
         XCTAssertEqual(config.bundledRuntime?.root.path, runtimeResources)
 
-        // The dist/ heuristic counts as "repo resolvable" too.
+    }
+
+    func testBundledRuntimeBeatsSavedAndInferredRepositories() {
         let dist = resolve(bundle: bundleURL, files: markers(in: bundleRepo) + [runtimeResources])
-        XCTAssertEqual(dist.runtimeMode, .repo)
+        XCTAssertEqual(dist.runtimeMode, .bundled)
+        XCTAssertEqual(dist.repositorySource, .bundle)
+
+        let installed = URL(fileURLWithPath: "/Applications/narumi.app")
+        let saved = resolve(
+            stored: "/stale/development/repo", bundle: installed,
+            files: [installed.appendingPathComponent("Contents/Resources/runtime").path])
+        XCTAssertEqual(saved.runtimeMode, .bundled)
+        XCTAssertEqual(saved.repository?.path, "/stale/development/repo", "keep the preference for explicit dev mode")
+        XCTAssertTrue(saved.requiresOwnedServer)
+    }
+
+    func testLegacyRepoOnlyBuildStillUsesSavedOrInferredRepository() {
+        XCTAssertEqual(resolve(stored: "/saved/repo").runtimeMode, .repo)
+        XCTAssertEqual(resolve(bundle: bundleURL, files: markers(in: bundleRepo)).runtimeMode, .repo)
     }
 
     func testBundledModeWhenOnlyRuntimeResourcesExist() {
@@ -191,6 +207,24 @@ final class ServerConfigTests: XCTestCase {
             resolve(env: ["NARUMI_RUNTIME_MODE": "banana"], bundle: bundleURL, files: [runtimeResources]).runtimeMode,
             .bundled)
         XCTAssertNil(resolve(env: ["NARUMI_RUNTIME_MODE": ""]).runtimeMode)
+    }
+
+    func testOnlyExplicitServerURLAllowsBundledServerAdoption() {
+        let implicit = resolve(bundle: bundleURL, files: [runtimeResources])
+        XCTAssertFalse(implicit.hasExplicitServerURL)
+        XCTAssertTrue(implicit.requiresOwnedServer)
+        let explicit = resolve(
+            env: ["NARUMI_SERVER_URL": "http://localhost:9100/mcp"],
+            bundle: bundleURL, files: [runtimeResources])
+        XCTAssertTrue(explicit.hasExplicitServerURL)
+        XCTAssertFalse(explicit.requiresOwnedServer)
+        for invalid in ["", "not a url"] {
+            let config = resolve(
+                env: ["NARUMI_SERVER_URL": invalid], bundle: bundleURL, files: [runtimeResources])
+            XCTAssertFalse(config.hasExplicitServerURL)
+            XCTAssertTrue(config.requiresOwnedServer)
+        }
+        XCTAssertFalse(resolve(env: ["NARUMI_REPO": "/developer/repo"]).requiresOwnedServer)
     }
 
     func testRuntimePathsFollowTheDataRoot() {
