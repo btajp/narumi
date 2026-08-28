@@ -34,6 +34,45 @@ if tool == "plutil":
         plistlib.load(source)
 elif tool == "ditto":
     shutil.copytree(args[0], args[1], symlinks=True)
+elif tool == "codesign":
+    state = pathlib.Path(os.environ["NARUMI_TEST_LOG"]).with_name("signatures.json")
+    signed = json.loads(state.read_text()) if state.exists() else {}
+    target = args[-1]
+    key = "com.apple.security.device.audio-input"
+    if "--sign" in args:
+        entitlements = None
+        if "--entitlements" in args:
+            with open(args[args.index("--entitlements") + 1], "rb") as source:
+                entitlements = plistlib.load(source)
+        signed[target] = entitlements
+        state.write_text(json.dumps(signed))
+    elif "--verify" in args or "--display" in args:
+        if target not in signed:
+            sys.exit("unsigned code")
+        mode = ""
+        if target == os.environ.get("NARUMI_TEST_CODESIGN_FAULT_TARGET"):
+            mode = os.environ["NARUMI_TEST_CODESIGN_FAULT"]
+        if "--verify" in args:
+            if mode == "verify-error":
+                sys.exit("invalid signature")
+        else:
+            entitlements = signed[target]
+            replacements = {
+                "empty": None, "missing": {}, "false": {key: False},
+                "string": {key: "true"}, "integer": {key: 1},
+                "extra": {key: True, "com.apple.security.get-task-allow": True},
+                "not-dictionary": [],
+            }
+            if mode in replacements:
+                entitlements = replacements[mode]
+            if mode == "invalid":
+                sys.stdout.write("not a plist")
+            elif entitlements is not None:
+                sys.stdout.buffer.write(plistlib.dumps(entitlements))
+            if mode == "display-error":
+                sys.exit(1)
+    else:
+        sys.exit("unexpected codesign action")
 elif tool == "uv":
     if args[0] == "build":
         package = args[args.index("--package") + 1].replace("-", "_")
@@ -48,7 +87,7 @@ elif tool == "uv":
             print("pillow==11.0.0")
     else:
         sys.exit("unexpected uv action")
-elif tool not in ("swift", "codesign"):
+elif tool != "swift":
     sys.exit("unexpected external tool: " + tool)
 """
 
@@ -65,6 +104,9 @@ def build_fixture(tmp_path: Path):
     asset = project / "app/Assets/AppIcon.icns"
     asset.parent.mkdir(parents=True)
     shutil.copyfile(ROOT / "app/Assets/AppIcon.icns", asset)
+    shutil.copyfile(
+        ROOT / "app/recording.entitlements.plist", project / "app/recording.entitlements.plist"
+    )
     for name in ("NarumiMenuBar", "narumi-recorder"):
         write_file(project / "app/.build/release" / name, "#!/bin/sh\nexit 0\n").chmod(0o755)
     key = write_file(project / "app/sparkle-public-key.txt", "fixture-public-key")
@@ -191,6 +233,30 @@ def test_icon_is_registered_in_every_bundle_mode(build_fixture, options):
         call["args"] for call in calls if call["tool"] == "codesign" and "--sign" in call["args"]
     ]
     assert signing[-1][-1] == str(app)
+    recording_targets = {str(app), str(app / "Contents/MacOS/narumi-recorder")}
+    entitled_signing = [args for args in signing if "--entitlements" in args]
+    assert len(entitled_signing) == 2
+    assert {args[-1] for args in entitled_signing} == recording_targets
+    for args in entitled_signing:
+        assert args[args.index("--entitlements") + 1] == str(
+            project / "app/recording.entitlements.plist"
+        )
+    signed = json.loads((project / "signatures.json").read_text())
+    for target, entitlements in signed.items():
+        assert entitlements == (
+            {"com.apple.security.device.audio-input": True} if target in recording_targets else None
+        )
+    for action in ("--verify", "--display"):
+        checked = [
+            call["args"] for call in calls if call["tool"] == "codesign" and action in call["args"]
+        ]
+        assert {args[-1] for args in checked} == recording_targets
+        for args in checked:
+            if action == "--verify":
+                assert "--strict" in args
+            else:
+                assert args[args.index("--entitlements") + 1] == "-"
+                assert "--xml" in args
     for args in signing:
         assert ("--timestamp" in args) == release
         assert ("--options" in args and args[args.index("--options") + 1] == "runtime") == release

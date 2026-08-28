@@ -4,7 +4,13 @@ narumi（narumi.app / pipeline / server）の変更履歴。最新の版を先�
 `VERSION`・`pipeline/pyproject.toml`・`server/pyproject.toml` と最新見出しの版は常に一致させる
 （`scripts/check-version.sh` が検査し、`scripts/release-app.sh` がリリースノートとして抜粋する）。
 
-## 0.1.1 - 2026-08-28
+## 0.1.2 - 2026-08-28
+
+- 正式署名版のアプリと録画ヘルパーにマイク利用の Audio Input entitlement を追加
+- 署名済みアプリと録画ヘルパーの権限を検査し、欠落した配布物の生成を防止
+- GitHub の未公開リリース用 URL を検証できるように修正
+
+## 0.1.1 - 開発版（未公開）
 
 - 起動時にメイン画面を表示し、録画開始・経過時間・停止を見つけやすい位置に配置
 - アプリアイコンと、名前付きのメニューバー表示を追加

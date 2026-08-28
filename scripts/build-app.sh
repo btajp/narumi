@@ -35,6 +35,7 @@ BUNDLE_ID="jp.btajp.narumi"
 BUNDLE="$DIST_DIR/$APP_NAME.app"
 RUNTIME_LOCK="$ROOT/scripts/runtime.lock.json"
 APP_ICON="$APP_DIR/Assets/AppIcon.icns"
+RECORDING_ENTITLEMENTS="$APP_DIR/recording.entitlements.plist"
 INVENTORY="$ROOT/scripts/bundle_inventory.py"
 PUBLIC_KEY_FILE="${SPARKLE_PUBLIC_KEY_FILE:-$APP_DIR/sparkle-public-key.txt}"
 UV_CACHE_DIR="${NARUMI_UV_CACHE_DIR:-$HOME/Library/Caches/narumi-build/uv}"
@@ -58,6 +59,21 @@ fail() {
 
 warn() {
   echo "build-app: WARNING: $*" >&2
+}
+
+validate_recording_entitlements() {
+  python3 -c '
+import plistlib
+import sys
+
+try:
+    entitlements = plistlib.loads(sys.stdin.buffer.read())
+except Exception:
+    sys.exit(1)
+key = "com.apple.security.device.audio-input"
+if not isinstance(entitlements, dict) or set(entitlements) != {key} or entitlements[key] is not True:
+    sys.exit(1)
+'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -95,6 +111,10 @@ ICON_DECLARED_SIZE=$((16#${ICON_HEADER:8:8}))
 [[ "$ICON_SIZE" -gt 8 && "$ICON_SIZE" -eq "$ICON_DECLARED_SIZE" ]] \
   || fail "AppIcon.icns のサイズがヘッダーと一致しません"
 command -v python3 >/dev/null 2>&1 || fail "python3 が必要です（bundle inventory）"
+[[ -f "$RECORDING_ENTITLEMENTS" && ! -L "$RECORDING_ENTITLEMENTS" ]] \
+  || fail "録音用 entitlement がありません: $RECORDING_ENTITLEMENTS"
+validate_recording_entitlements < "$RECORDING_ENTITLEMENTS" \
+  || fail "録音用 entitlement は audio-input=true のみを含む plist が必要です"
 [[ -f "$INVENTORY" ]] || fail "bundle inventory helper がありません"
 python3 "$INVENTORY" --help >/dev/null || fail "bundle inventory helper を起動できません"
 if [[ -n "${NARUMI_TRACKED_SOURCES:-}" ]]; then
@@ -441,8 +461,15 @@ if [[ -d "$SPARKLE_DST" ]]; then
   codesign "${SIGN_FLAGS[@]}" "$SPARKLE_DST/Versions/B/Updater.app"
   codesign "${SIGN_FLAGS[@]}" "$SPARKLE_DST"
 fi
-codesign "${SIGN_FLAGS[@]}" "$BUNDLE/Contents/MacOS/narumi-recorder"
-codesign "${SIGN_FLAGS[@]}" "$BUNDLE"
-codesign --verify --strict --verbose=1 "$BUNDLE"
+# Audio Input is needed only by the app and recorder, never by uv or Sparkle.
+codesign "${SIGN_FLAGS[@]}" --entitlements "$RECORDING_ENTITLEMENTS" \
+  "$BUNDLE/Contents/MacOS/narumi-recorder"
+codesign "${SIGN_FLAGS[@]}" --entitlements "$RECORDING_ENTITLEMENTS" "$BUNDLE"
+for recording_code in "$BUNDLE" "$BUNDLE/Contents/MacOS/narumi-recorder"; do
+  codesign --verify --strict --verbose=1 "$recording_code"
+  codesign --display --entitlements - --xml "$recording_code" 2>/dev/null \
+    | validate_recording_entitlements \
+    || fail "署名済みの録音用 entitlement を検証できません: $recording_code"
+done
 
 echo "built: $BUNDLE (version $VERSION, build $BUILD_NUMBER)"
