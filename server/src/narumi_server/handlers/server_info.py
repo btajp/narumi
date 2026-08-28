@@ -53,7 +53,7 @@ def get_server_info(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
         "workflow": {
             "provider_connections": "streamable-http" in ctx.transports,
             "provider_models": "streamable-http" in ctx.transports,
-            "stage_model_selection": False,
+            "stage_model_selection": "streamable-http" in ctx.transports,
             "ensemble_generation": False,
         },
         **capability_names(),
