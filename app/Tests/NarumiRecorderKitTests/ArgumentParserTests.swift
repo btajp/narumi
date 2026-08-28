@@ -52,6 +52,38 @@ final class ArgumentParserTests: XCTestCase {
         XCTAssertEqual(try ArgumentParser.parse(["--help"]), .help)
     }
 
+    func testPermissionCommandsAcceptOnlyTheFixedPermissionNames() throws {
+        for permission in RecordingPermission.allCases {
+            XCTAssertEqual(
+                try ArgumentParser.parse(["request-permission", permission.rawValue]),
+                .requestPermission(permission))
+            XCTAssertEqual(
+                try ArgumentParser.parse(["open-permission-settings", permission.rawValue]),
+                .openPermissionSettings(permission))
+        }
+    }
+
+    func testPermissionCommandsRejectMissingUnknownAndExtraArguments() {
+        for command in ["request-permission", "open-permission-settings"] {
+            let invalidArguments = [
+                [], ["camera"], ["Microphone"], ["screen-recording"], [""],
+                ["https://example.invalid"], ["microphone", "screen_recording"],
+                ["microphone", "--output", "/tmp/tracks"], ["--permission=microphone"],
+            ]
+            for arguments in invalidArguments {
+                XCTAssertThrowsError(try ArgumentParser.parse([command] + arguments)) { error in
+                    XCTAssertEqual((error as? RecorderError)?.code, .invalidArgument)
+                }
+            }
+        }
+    }
+
+    func testHelpDescribesPermissionCommandsAsNonRecordingActions() {
+        XCTAssertTrue(ArgumentParser.usage.contains("request-permission microphone|screen_recording"))
+        XCTAssertTrue(ArgumentParser.usage.contains("open-permission-settings microphone|screen_recording"))
+        XCTAssertTrue(ArgumentParser.usage.contains("without starting a recording"))
+    }
+
     func testUnknownOrMissingCommand() {
         XCTAssertThrowsError(try ArgumentParser.parse([])) { error in
             XCTAssertEqual((error as? RecorderError)?.code, .invalidArgument)

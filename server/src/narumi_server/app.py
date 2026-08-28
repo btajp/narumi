@@ -88,11 +88,11 @@ def dispatch(ctx: ServerContext, tool: str, arguments: Mapping[str, Any] | None)
 
         def call_handler() -> Mapping[str, Any]:
             result = handler(ctx, args)
-            if sensitive:
-                # Secret-bearing tools must be checked before a successful result can enter
-                # the request cache, even when optional output validation is disabled.
+            if sensitive or tool == "configure_recording_permission":
+                # Sensitive and permission results must be checked before entering the
+                # replay cache, even when optional output validation is disabled.
                 if not isinstance(result, Mapping):
-                    raise ContractMismatchError("sensitive tool returned a non-object result")
+                    raise ContractMismatchError("validated tool returned a non-object result")
                 ctx.contracts.validate_output(tool, jsonable(dict(result)))
             return result
 

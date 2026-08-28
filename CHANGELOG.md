@@ -4,7 +4,14 @@ narumi（narumi.app / pipeline / server）の変更履歴。最新の版を先�
 `VERSION`・`pipeline/pyproject.toml`・`server/pyproject.toml` と最新見出しの版は常に一致させる
 （`scripts/check-version.sh` が検査し、`scripts/release-app.sh` がリリースノートとして抜粋する）。
 
-## 0.1.2 - 2026-08-28
+## 0.1.3 - 2026-08-28
+
+- 診断画面にマイク・画面収録の状態、許可要求、macOS 設定を開く操作を追加
+- 未許可の録画入口から設定へ案内し、設定から戻った際に状態を再確認
+- 録画せずに許可だけを要求する MCP / CLI 操作と、契約版 1.1.0 を追加
+- 許可待機中の録画・アプリ更新を抑止し、二重要求と通信断後の復旧を保護
+
+## 0.1.2 - 未公開
 
 - 正式署名版のアプリと録画ヘルパーにマイク利用の Audio Input entitlement を追加
 - 署名済みアプリと録画ヘルパーの権限を検査し、欠落した配布物の生成を防止

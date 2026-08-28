@@ -25,20 +25,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pollTimer: Timer?
     private var statusRefreshTask: Task<Void, Never>?
     private var signalSources: [DispatchSourceSignal] = []
-    private var session = DesktopSessionState()
+    var session = DesktopSessionState()
+    var permissionSetup = RecordingPermissionSetupState()
+    var permissionOwnedContext: PermissionOwnedContext?
+    var permissionRefreshRequested = false
+    var permissionNeedsCapabilityProbe = true
+    var permissionSessionGeneration: UInt64?
     private var recording: Bool { session.recording.active }
-    private var busy: Bool { session.operation != nil }
+    private var busy: Bool { session.operation != nil || permissionSetup.blocked }
     private var terminating: Bool { session.terminating }
     private var knownJobsBusy = false
     private var lastJobRequestPublication: UInt64 = 0
     private var shutdownDone = false
     private var userRequestedQuit = false
-    private var lastInfo: ServerInfoSummary?
-    private var client: MCPClient!
-    private var launcher: ServerLauncher!
+    var lastInfo: ServerInfoSummary?
+    var client: MCPClient!
+    var launcher: ServerLauncher!
     private var updater: DesktopUpdater!
     private var mainWindow: NSWindow?
-    private var mainWindowModel: MainWindowModel?
+    var mainWindowModel: MainWindowModel?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -62,7 +67,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             session.connectionChanged(to: state)
+            permissionSetup.connectionChanged(to: state)
+            permissionNeedsCapabilityProbe = true
+            permissionSessionGeneration = nil
             lastInfo = nil
+            reconcileExitedPermissionOwner()
             applyServerState()
             if state.pollsServerInfo {
                 Task { await self.refreshServerStatus() }
@@ -106,6 +115,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pollTimer?.invalidate()
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        guard client != nil else { return }
+        Task { await ensureMainWindowModel().refreshRecordingPermissions() }
+    }
+
     /// Quit: stop a recording this client started (after confirmation), then stop the server
     /// we launched. An external server is left alone.
     ///
@@ -117,6 +131,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if terminating {
             return .terminateCancel  // one shutdown is already in progress
         }
+        reconcileExitedPermissionOwner()
         // An updater must never turn its Quit request into the normal "stop recording"
         // flow. A late active/unknown state cancels the relaunch without stopping anything.
         if session.shouldDeferUpdateTermination(
@@ -130,8 +145,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !busy else {
             if userRequestedQuit {
                 presentMessage(
-                    title: "録画の操作中です",
-                    text: "録画の開始・停止が完了してから、もう一度「終了」を選んでください。")
+                    title: permissionSetup.blocked ? "権限操作の完了を確認しています" : "録画の操作中です",
+                    text: permissionSetup.blocked
+                        ? "診断画面から状態を再確認してください。完了を確認できるまで終了を待機します。"
+                        : "録画の開始・停止が完了してから、もう一度「終了」を選んでください。")
             }
             return .terminateCancel
         }
@@ -260,7 +277,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.startPolling()
     }
 
-    private func ensureMainWindowModel() -> MainWindowModel {
+    func ensureMainWindowModel() -> MainWindowModel {
         if let mainWindowModel {
             return mainWindowModel
         }
@@ -274,8 +291,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             jobActivityChanged: { [weak self] active in
                 self?.knownJobsBusy = active
                 self?.applyState()
+            },
+            configureRecordingPermission: { [weak self] permission, action in
+                self?.configureRecordingPermission(permission, action: action)
+            },
+            refreshRecordingPermissions: { [weak self] in
+                await self?.refreshRecordingPermissions()
             })
         mainWindowModel = model
+        model.permissionSetup = permissionSetup
         model.applyDesktopSession(session)
         return model
     }
@@ -289,6 +313,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func applyState() {
+        synchronizePermissionUI()
         guard statusItem != nil else { return }
         let image = NSImage(systemSymbolName: session.menuSymbolName, accessibilityDescription: session.accessibilityLabel)
         image?.isTemplate = true
@@ -301,22 +326,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             stopItem.title = "録画停止"
         }
-        startItem.isEnabled = session.canStart
+        startItem.isEnabled = session.canStart || canRouteToPermissionSetup
         stopItem.isEnabled = session.canStop
         updateItem.isEnabled = updater?.canCheckForUpdates == true
+        restartItem.isEnabled = launcher.state.canRestart && !launcher.isBusy && !busy
+            && !terminating && !session.installingUpdate
+        chooseRepoItem.isEnabled = !launcher.isBusy && !busy && !recording
+            && !terminating && !session.installingUpdate
         mainWindowModel?.applyDesktopSession(session)
         updater?.stateDidChange()
     }
 
-    private func applyServerState() {
+    func applyServerState() {
         guard let launcher else {
             return
         }
         let state = launcher.state
         serverItem.title = ServerStatusText.title(for: state, info: lastInfo, reachable: session.serverReachable)
         serverItem.toolTip = state.detail
-        restartItem.isEnabled = state.canRestart && !launcher.isBusy && !busy && !terminating && !session.installingUpdate
-        chooseRepoItem.isEnabled = !launcher.isBusy && !busy && !recording && !terminating && !session.installingUpdate
         applyState()
     }
 
@@ -346,6 +373,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Recording actions
 
     @objc private func startRecording() {
+        if canRouteToPermissionSetup {
+            openPermissionDiagnostics()
+            return
+        }
         guard let token = session.beginStart() else {
             return
         }
@@ -434,6 +465,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Server actions
 
     @objc private func restartServer() {
+        reconcileExitedPermissionOwner()
         guard launcher.state.canRestart, !launcher.isBusy, !busy, !terminating, !session.installingUpdate else {
             return
         }
@@ -447,6 +479,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         session.connectionChanged(to: .starting(since: Date()))
+        permissionSetup.connectionChanged(to: .starting(since: Date()))
         applyServerState()
         Task {
             await launcher.restart()
@@ -488,6 +521,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         Task {
             session.connectionChanged(to: .starting(since: Date()))
+            permissionSetup.connectionChanged(to: .starting(since: Date()))
             applyState()
             await launcher.restart()
             applyServerState()
@@ -528,9 +562,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Server status
 
-    private func refreshServerStatus() async {
+    func refreshServerStatus(refreshPermissions: Bool = false) async {
+        permissionRefreshRequested = permissionRefreshRequested || refreshPermissions
         if let statusRefreshTask {
             await statusRefreshTask.value
+            if self.statusRefreshTask == statusRefreshTask {
+                self.statusRefreshTask = nil
+            }
+            if permissionRefreshRequested {
+                await refreshServerStatus()
+            }
             return
         }
         let task = Task { await performServerStatusRefresh() }
@@ -543,18 +584,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func performServerStatusRefresh() async {
         guard let launcher, launcher.state.pollsServerInfo, let token = session.beginPoll() else {
+            reconcileExitedPermissionOwner()
+            permissionRefreshRequested = false
             applyServerState()
             return
         }
         do {
-            let result = try await client.callTool(ToolCatalog.getServerInfo, arguments: [:])
+            let requestedFresh = permissionRefreshRequested || permissionSetup.blocked
+            permissionRefreshRequested = false
+            let serverInfo = try await readPermissionServerInfo(refreshPermissions: requestedFresh)
             guard session.isCurrentPoll(token) else { return }
-            let info = ServerInfoSummary(node: result.structuredContent)
+            let info = ServerInfoSummary(
+                version: serverInfo.serverVersion, contractVersion: serverInfo.contractVersion,
+                recordingCapable: serverInfo.capabilities.recording)
             let status = try await NarumiClient(mcp: client).recordingStatus()
             guard session.finishPoll(token, info: info, recording: status) else { return }
             lastInfo = info
         } catch {
             guard session.failPoll(token) else { return }
+            permissionNeedsCapabilityProbe = true
+            permissionSessionGeneration = nil
             applyServerState()
             await client.reset()
         }

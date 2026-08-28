@@ -17,6 +17,7 @@ from narumi_server.handlers.common import Handler
 
 HANDLERS: dict[str, Handler] = {
     "get_server_info": server_info.get_server_info,
+    "configure_recording_permission": recording.configure_recording_permission,
     "get_gaia_connection": gaia.get_gaia_connection,
     "set_gaia_connection": gaia.set_gaia_connection,
     "test_gaia_connection": gaia.test_gaia_connection,

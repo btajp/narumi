@@ -24,6 +24,8 @@ public enum RecorderCommand: Equatable, Sendable {
     case record(RecordOptions)
     case check
     case listDisplays
+    case requestPermission(RecordingPermission)
+    case openPermissionSettings(RecordingPermission)
     case help
 }
 
@@ -38,12 +40,16 @@ public enum ArgumentParser {
                  on stdout as JSON Lines (started / stopped / error / log).
           check          Print TCC permission status as JSON.
           list-displays  Print available displays as a JSON array.
+          request-permission microphone|screen_recording
+                         Request one permission without starting a recording.
+          open-permission-settings microphone|screen_recording
+                         Open the fixed macOS privacy settings pane without recording.
           help           Show this message.
         """
 
     public static func parse(_ arguments: [String]) throws -> RecorderCommand {
         guard let command = arguments.first else {
-            throw RecorderError(.invalidArgument, "missing command (record | check | list-displays)")
+            throw RecorderError(.invalidArgument, "missing command (see help for available commands)")
         }
         let rest = Array(arguments.dropFirst())
         switch command {
@@ -55,11 +61,27 @@ public enum ArgumentParser {
         case "list-displays":
             try rejectExtraArguments(rest, command: command)
             return .listDisplays
+        case "request-permission":
+            return .requestPermission(try parsePermission(rest, command: command))
+        case "open-permission-settings":
+            return .openPermissionSettings(try parsePermission(rest, command: command))
         case "help", "--help", "-h":
             return .help
         default:
             throw RecorderError(.invalidArgument, "unknown command: \(command)")
         }
+    }
+
+    private static func parsePermission(_ arguments: [String], command: String) throws -> RecordingPermission {
+        guard arguments.count == 1 else {
+            throw RecorderError(
+                .invalidArgument, "\(command) requires exactly one permission (microphone | screen_recording)")
+        }
+        guard let permission = RecordingPermission(rawValue: arguments[0]) else {
+            throw RecorderError(
+                .invalidArgument, "invalid permission for \(command) (microphone | screen_recording)")
+        }
+        return permission
     }
 
     private static func rejectExtraArguments(_ rest: [String], command: String) throws {

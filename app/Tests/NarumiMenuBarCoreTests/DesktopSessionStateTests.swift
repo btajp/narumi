@@ -220,4 +220,47 @@ final class DesktopSessionStateTests: XCTestCase {
             updateOwnsTermination: true, updateInstalling: true, userRequestedQuit: false,
             launcherBusy: false, knownJobsBusy: false))
     }
+
+    func testPermissionOperationBlocksStartAndUpdateUntilResolved() throws {
+        var state = try ready()
+        state.setPermissionSetupState(blocked: true, needsSetup: true)
+        XCTAssertTrue(state.permissionSetupBlocked)
+        XCTAssertFalse(state.canStart)
+        XCTAssertNil(state.beginStart())
+        XCTAssertTrue(state.statusText.contains("権限設定"))
+        XCTAssertNotNil(state.updateBlockReason(launcherBusy: false, knownJobsBusy: false))
+        state.setPermissionSetupState(blocked: false, needsSetup: false)
+        XCTAssertTrue(state.canStart)
+        XCTAssertNil(state.updateBlockReason(launcherBusy: false, knownJobsBusy: false))
+    }
+
+    func testMissingPermissionNeedsSetupButDoesNotPreventUpdatingTheApp() throws {
+        var state = try ready()
+        state.setPermissionSetupState(blocked: false, needsSetup: true)
+        XCTAssertTrue(state.needsPermissionSetup)
+        XCTAssertFalse(state.canStart)
+        XCTAssertTrue(state.statusText.contains("診断"))
+        XCTAssertNil(state.updateBlockReason(launcherBusy: false, knownJobsBusy: false))
+    }
+
+    func testPermissionSetupDoesNotPreventStoppingAnExistingRecording() throws {
+        var state = try ready(recording: .init(active: true))
+        state.setPermissionSetupState(blocked: true, needsSetup: true)
+        XCTAssertTrue(state.canStop)
+        XCTAssertTrue(state.recording.active)
+        XCTAssertEqual(state.statusText, "録画中")
+        XCTAssertNotNil(state.updateBlockReason(launcherBusy: false, knownJobsBusy: false))
+    }
+
+    func testPermissionPendingSurvivesConnectionStateChangesAndInactivePoll() throws {
+        var state = try ready()
+        state.setPermissionSetupState(blocked: true, needsSetup: true)
+        state.connectionChanged(to: .failed("connection lost"))
+        XCTAssertTrue(state.permissionSetupBlocked)
+        state.connectionChanged(to: .running(pid: 456))
+        let poll = try XCTUnwrap(state.beginPoll())
+        state.finishPoll(poll, info: info, recording: .init(active: false))
+        XCTAssertFalse(state.canStart)
+        XCTAssertNotNil(state.updateBlockReason(launcherBusy: false, knownJobsBusy: false))
+    }
 }

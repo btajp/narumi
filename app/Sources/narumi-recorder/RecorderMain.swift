@@ -48,6 +48,14 @@ enum RecorderCLI {
             }
         case .record(let options):
             return await record(options, sink: sink)
+        case .requestPermission, .openPermissionSettings:
+            do {
+                print(try await PermissionSetup.run(command).serialized())
+                return 0
+            } catch {
+                sink.emit(.error(ErrorEvent(RecorderError.wrap(error))))
+                return 1
+            }
         }
     }
 

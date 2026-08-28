@@ -34,7 +34,7 @@ public enum Permissions {
     /// Read-only status check. Does not prompt.
     ///
     /// Screen recording has no "not determined" query in CoreGraphics: `denied` therefore also
-    /// covers "never asked". The first `record` run triggers the system prompt.
+    /// covers "never asked". Permission requests belong to explicit setup or recording commands.
     public static func check() -> PermissionReport {
         let screen: PermissionStatus = CGPreflightScreenCaptureAccess() ? .granted : .denied
         return PermissionReport(screenRecording: screen, microphone: microphoneStatus())

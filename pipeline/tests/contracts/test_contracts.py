@@ -36,6 +36,7 @@ TOOL_FILE_KEYS = (
 )
 EXPECTED_TOOLS = {
     "get_server_info",
+    "configure_recording_permission",
     "start_recording",
     "stop_recording",
     "get_recording_status",

@@ -15,13 +15,14 @@ contracts/
 - `manifest.json` の `tools` はツール名の配列。`tools/<name>.json` と **過不足なく一致** させる（一致しなければローダーが起動時に `contract_mismatch` を投げる）
 - `manifest.json` の `defs` は共通定義ファイルの相対パス配列。定義名は全ファイルを通して一意
 
-## v1 ツール一覧（24）
+## v1.1 ツール一覧（28）
 
 アプリ（narumi.app）の全操作をカバーする app-first のツールセット（`docs/superpowers/specs/2026-08-27-narumi-surface-parity-design.md`）。
 
 | 分類 | ツール |
 |---|---|
 | サーバー | `get_server_info`（capabilities + diagnostics） |
+| 録画権限 | `configure_recording_permission`（許可要求 / 設定を開く。録画しない） |
 | 録画 | `start_recording` / `stop_recording` / `get_recording_status` / `import_recording` |
 | 会議の閲覧 | `list_meetings`（`active_job` 付き）/ `search_transcripts` / `get_meeting` / `get_transcript` / `get_minutes` |
 | 会議の変更 | `register_context` / `regenerate` / `set_meeting_config` / `discard_tracks` / `delete_meeting` |
@@ -29,6 +30,14 @@ contracts/
 | ジョブ | `get_job_status` / `cancel_job` |
 | プロファイル | `list_profiles` / `get_profile` / `set_profile` / `delete_profile` |
 | カタログ | `rebuild_catalog` |
+| Gaia 接続 | `get_gaia_connection` / `set_gaia_connection` / `test_gaia_connection` |
+
+権限設定と録画系ツールは常駐サーバーを必要とする。`get_server_info` は
+`refresh_permissions: true` で権限を再確認できるが、読み取りから許可要求は行わない。
+`permission_setup_in_progress` が true の間は録画開始とアプリの再起動・更新を保留する。
+権限設定の同一 ID による処理中再送は待機せず `busy`、完了済み再送は元の結果を返す。
+応答が不明な操作の完了確認には、操作元と同じ `server_instance_id` の fresh 応答を使う。
+別 ID や ID 欠落の応答は元のヘルパーの終了証明として扱わない。
 
 `defs/common.json` の主な共通型: `meeting_id` `request_id` `job_id` `context_id` `scope_name` `scope` `timestamp` `external_send_policy` `job_status` `job_kind` `job` `error_code`（`cancelled` を含む）`error` `error_envelope` `meeting_config` `track_status` `meeting_summary`（任意の `active_job` 付き）`segment` `context_source_type` `export_destination` `profile`。
 

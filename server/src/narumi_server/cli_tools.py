@@ -9,7 +9,8 @@ Subcommands are generated from ``contracts/`` at start-up — one per tool
 through the same ``narumi_server.app.dispatch`` code path the server uses.
 ``--require-server`` / ``--in-process`` force either side. Recording tools
 (``start_recording`` / ``stop_recording`` / ``get_recording_status``) are
-refused in-process: the recording would die with the CLI process.
+refused in-process: the recording would die with the CLI process. Permission setup also needs
+the resident server so it uses the same recorder identity and recording-operation lock.
 
 Success prints the tool's structured content as JSON on stdout (``--pretty``
 by default, ``--raw`` for one line); every failure prints the contract
@@ -52,6 +53,7 @@ ERROR_EXIT_CODE = 2
 TRANSPORT_CLI = "cli"
 RECORDING_TOOLS = frozenset({"start_recording", "stop_recording", "get_recording_status"})
 """Tools that need the resident server: in-process the recorder dies with the CLI process."""
+RESIDENT_SERVER_TOOLS = RECORDING_TOOLS | {"configure_recording_permission"}
 
 MODE_AUTO = "auto"
 MODE_IN_PROCESS = "in-process"
@@ -419,11 +421,11 @@ def _call_over_http(
 def _call_in_process(
     state: CliState, tool: str, args: dict[str, Any]
 ) -> tuple[dict[str, Any], bool]:
-    if tool in RECORDING_TOOLS:
+    if tool in RESIDENT_SERVER_TOOLS:
         raise InvalidArgumentError(
-            f"{tool} needs a resident narumi-server (a recording would stop with this CLI "
-            "process). Start `narumi-server --http` or narumi.app and retry, or point "
-            "--server-url / NARUMI_SERVER_URL at a running server.",
+            f"{tool} needs a resident narumi-server to keep recorder ownership and operation "
+            "locking in one process. Start `narumi-server --http` or narumi.app and retry, "
+            "or point --server-url / NARUMI_SERVER_URL at a running server.",
             details={"tool": tool, "server_url": state.server_url},
         )
     ctx = build_context(state.data_root, transports=[TRANSPORT_CLI])

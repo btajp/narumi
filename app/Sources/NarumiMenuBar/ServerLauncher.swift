@@ -18,7 +18,11 @@ final class ServerLauncher {
     static let killGrace: TimeInterval = 5
     static let logRotateBytes: UInt64 = 5 * 1024 * 1024
 
-    var config: ServerConfig
+    var config: ServerConfig {
+        didSet {
+            if config != oldValue { ownedServerRecovery.invalidate() }
+        }
+    }
     private(set) var state: ServerState = .notConfigured {
         didSet {
             if state != oldValue {
@@ -44,6 +48,7 @@ final class ServerLauncher {
     private var runtimeInstallation: RuntimeInstallation?
     private var runtimeLease: RuntimeLease?
     private var runtimeSyncOwnership: RuntimeSyncOwnership?
+    private var ownedServerRecovery = OwnedServerRecovery()
 
     init(config: ServerConfig, client: MCPClient) {
         self.config = config
@@ -52,9 +57,31 @@ final class ServerLauncher {
 
     // MARK: Public API
 
+    typealias OwnedServerToken = OwnedServerRecovery.Token
+
+    /// Only the bundled server we launched can supply a permission-recovery token.
+    /// A sync child, repo server or adopted external server is never eligible.
+    func captureOwnedServerToken() -> OwnedServerToken? {
+        guard !isBusy, syncProcess == nil, let process, let runtimeSyncOwnership else { return nil }
+        return ownedServerRecovery.capture(
+            runtimeSyncOwnership.captureOwnedProcessToken(expectedPID: process.processIdentifier),
+            context: ownedServerContext, syncing: false)
+    }
+
+    /// This does not stop or restart anything. Missing/corrupt ownership and uncertain
+    /// process liveness preserve the permission wait; only this exact exited tree clears it.
+    func confirmOwnedProcessTreeExited(_ token: OwnedServerToken) -> Bool {
+        guard let runtimeSyncOwnership else { return false }
+        return ownedServerRecovery.confirm(
+            token, context: ownedServerContext, busy: isBusy,
+            hasServerProcess: process != nil, hasSyncProcess: syncProcess != nil,
+            inspect: runtimeSyncOwnership.confirmOwnedProcessTreeExited)
+    }
+
     /// Detect an external server, else spawn ours and wait until it answers `get_server_info`.
     /// A concurrent call joins the in-flight start; `stop()` cancels it.
     func start() async {
+        ownedServerRecovery.invalidate()
         if let startTask {
             await startTask.value
             return
@@ -71,15 +98,14 @@ final class ServerLauncher {
             startTask = nil
         }
         if !managesProcess {
-            runtimeLease = nil
-            runtimeInstallation = nil
-            runtimeSyncOwnership = nil
+            discardRuntimeContext()
         }
     }
 
     /// SIGTERM, wait up to `timeout` for the graceful shutdown (recording finalization), then
     /// SIGKILL the whole process group (uv → python → recorder). Never leaves an orphan.
     func stop(timeout: TimeInterval = ServerLauncher.stopTimeout) async {
+        ownedServerRecovery.invalidate()
         if let startTask {
             startTask.cancel()
             await startTask.value
@@ -90,9 +116,7 @@ final class ServerLauncher {
             state = .failed("環境準備プロセスを停止できません。再起動と環境の復旧を保留しました")
         } else if !managesProcess {
             if let recoveryError = recoverFailedInstallation() { state = .failed(recoveryError) }
-            runtimeLease = nil
-            runtimeInstallation = nil
-            runtimeSyncOwnership = nil
+            discardRuntimeContext()
         }
     }
 
@@ -152,15 +176,34 @@ final class ServerLauncher {
 
     // MARK: Start
 
+    private var ownedServerContext: OwnedServerRecovery.Context? {
+        guard let mode = config.runtimeMode else { return nil }
+        let source: OwnedServerRecovery.Source
+        if case .external = state {
+            source = .external
+        } else {
+            source = mode == .bundled ? .bundled : .repository
+        }
+        return OwnedServerRecovery.Context(
+            source: source, runtimeRoot: config.runtimePaths.root,
+            leaseIdentity: runtimeLease.map { ObjectIdentifier($0) },
+            ownershipIdentity: runtimeSyncOwnership.map { ObjectIdentifier($0) })
+    }
+
+    private func discardRuntimeContext() {
+        ownedServerRecovery.invalidate()
+        runtimeLease = nil
+        runtimeInstallation = nil
+        runtimeSyncOwnership = nil
+    }
+
     private func performStart() async {
         if managesProcess {
             return
         }
         // A previously unresponsive child may have exited since the last attempt. Durable
         // sync ownership is checked again when acquiring a fresh lease below.
-        runtimeLease = nil
-        runtimeInstallation = nil
-        runtimeSyncOwnership = nil
+        discardRuntimeContext()
         syncProcess = nil
         do {
             if config.requiresOwnedServer {

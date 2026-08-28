@@ -7,7 +7,7 @@
 | `NarumiRecorderKit` | ライブラリ | ScreenCaptureKit キャプチャ → AVAssetWriter で **別ファイル** 書き出し。イベント型・引数解析・ディスプレイ選択などの純粋ロジックはこの中の SCK 非依存な型に置き、`swift test` で検証する |
 | `narumi-recorder` | CLI | server がサブプロセスとして起動する録画ヘルパー。stdout に JSON Lines でイベントを出す |
 | `NarumiMenuBarCore` | ライブラリ（Foundation のみ） | メニューバーアプリの純粋ロジック。サーバー設定の解決（`ServerConfig`。ランタイムモード判定を含む）、起動コマンドの組み立て（`ServerCommand`）、サーバー状態と表示文言（`ServerState` / `ServerStatusText`）、同梱ランタイムの manifest と同期手順（`RuntimeManifest` / `RuntimeSyncPlan`）、契約レスポンスのモデル（`ContractModels`）、表示整形（`Formatting`）、議事録 markdown のブロック分割（`MarkdownBlocks`）、ツール名の一覧（`ToolCatalog`）。AppKit にも Sparkle にも依存せず `swift test` で検証する |
-| `NarumiMenuBar` | メニューバーアプリ `narumi.app` | MCP クライアント。メニューバー（録画開始 / 停止）とメインウィンドウ（後述）から server の公開ツール（`ToolCatalog.allUsed` = 契約の全 27 ツール）を呼ぶだけで、ファイルや recorder には触れない（AGENTS.md 絶対原則 3）。加えて `narumi-server` の**プロセス**を起動・停止する（`ServerLauncher`。後述「起動フロー」） |
+| `NarumiMenuBar` | メニューバーアプリ `narumi.app` | MCP クライアント。メニューバー（録画開始 / 停止）とメインウィンドウ（後述）から server の公開ツール（`ToolCatalog.allUsed` = 契約の全 28 ツール）を呼ぶだけで、ファイルや recorder には触れない（AGENTS.md 絶対原則 3）。加えて `narumi-server` の**プロセス**を起動・停止する（`ServerLauncher`。後述「起動フロー」） |
 
 ## ビルドとテスト
 
@@ -32,6 +32,8 @@ scripts/build-app.sh        # リポジトリ直下から。dist/narumi.app を�
 ```
 narumi-recorder record --output <dir> [--display <id>] [--no-video] [--mic <device-uid>]
 narumi-recorder check
+narumi-recorder request-permission microphone|screen_recording
+narumi-recorder open-permission-settings microphone|screen_recording
 narumi-recorder list-displays
 narumi-recorder help
 ```
@@ -41,6 +43,8 @@ narumi-recorder help
 - 終了時に `<dir>/recorder.json` を書く（`stopped` イベントの内容 + `started_at` + `recorder_version`。失敗時は `error` も入る）。
 - 終了コード: 正常 0 / 録画失敗 1 / 引数エラー 2。失敗時は必ず `error` イベントを出す。
 - `check`: `{"screen_recording":"granted|denied","microphone":"granted|denied|unknown"}`。画面収録は CoreGraphics に「未確認」を問い合わせる API が無いため、未確認も `denied` になる。
+- `request-permission`: 対象の OS 許可を要求するだけで、録画・出力ディレクトリ・トラックは作らない。拒否も現在状態を含む正常 JSON として返す。拒否済みのマイクはプロンプトが再表示されないため、設定から変更する。
+- `open-permission-settings`: 対象から決まる固定のプライバシー設定 URL を開く。任意 URL は受け付けず、対象 URL を開けないときだけプライバシー設定トップへ戻る。応答の `settings_opened` は画面を開く要求の受付で、許可済みを意味しない。
 - `list-displays`: `[{"id":1,"width":1728,"height":1117,"name":"Built-in Retina Display"}]`（幅・高さはポイント）。
 
 ### stdout のイベント（1 行 1 JSON、各行で flush）
@@ -60,6 +64,10 @@ narumi-recorder help
 ## TCC（画面収録・マイク）の扱い
 
 TCC は「責任プロセス」単位で許可を記録する。
+
+利用者向けの入口はアプリの「診断」→「録画の権限」。マイク・画面収録の状態、許可を求めるボタン、macOS 設定を開くボタン、再確認をまとめる。許可要求は明示クリック時だけで、起動・診断・復帰時の確認では要求しない。録画入口でも未許可なら同じ画面へ案内する。設定の項目名や URL アンカーは OS 版で異なる場合があるため、手動の辿り方も画面に併記する。
+
+アプリの操作は `configure_recording_permission` を通り、常駐 server が同梱 helper を起動する。許可待機・子プロセス回収中は録画開始・再起動・更新適用を保留し、通信断後に自動再要求しない。再接続して状態を確認できるか、所有するプロセス群の終了を確認できるまで保留を維持する。旧契約の server に新しい引数やツールは送らず、更新が必要と案内する。
 
 - **素の CLI（`app/.build/release/narumi-recorder`）**: Terminal から直接起動した場合は Terminal.app が責任プロセスになり、Terminal に対して画面収録・マイクの許可が求められる。server（`uv run narumi-server`）経由で起動した場合も、その server を起動した親アプリ（Terminal 等）が責任プロセスになる。初回の `record` で `SCShareableContent` の照会と `AVCaptureDevice.requestAccess` がプロンプトを出す。拒否されると `permission_denied` を返す（黙って続行しない）。launchd などプロンプトを出せない環境では、あらかじめ「システム設定 > プライバシーとセキュリティ」で許可しておく。
 - **`.app`（`dist/narumi.app`）**: `Info.plist` に `NSMicrophoneUsageDescription` / `NSScreenCaptureUsageDescription` を持ち、`jp.btajp.narumi` として許可が記録される。`narumi.app` は server を自分で起動し、server には同梱の `Contents/MacOS/narumi-recorder` を `--recorder` で渡す（後述「起動フロー」）。この構成では recorder の祖先プロセスが `.app` なので、TCC の責任プロセスは `narumi.app` になり許可が .app に紐づく想定（実機での確認は未了）。
@@ -98,7 +106,7 @@ server の `RecordingController` は次の順で実行ファイルを探す。
 - **取り込みシート**: `import_recording`（mic / system / screen のパス、プロファイル、scope、copy / auto_process）。
 - **プロファイルシート**: `list_profiles` / `get_profile` / `set_profile`（make_default・自動エクスポート先を含む）/ `delete_profile`。
 - **Gaia 接続シート**: `get_gaia_connection` / `set_gaia_connection` / `test_gaia_connection`。URL・write-only API キーを専用設定へ保存し、保存済み設定だけを接続テストする。同じ URL でキー欄が空なら維持、URL 変更時は旧キーを解除する。キーの明示削除・連携無効化も可能。キー入力は保存成功・失敗・シートを閉じる際に消去し、プロファイルや会議バンドルには渡さない。環境変数由来か保存済みか、接続先の契約版・クライアント名・既定 scope を表示する。
-- **診断シート**: `get_server_info` の capabilities / diagnostics（ffmpeg・権限・データルートなど）、`rebuild_catalog`、そして MCP 外のプロセス操作（サーバー再起動 / ログを開く / アップデート確認）。
+- **診断シート**: 先頭にマイク・画面収録の状態と `configure_recording_permission` による許可要求・設定画面への導線を表示。設定復帰時と再確認ボタンは `get_server_info {refresh_permissions:true}` を使う。続いて capabilities / diagnostics（ffmpeg・データルートなど）、`rebuild_catalog`、MCP 外のプロセス操作（サーバー再起動 / ログを開く / アップデート確認）を表示する。
 - **ジョブ**: ウィンドウが開始したジョブ + 一覧の `active_job` を追跡し、ツールバーにバッジ表示。ポップオーバーから `cancel_job`。
 - **エラー表示**: 契約の error_envelope を code + message のアラートで表示。`busy` だけは非モーダルなトーストにする。
 

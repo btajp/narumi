@@ -24,6 +24,7 @@ struct ToolCallResult: Sendable {
     let structuredContent: JSONNode?
     let text: String
     let isError: Bool
+    var sessionGeneration: UInt64? = nil
 }
 
 /// Minimal MCP Streamable HTTP client (JSON-RPC 2.0 over POST) for the narumi server.
@@ -40,6 +41,7 @@ actor MCPClient {
     private let transport: MCPHTTPTransport
     private var sessionID: String?
     private var initialized = false
+    private var permissionSession = MCPPermissionSessionState()
     private var nextID = 1
     var jobRequests = DesktopJobRequestState()
     let jobRequestObserver: JobRequestObserver?
@@ -64,11 +66,19 @@ actor MCPClient {
     // MARK: Public API
 
     /// `tools/call`. Throws `MCPClientError.tool` when the server reports `isError`.
-    func callTool(_ name: String, arguments: [String: JSONNode]) async throws -> ToolCallResult {
+    func callTool(
+        _ name: String, arguments: [String: JSONNode], expectedSessionGeneration: UInt64? = nil
+    ) async throws -> ToolCallResult {
         let confidential = MCPHTTPTransport.isConfidentialTool(name)
         do {
             if confidential {
                 _ = try MCPHTTPTransport.confidentialEndpoint(serverURL)
+            }
+            if name == ToolCatalog.configureRecordingPermission
+                || (name == ToolCatalog.getServerInfo && arguments["refresh_permissions"]?.boolValue == true) {
+                return try await performToolCall(
+                    name, arguments: arguments, confidential: confidential,
+                    expectedSessionGeneration: expectedSessionGeneration)
             }
             return try await performJobTrackedToolCall(name, arguments: arguments, confidential: confidential)
         } catch {
@@ -90,18 +100,28 @@ actor MCPClient {
     }
 
     func performToolCall(
-        _ name: String, arguments: [String: JSONNode], confidential: Bool
+        _ name: String, arguments: [String: JSONNode], confidential: Bool,
+        expectedSessionGeneration: UInt64? = nil
     ) async throws -> ToolCallResult {
         try await ensureInitialized(confidential: confidential)
         let params: JSONNode = .object(["name": .string(name), "arguments": .object(arguments)])
         let result: JSONNode
+        var responseGeneration = permissionSession.generation
         do {
-            result = try await request(method: "tools/call", params: params, confidential: confidential)
+            result = try await request(
+                method: "tools/call", params: params, confidential: confidential,
+                expectedSessionGeneration: expectedSessionGeneration)
         } catch MCPClientError.httpStatus(404, let body) {
-            // Session expired on the server side: re-initialize once and retry.
-            sessionID = nil
-            initialized = false
+            // A permission mutation can outlive a lost session/response. Reconnect only
+            // for later read-only reconciliation, never replay its OS action here.
+            reset()
+            guard MCPToolReplayPolicy.allowsSessionRetry(
+                tool: name, refreshingPermissions: arguments["refresh_permissions"]?.boolValue == true
+            ) else {
+                throw MCPClientError.httpStatus(404, body)
+            }
             try await ensureInitialized(confidential: confidential)
+            responseGeneration = permissionSession.generation
             do {
                 result = try await request(method: "tools/call", params: params, confidential: confidential)
             } catch {
@@ -119,9 +139,18 @@ actor MCPClient {
             }
         }
         let text = texts.joined(separator: "\n")
-        let callResult = ToolCallResult(structuredContent: structured, text: text, isError: isError)
+        var callResult = ToolCallResult(
+            structuredContent: structured, text: text, isError: isError,
+            sessionGeneration: responseGeneration == permissionSession.generation ? responseGeneration : nil)
         if isError {
             throw MCPClientError.tool(message: MCPClient.errorMessage(from: callResult), payload: structured)
+        }
+        if name == ToolCatalog.getServerInfo {
+            permissionSession.observeServerInfo(
+                contractVersion: structured?["contract_version"]?.stringValue,
+                serverInstanceID: structured?["server_instance_id"]?.stringValue,
+                requestGeneration: responseGeneration)
+            callResult.sessionGeneration = responseGeneration == permissionSession.generation ? responseGeneration : nil
         }
         return callResult
     }
@@ -130,6 +159,7 @@ actor MCPClient {
     func reset() {
         sessionID = nil
         initialized = false
+        permissionSession.reset()
     }
 
     static func errorMessage(from result: ToolCallResult) -> String {
@@ -162,7 +192,9 @@ actor MCPClient {
 
     // MARK: Transport
 
-    private func request(method: String, params: JSONNode, confidential: Bool) async throws -> JSONNode {
+    private func request(
+        method: String, params: JSONNode, confidential: Bool, expectedSessionGeneration: UInt64? = nil
+    ) async throws -> JSONNode {
         let id = nextID
         nextID += 1
         let body: JSONNode = .object([
@@ -171,7 +203,8 @@ actor MCPClient {
             "method": .string(method),
             "params": params,
         ])
-        let (data, response) = try await post(body, confidential: confidential)
+        let (data, response) = try await post(
+            body, confidential: confidential, expectedSessionGeneration: expectedSessionGeneration)
         let message = try MCPClient.extractResponse(data: data, response: response, expectedID: id)
         if let error = message["error"] {
             let code = Int(error["code"].flatMap { node -> Double? in
@@ -194,7 +227,20 @@ actor MCPClient {
         _ = try await post(body, confidential: confidential)
     }
 
-    private func post(_ body: JSONNode, confidential: Bool) async throws -> (Data, HTTPURLResponse) {
+    private func post(
+        _ body: JSONNode, confidential: Bool, expectedSessionGeneration: UInt64? = nil
+    ) async throws -> (Data, HTTPURLResponse) {
+        if let expectedSessionGeneration, expectedSessionGeneration != permissionSession.generation {
+            throw MCPClientError.protocolError("権限操作の確認後に接続が変わりました。診断から状態を再確認してください。")
+        }
+        if body["method"]?.stringValue == "tools/call", let tool = body["params"]?["name"]?.stringValue {
+            let refreshing = body["params"]?["arguments"]?["refresh_permissions"]?.boolValue == true
+            guard (tool != ToolCatalog.configureRecordingPermission || expectedSessionGeneration != nil),
+                permissionSession.allowsCall(tool: tool, refreshingPermissions: refreshing) else {
+                throw MCPClientError.protocolError("接続先の権限設定機能を再確認する必要があります。診断から状態を再確認してください。")
+            }
+        }
+        let requestGeneration = permissionSession.generation
         var request = URLRequest(url: serverURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -215,7 +261,13 @@ actor MCPClient {
         guard let http = response as? HTTPURLResponse else {
             throw MCPClientError.protocolError("non-HTTP response")
         }
+        guard permissionSession.generation == requestGeneration else {
+            throw MCPClientError.protocolError("接続が切り替わったため、以前の応答を破棄しました。")
+        }
         if let newSessionID = http.value(forHTTPHeaderField: "Mcp-Session-Id"), !newSessionID.isEmpty {
+            if let sessionID, sessionID != newSessionID {
+                permissionSession.reset()
+            }
             sessionID = newSessionID
         }
         guard (200..<300).contains(http.statusCode) else {

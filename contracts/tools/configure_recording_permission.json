@@ -1,0 +1,62 @@
+{
+  "name": "configure_recording_permission",
+  "title": "Configure recording permission",
+  "description": "Explicitly request one local macOS recording permission or open its fixed privacy settings pane on the server host, without starting a recording or creating a meeting, track or job. Requires a resident server so the connected server's recorder and recording lock are used; product CLI in-process fallback is forbidden. This action never grants permission automatically, resets TCC, or accepts arbitrary URLs or commands. A denied OS request is a successful result containing the remaining permission state. settings_opened only means the OS accepted opening settings, not that permission was granted. A successful replay with the same request_id returns the original snapshot; reuse an ID only with identical arguments. Concurrent in-flight requests, including the same ID, fail immediately with busy rather than running later. After an uncertain response, inspect get_server_info with refresh_permissions=true and permission_setup_in_progress from the same server_instance_id observed before the action; a different or missing identity does not prove the earlier helper exited. Do not automatically retry the mutation. The recorder action has a 120-second deadline and owned-child cleanup. On failure returns an error_envelope (isError=true) with code: busy, invalid_argument, recorder_unavailable, internal.",
+  "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "required": ["permission", "action", "request_id"],
+    "properties": {
+      "permission": { "$ref": "../defs/common.json#/$defs/recording_permission" },
+      "action": { "$ref": "../defs/common.json#/$defs/recording_permission_action" },
+      "request_id": { "$ref": "../defs/common.json#/$defs/request_id" }
+    },
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["permission", "action", "permissions", "settings_opened"],
+    "properties": {
+      "permission": { "$ref": "../defs/common.json#/$defs/recording_permission" },
+      "action": { "$ref": "../defs/common.json#/$defs/recording_permission_action" },
+      "permissions": { "$ref": "../defs/common.json#/$defs/recording_permission_report" },
+      "settings_opened": {
+        "type": "boolean",
+        "description": "True only when the OS accepted opening the fixed privacy settings pane or its privacy-root fallback. This is not a permission grant."
+      }
+    },
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      { "permission": "microphone", "action": "request", "request_id": "715bf6f2-d8ad-446a-a1a0-7f6753277de5" },
+      { "permission": "screen_recording", "action": "open_settings", "request_id": "054cc5e9-c63b-479c-a65b-cd73d2fcb4f7" },
+      { "permission": "microphone", "action": "request", "request_id": "c35c8277-236b-4d98-95d7-369f5fd15011" }
+    ],
+    "output": [
+      {
+        "permission": "microphone",
+        "action": "request",
+        "permissions": { "screen_recording": "denied", "microphone": "granted" },
+        "settings_opened": false
+      },
+      {
+        "permission": "screen_recording",
+        "action": "open_settings",
+        "permissions": { "screen_recording": "denied", "microphone": "granted" },
+        "settings_opened": true
+      },
+      {
+        "permission": "microphone",
+        "action": "request",
+        "permissions": { "screen_recording": "denied", "microphone": "denied" },
+        "settings_opened": false
+      }
+    ]
+  }
+}
