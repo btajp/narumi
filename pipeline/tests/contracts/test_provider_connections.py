@@ -22,11 +22,8 @@ MINUTES_MODEL = {
     "connection_revision": 1,
     "model_id": "fixture-text-model",
 }
-AUTHORIZATION_URL = (
-    "https://auth.openai.com/oauth/authorize?response_type=code&client_id=contract-client"
-    "&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&state=contract-state"
-    "&code_challenge=contract-challenge&code_challenge_method=S256"
-)
+AUTHORIZATION_URL = "https://auth.openai.com/codex/device"
+USER_CODE = "ABCD-EFGH"
 CREATE = {
     "provider_id": "anthropic-api",
     "display_name": "議事録 API",
@@ -271,6 +268,7 @@ def test_auth_status_requires_one_unambiguous_lookup(
         {"action": "logout", "operation_id": OPERATION_ID},
         {"action": "subscription_login"},
         {"authorization_url": "https://unapproved.example"},
+        {"user_code": USER_CODE},
         {"api_key": "example-not-a-real-key"},
     ],
 )
@@ -292,19 +290,21 @@ def test_unknown_auth_operation_is_not_an_idle_success(contracts: ContractSet) -
 
 
 @pytest.mark.parametrize("tool", ["authenticate_provider_connection", "get_provider_auth_status"])
-def test_only_pending_authentication_start_can_publish_a_login_url(
+def test_only_pending_authentication_start_can_publish_a_device_login_pair(
     contracts: ContractSet, tool: str
 ) -> None:
     payload = deepcopy(contracts[tool].output_examples[0])
-    payload["operation"].update(state="pending", authorization_url=AUTHORIZATION_URL)
+    payload["operation"].update(state="pending", authorization_url=None, user_code=None)
+    contracts.validate_output(tool, payload)
+    payload["operation"].update(authorization_url=AUTHORIZATION_URL, user_code=USER_CODE)
     contracts.validate_output(tool, payload)
     for state in ("succeeded", "failed", "cancelled", "unknown"):
         payload["operation"]["state"] = state
         with pytest.raises(ContractMismatchError):
             contracts.validate_output(tool, payload)
-        payload["operation"]["authorization_url"] = None
+        payload["operation"].update(authorization_url=None, user_code=None)
         contracts.validate_output(tool, payload)
-        payload["operation"]["authorization_url"] = AUTHORIZATION_URL
+        payload["operation"].update(authorization_url=AUTHORIZATION_URL, user_code=USER_CODE)
     payload["operation"].update(state="pending", action="logout")
     with pytest.raises(ContractMismatchError):
         contracts.validate_output(tool, payload)
@@ -316,27 +316,65 @@ def test_only_pending_authentication_start_can_publish_a_login_url(
 @pytest.mark.parametrize(
     "url",
     [
-        "http://auth.openai.com/oauth/authorize?state=fixture",
-        "https://chatgpt.com/oauth/authorize?state=fixture",
-        "https://auth.openai.com.evil.example/oauth/authorize?state=fixture",
-        "https://evil.example@auth.openai.com/oauth/authorize?state=fixture",
-        "https://auth.openai.com:1234/oauth/authorize?state=fixture",
-        "https://auth.openai.com/oauth/authorize",
-        "https://auth.openai.com/oauth/authorize/?state=fixture",
-        "https://auth.openai.com/oauth/token?state=fixture",
-        "https://auth.openai.com/oauth/authorize?state=fixture#fragment",
-        "https://auth.openai.com/oauth/authorize?state=fixture\ncommand",
-        "https://auth.openai.com/oauth/authorize?state=fixture\n",
-        "https://auth.openai.com/oauth/authorize?state=fixture\r",
+        "http://auth.openai.com/codex/device",
+        "https://chatgpt.com/codex/device",
+        "https://auth.openai.com.evil.example/codex/device",
+        "https://evil.example@auth.openai.com/codex/device",
+        "https://auth.openai.com:443/codex/device",
+        "https://auth.openai.com/codex/device/",
+        "https://auth.openai.com/codex/device?user_code=ABCD-EFGH",
+        "https://auth.openai.com/codex/device#fragment",
+        "https://auth.openai.com/codex/device\n",
+        "https://auth.openai.com/codex/device\r",
+        "https://auth.openai.com/oauth/authorize?state=fixture",
+        "http://localhost:1455/auth/callback",
     ],
 )
 def test_login_url_contract_rejects_unapproved_destinations(
     contracts: ContractSet, url: str
 ) -> None:
     payload = deepcopy(contracts["get_provider_auth_status"].output_examples[0])
-    payload["operation"].update(state="pending", authorization_url=url)
+    payload["operation"].update(state="pending", authorization_url=url, user_code=USER_CODE)
     with pytest.raises(ContractMismatchError):
         contracts.validate_output("get_provider_auth_status", payload)
+
+
+@pytest.mark.parametrize("user_code", ["A", "abcd-1234", "A1-" * 10 + "AB"])
+def test_device_code_allows_only_bounded_ascii_display_codes(
+    contracts: ContractSet, user_code: str
+) -> None:
+    payload = deepcopy(contracts["get_provider_auth_status"].output_examples[0])
+    payload["operation"].update(
+        state="pending", authorization_url=AUTHORIZATION_URL, user_code=user_code
+    )
+    contracts.validate_output("get_provider_auth_status", payload)
+
+
+@pytest.mark.parametrize(
+    "user_code", [None, "", "A" * 33, "確認コード", "A_B", "AB CD", "ABC\n", "ABC\r", 1234, []]
+)
+def test_device_code_rejects_invalid_or_unpaired_codes(
+    contracts: ContractSet, user_code: Any
+) -> None:
+    payload = deepcopy(contracts["get_provider_auth_status"].output_examples[0])
+    payload["operation"].update(
+        state="pending", authorization_url=AUTHORIZATION_URL, user_code=user_code
+    )
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("get_provider_auth_status", payload)
+
+
+@pytest.mark.parametrize("tool", ["authenticate_provider_connection", "get_provider_auth_status"])
+def test_auth_operation_requires_an_explicit_nullable_device_code(
+    contracts: ContractSet, tool: str
+) -> None:
+    payload = deepcopy(contracts[tool].output_examples[0])
+    payload["operation"].update(state="pending", authorization_url=None, user_code=USER_CODE)
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output(tool, payload)
+    del payload["operation"]["user_code"]
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output(tool, payload)
 
 
 @pytest.mark.parametrize("secret_field", ["api_key", "access_token", "credential_ref", "key_hash"])

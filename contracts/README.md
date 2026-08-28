@@ -62,7 +62,8 @@ Claude のサブスク認証と OpenAI API 接続は未対応。
 - CLI の秘密入力は非表示プロンプトか stdin を使う。通常の argv・文字列 `--json`・ログ・応答・要求キャッシュへ秘密を出さない。
 - 接続の無効化は資格情報を保持し、再有効化で認証済み状態へ自動復帰しない。メタデータの観測だけでは設定版を増やさない。
 - 認証操作は `start_request_id` でも照会できる。応答喪失・再起動時に不明な操作を成功扱いせず、自動でログインを再開始しない。
-- Codex の `authorization_url` は `start` が `pending` の間だけ返せる。固定 runtime の公式認可先 `https://auth.openai.com/oauth/authorize` と loopback callback を検証し、終了・取消・失敗・不明の状態では null にする。
+- Codex は公式デバイスコード認証だけを使う。`authorization_url` は `https://auth.openai.com/codex/device` に固定し、`start` が `pending` の間だけ `user_code` と一対で返す。旧ブラウザ OAuth URL と loopback callback は受け付けない。
+- `user_code` は 1〜32 文字の ASCII 英数字・ハイフンだけを許可する。URL とコードは進行中のメモリにだけ保持し、永続ログ・操作 receipt・診断へ残さない。完了・取消・失敗・不明・再起動時には両方 null にする。
 - Codex の認証情報は接続ごとの narumi 専用 runtime 内に保持し、API 応答へ返さない。既存の Codex セッション・設定・認証情報は流用しない。
 - runtime 準備はカタログの固定 ID だけを受け付ける。`provider_setup` job を返し、進行中・直近の受付は `list_providers` でも参照できる。
 
@@ -84,6 +85,14 @@ Claude のサブスク認証と OpenAI API 接続は未対応。
 `local_only` では拒否し、別プロバイダや別モデルへのフォールバックはしない。
 同じ入力と選択では既存の議事録を再利用する。選択や `cache_epoch` だけを変更した場合は、
 文字起こしや発話統合をやり直さず議事録生成だけを更新する。
+
+`regenerate.force=true` は `minutes_model` が null の従来処理だけで使う。
+Codex を選択した会議では `invalid_argument` で拒否する。
+同じ内容を Codex へ改めて送る場合は、再送をユーザーが確認した後、
+`set_meeting_config` で `minutes_model.cache_epoch` を明示的に増やして保存する。
+その保存結果を `expected_config` に渡し、新しい `request_id` と `force=false` で `regenerate` を呼ぶ。
+送信や結果の成否が不明な試行は自動再送しない。同じ選択のまま通常の再生成を呼んでも、
+結果不明の記録を迂回して再送することはできない。
 
 Codex の選択がある会議の `regenerate` と、`auto_regenerate=true` の `register_context` は、
 送信確認時に取得した設定全体を `expected_config` として渡す。

@@ -91,6 +91,7 @@
         "action",
         "state",
         "authorization_url",
+        "user_code",
         "reason",
         "created_at",
         "updated_at"
@@ -123,10 +124,15 @@
           "$ref": "#/$defs/provider_auth_operation_state"
         },
         "authorization_url": {
+          "enum": ["https://auth.openai.com/codex/device", null],
+          "description": "Official Codex ChatGPT device-login URL, paired with user_code only while start is pending; otherwise null. Browser OAuth URLs and loopback callbacks are not supported. The URL is held only in memory for the pending operation and must not be persisted in receipts, logs or diagnostics."
+        },
+        "user_code": {
           "type": ["string", "null"],
-          "maxLength": 8192,
-          "pattern": "^https://auth\\.openai\\.com/oauth/authorize\\?[^#\\s]+(?![\\s\\S])",
-          "description": "Official Codex ChatGPT authorization URL only while start is pending; otherwise null. The server also validates the parsed host/path, absence of userinfo and fragment, expected OAuth fields and the runtime's loopback callback. Tokens and runtime credential files are never returned."
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[A-Za-z0-9-]+(?![\\s\\S])",
+          "description": "Transient code the user enters at authorization_url. ASCII letters, digits and hyphens only, at most 32 characters. Present only as a pair with the device URL during start/pending. Never persist in receipts, logs or diagnostics; clear on completion, cancellation, failure, unknown outcome or restart. Access tokens and runtime credential files are never returned."
         },
         "reason": {
           "$ref": "#/$defs/provider_reason"
@@ -139,14 +145,27 @@
         }
       },
       "additionalProperties": false,
-      "description": "Persisted public authentication operation. Starting again is never an implicit recovery action; query by the original start_request_id.",
+      "description": "Public authentication operation with durable non-secret identity and state. authorization_url and user_code are memory-only pending device-login data, excluded from persistent receipts, logs and diagnostics. Starting again is never an implicit recovery action; query by the original start_request_id.",
       "allOf": [
         {
           "if": {
             "properties": { "action": { "const": "start" }, "state": { "const": "pending" } },
             "required": ["action", "state"]
           },
-          "else": { "properties": { "authorization_url": { "type": "null" } } }
+          "else": {
+            "properties": {
+              "authorization_url": { "type": "null" },
+              "user_code": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "authorization_url": { "type": "null" } },
+            "required": ["authorization_url"]
+          },
+          "then": { "properties": { "user_code": { "type": "null" } } },
+          "else": { "properties": { "user_code": { "type": "string" } } }
         }
       ]
     },
