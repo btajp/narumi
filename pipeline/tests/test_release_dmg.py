@@ -7,6 +7,7 @@ import os
 import plistlib
 import shutil
 import stat
+import sys
 import zipfile
 from pathlib import Path
 
@@ -17,11 +18,13 @@ from .bundle_artifact_fixtures import make_app, tracked_list
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def complete_zip(app: Path, destination: Path, *, root=True, unix=True) -> Path:
+def complete_zip(app: Path, destination: Path, *, root=True, unix=True, link_mode=None) -> Path:
     with zipfile.ZipFile(destination, "w") as zipped:
         for path in ([app] if root else []) + sorted(app.rglob("*")):
             name = path.relative_to(app.parent).as_posix()
             mode = path.lstat().st_mode
+            if stat.S_ISLNK(mode) and link_mode is not None:
+                mode = stat.S_IFLNK | link_mode
             entry = zipfile.ZipInfo(name + ("/" if path.is_dir() and not path.is_symlink() else ""))
             entry.create_system = 3 if unix else 0
             entry.external_attr = mode << 16
@@ -225,6 +228,131 @@ def test_extraction_mode_drift_prevents_create_or_mount(fixture):
         call[:2] in {("hdiutil", "create"), ("hdiutil", "attach")} for call in tools.calls
     )
     assert not list(work.iterdir())
+
+
+@pytest.fixture
+def linked_fixture(fixture):
+    module, _, app, archive, _, _, *_ = fixture
+    sparkle = module.bundle_inventory.bundle_sparkle
+    for relative in sparkle.REQUIRED:
+        target = app / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"fake Sparkle content")
+    (app / sparkle.VERSION / "Sparkle").chmod(0o640)
+    (app / sparkle.PREFIX / "Versions/Current").symlink_to("B")
+    (app / sparkle.PREFIX / "Sparkle").symlink_to("Versions/Current/Sparkle")
+    complete_zip(app, archive, link_mode=0o755)
+    return fixture
+
+
+def masked_link_modes(fixture, monkeypatch):
+    """Fake only link-mode syscalls that are unavailable on Linux."""
+    module = fixture[0]
+    modes = {"Sparkle": 0o700, "Current": 0o700}
+    changes = []
+    original_inventory = module.app_inventory
+    original_chmod = os.chmod
+
+    def inventory(app, tracked):
+        result = original_inventory(app, tracked)
+        for row in result["entries"]:
+            if row["kind"] == "symlink":
+                row["mode"] = modes[Path(row["path"]).name]
+        return result
+
+    def chmod(path, mode, *, dir_fd=None, follow_symlinks=True):
+        if dir_fd is None:
+            return original_chmod(path, mode, follow_symlinks=follow_symlinks)
+        assert follow_symlinks is False
+        assert stat.S_ISLNK(os.stat(path, dir_fd=dir_fd, follow_symlinks=False).st_mode)
+        changes.append((path, mode))
+        modes[path] = mode
+
+    monkeypatch.setattr(module, "app_inventory", inventory)
+    monkeypatch.setattr(module.os, "chmod", chmod)
+    return changes
+
+
+def test_extract_restores_only_zip_link_modes_before_exact_comparison(linked_fixture, monkeypatch):
+    module, _, app, archive, _, tracked, work, *_ = linked_fixture
+    expected = module.zip_inventory(archive, tracked)
+    target = module.bundle_inventory.bundle_sparkle.VERSION + "/Sparkle"
+    original_mode = stat.S_IMODE((app / target).stat().st_mode)
+    changes = masked_link_modes(linked_fixture, monkeypatch)
+    with module.extracted_app(archive, work, tracked, expected) as (_, extracted):
+        assert module.app_inventory(extracted, tracked) == expected
+        assert stat.S_IMODE((extracted / target).stat().st_mode) == original_mode
+    assert sorted(changes) == [("Current", 0o755), ("Sparkle", 0o755)]
+
+
+@pytest.mark.parametrize(
+    "mutation", ["target", "type", "missing", "content", "root_mode", "file_mode"]
+)
+def test_link_restoration_rejects_other_differences_before_any_chmod(
+    linked_fixture, monkeypatch, mutation
+):
+    module, _, app, archive, _, tracked, *_ = linked_fixture
+    expected = module.zip_inventory(archive, tracked)
+    link = app / module.bundle_inventory.bundle_sparkle.PREFIX / "Sparkle"
+    if mutation in {"target", "type", "missing"}:
+        link.unlink()
+        if mutation == "target":
+            link.symlink_to("Versions/Current/Autoupdate")
+        elif mutation == "type":
+            link.write_bytes(b"not a link")
+    elif mutation == "content":
+        (app / "Contents/PkgInfo").write_bytes(b"changed")
+    else:
+        (app if mutation == "root_mode" else app / "Contents/PkgInfo").chmod(0o711)
+    changes = masked_link_modes(linked_fixture, monkeypatch)
+    with pytest.raises((module.ReleaseError, module.InventoryError)):
+        module.restore_zip_link_modes(app, tracked, expected)
+    assert changes == []
+
+
+def test_link_restoration_refuses_a_parent_replaced_with_a_link(linked_fixture, monkeypatch):
+    module, _, app, archive, _, tracked, *_ = linked_fixture
+    expected = module.zip_inventory(archive, tracked)
+    entry = next(row for row in expected["entries"] if row["kind"] == "symlink")
+    directory = app / "Contents/Frameworks"
+    moved = app.parent / "original-frameworks"
+    directory.rename(moved)
+    directory.symlink_to(moved)
+    changes = masked_link_modes(linked_fixture, monkeypatch)
+    with pytest.raises(module.ReleaseError, match="安全に復元"):
+        module.restore_link_mode(app, entry)
+    assert changes == []
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="real ditto and symlink modes require macOS")
+def test_real_ditto_under_private_umask_restores_link_modes(linked_fixture, monkeypatch):
+    module, _, _, archive, _, tracked, work, *_ = linked_fixture
+    expected = module.zip_inventory(archive, tracked)
+    original_restore = module.restore_zip_link_modes
+    before_modes = []
+
+    def restore(app, tracked, expected):
+        before_modes.extend(
+            row["mode"]
+            for row in module.app_inventory(app, tracked)["entries"]
+            if row["kind"] == "symlink"
+        )
+        original_restore(app, tracked, expected)
+
+    def real_ditto(*command):
+        assert command[:3] == ("ditto", "-x", "-k")
+        return module.subprocess.run(command, check=True, capture_output=True, timeout=30).stdout
+
+    monkeypatch.setattr(module, "run", real_ditto)
+    monkeypatch.setattr(module, "verify_app", lambda app: None)
+    monkeypatch.setattr(module, "restore_zip_link_modes", restore)
+    previous = os.umask(0o077)
+    try:
+        with module.extracted_app(archive, work, tracked, expected) as (_, app):
+            assert module.app_inventory(app, tracked) == expected
+    finally:
+        os.umask(previous)
+    assert before_modes == [0o700, 0o700]
 
 
 def test_verified_dmg_has_stable_content_mode_seal_and_safe_mount_flags(fixture):

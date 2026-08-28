@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 import bundle_inventory
@@ -98,6 +98,44 @@ def verify_app(app: Path) -> None:
     run("xcrun", "stapler", "validate", str(app))
 
 
+def restore_link_mode(app: Path, entry: dict) -> None:
+    """Change only the validated link itself, never traverse replaced parent links."""
+    parts = entry["path"].split("/")
+    try:
+        with ExitStack() as opened:
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            parent = os.open(app, flags)
+            opened.callback(os.close, parent)
+            for component in parts[:-1]:
+                parent = os.open(component, flags, dir_fd=parent)
+                opened.callback(os.close, parent)
+            metadata = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+            require(stat.S_ISLNK(metadata.st_mode), "復元対象の symlink の種類が変わっています")
+            require(
+                os.readlink(parts[-1], dir_fd=parent) == entry["target"],
+                "復元対象の symlink の参照先が変わっています",
+            )
+            os.chmod(parts[-1], entry["mode"], dir_fd=parent, follow_symlinks=False)
+    except (OSError, NotImplementedError) as exc:
+        raise ReleaseError("symlink 自体の mode を安全に復元できません") from exc
+
+
+def restore_zip_link_modes(app: Path, tracked: Path, expected: dict) -> None:
+    # ditto's ZIP extraction creates symlink modes using its inherited umask.
+    actual = app_inventory(app, tracked)
+    links = {row["path"]: row for row in expected["entries"] if row["kind"] == "symlink"}
+    pending = []
+    for row in actual["entries"]:
+        canonical = links.get(row["path"])
+        if canonical is not None and row["kind"] == "symlink":
+            if row["mode"] != canonical["mode"]:
+                pending.append(canonical)
+            row["mode"] = canonical["mode"]
+    require(actual == expected, "ZIP 展開後の内容または mode が不一致です")
+    for entry in pending:
+        restore_link_mode(app, entry)
+
+
 @contextmanager
 def extracted_app(archive: Path, work: Path, tracked: Path, expected: dict):
     # This directory never contains a mountpoint; only validated ZIP members are extracted.
@@ -109,6 +147,7 @@ def extracted_app(archive: Path, work: Path, tracked: Path, expected: dict):
             "展開した ZIP に app 以外の項目があります",
         )
         app = directory / "narumi.app"
+        restore_zip_link_modes(app, tracked, expected)
         require(app_inventory(app, tracked) == expected, "ZIP 展開後の内容または mode が不一致です")
         verify_app(app)
         yield directory, app
