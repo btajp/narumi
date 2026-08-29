@@ -238,11 +238,17 @@ def _selected_kwargs(
     if (
         config.minutes_model is not None
         or expected_config.minutes_model is not None
+        or config.minutes_ensemble is not None
+        or expected_config.minutes_ensemble is not None
         or config.transcription_model is not None
         or expected_config.transcription_model is not None
     ) and config != expected_config:
         raise ConfigurationConflictError("The meeting configuration changed after job acceptance")
-    if config.minutes_model is None and config.transcription_model is None:
+    if (
+        config.minutes_model is None
+        and config.minutes_ensemble is None
+        and config.transcription_model is None
+    ):
         return {}
     with validated_config(ctx, config):
         pass
@@ -250,7 +256,7 @@ def _selected_kwargs(
     from narumi.providers.transcription import TranscriptionResolver
 
     kwargs: dict[str, Any] = {"should_cancel": lambda: progress.cancelled}
-    if config.minutes_model is not None:
+    if config.minutes_model is not None or config.minutes_ensemble is not None:
         kwargs["minutes_resolver"] = MinutesResolver(ctx.providers)
     if config.transcription_model is not None:
         kwargs["transcription_resolver"] = TranscriptionResolver(ctx.providers)
@@ -325,6 +331,7 @@ def regenerate(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
     ) as bundle:
         if (
             bundle.manifest.config.minutes_model is not None
+            or bundle.manifest.config.minutes_ensemble is not None
             or bundle.manifest.config.transcription_model is not None
         ) and args.get("force", False):
             raise InvalidArgumentError(

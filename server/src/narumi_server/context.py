@@ -98,7 +98,14 @@ class ServerContext:
         """
         try:
             for profile in self.profiles.list():
-                for selected in (profile.config.minutes_model, profile.config.transcription_model):
+                selections = [profile.config.minutes_model, profile.config.transcription_model]
+                if profile.config.minutes_ensemble is not None:
+                    selections.extend(
+                        generator.selection
+                        for generator in profile.config.minutes_ensemble.generators
+                    )
+                    selections.append(profile.config.minutes_ensemble.synthesizer)
+                for selected in selections:
                     if selected is not None and selected.connection_id == connection_id:
                         return True
             for folder in self.meetings_root.iterdir():
@@ -110,10 +117,17 @@ class ServerContext:
                     # A meeting may have been moved to trash after the directory listing.
                     continue
                 manifest = Manifest.model_validate_json(contents)
-                for selected in (
+                selections = [
                     manifest.config.minutes_model,
                     manifest.config.transcription_model,
-                ):
+                ]
+                if manifest.config.minutes_ensemble is not None:
+                    selections.extend(
+                        generator.selection
+                        for generator in manifest.config.minutes_ensemble.generators
+                    )
+                    selections.append(manifest.config.minutes_ensemble.synthesizer)
+                for selected in selections:
                     if selected is not None and selected.connection_id == connection_id:
                         return True
         except (OSError, ValueError, NarumiError):

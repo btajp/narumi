@@ -186,7 +186,11 @@ def validated_config(ctx: ServerContext, config: MeetingConfig) -> Iterator[None
     or profile lock, so the provider transaction cannot invert that lock order.
     """
     check_config_policy(config)
-    if config.minutes_model is None and config.transcription_model is None:
+    if (
+        config.minutes_model is None
+        and config.minutes_ensemble is None
+        and config.transcription_model is None
+    ):
         yield
         return
     if "streamable-http" not in ctx.transports or ctx.providers is None:
@@ -199,8 +203,19 @@ def validated_config(ctx: ServerContext, config: MeetingConfig) -> Iterator[None
     # Both selections must remain valid through the same atomic save. Provider-store
     # transactions cannot be nested, including when the connection is shared.
     with ctx.providers.store.transaction() as document:
+        minutes = MinutesResolver(ctx.providers)
         if config.minutes_model is not None:
-            MinutesResolver(ctx.providers).validate_in_transaction(config, document)
+            minutes.validate_in_transaction(config, document)
+        if config.minutes_ensemble is not None:
+            for generator in config.minutes_ensemble.generators:
+                minutes.validate_selection_in_transaction(
+                    generator.selection, config.external_send_policy, document
+                )
+            minutes.validate_selection_in_transaction(
+                config.minutes_ensemble.synthesizer,
+                config.external_send_policy,
+                document,
+            )
         if config.transcription_model is not None:
             TranscriptionResolver(ctx.providers).validate_in_transaction(config, document)
         yield
@@ -212,7 +227,9 @@ def check_expected_config(
     """Reject a generation request made for a stale displayed meeting configuration."""
     if "expected_config" not in args:
         if generation and (
-            config.minutes_model is not None or config.transcription_model is not None
+            config.minutes_model is not None
+            or config.minutes_ensemble is not None
+            or config.transcription_model is not None
         ):
             raise ConfigurationConflictError("Reload the meeting configuration before generating")
         return
