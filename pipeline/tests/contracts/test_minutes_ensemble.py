@@ -747,9 +747,27 @@ def test_processing_runtime_lineage_invariants_are_normative(contracts: Contract
 
     blocked_description = contracts.schema_for_def("minutes_outcome_unknown_details")["description"]
     assert "exactly one public blocked record" in blocked_description
-    assert "blocked_attempt_id is the barrier cursor attempt" in blocked_description
-    assert "target is that cursor attempt's owning run/node/call" in blocked_description
+    assert "exactly one durable public target" in blocked_description
+    assert "blocked_attempt_id is the durable barrier cursor for the unknown ancestry" in (
+        blocked_description
+    )
+    assert "target is the current run/node/call" in blocked_description
+    assert "need not belong to the cursor attempt's run" in blocked_description
+    assert "current target's run_id/node_id/call_id plus the cursor blocked_attempt_id" in (
+        blocked_description
+    )
+    assert "origin is the first unknown attempt" in blocked_description
     assert "same content fingerprint" in blocked_description
+    assert "Changing the target alone never consumes confirmation proof" in blocked_description
+
+    retry_description = contracts.schema_for_def("minutes_retry")["description"]
+    assert "current target that will receive the retransmission" in retry_description
+    assert "need not belong to the run that owns blocked_attempt_id" in retry_description
+    assert "blocked_attempt_id is the durable barrier cursor" in retry_description
+    assert "current target's three IDs plus the cursor attempt ID" in retry_description
+    assert "exactly one durable public target" in retry_description
+    assert "origin as the first unknown attempt" in retry_description
+    assert "Changing the target alone never consumes confirmation proof" in retry_description
 
     artifact_description = contracts.schema_for_def("processing_artifact_header")["description"]
     assert "origin must equal retry_lineage.resolved_by" in artifact_description
