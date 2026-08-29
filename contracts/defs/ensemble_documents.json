@@ -90,18 +90,14 @@
             "string",
             "null"
           ],
-          "maxLength": 512,
-          "minLength": 1,
-          "pattern": "\\S"
+          "maxLength": 512
         },
         "speaker_name": {
           "type": [
             "string",
             "null"
           ],
-          "maxLength": 512,
-          "minLength": 1,
-          "pattern": "\\S"
+          "maxLength": 512
         },
         "char_start": {
           "type": "integer",

@@ -499,7 +499,7 @@ def test_action_claim_accepts_nullable_nonblank_assignment_fields(
             contracts.validate_output("get_processing_artifact", invalid)
 
 
-def test_ensemble_claim_and_speaker_text_reject_whitespace_only(
+def test_ensemble_claim_text_rejects_whitespace_only(
     contracts: ContractSet,
 ) -> None:
     claim = deepcopy(contracts["get_processing_artifact"].output_examples[0])
@@ -507,12 +507,24 @@ def test_ensemble_claim_and_speaker_text_reject_whitespace_only(
     with pytest.raises(ContractMismatchError):
         contracts.validate_output("get_processing_artifact", claim)
 
-    for field in ("speaker_label", "speaker_name"):
-        source = deepcopy(contracts["get_processing_artifact"].output_examples[1])
-        source["payload"]["evidence"][0][field] = "   "
-        with pytest.raises(ContractMismatchError):
-            contracts.validate_output("get_processing_artifact", source)
-        source["payload"]["evidence"][0][field] = None
+
+@pytest.mark.parametrize("field", ["speaker_label", "speaker_name"])
+@pytest.mark.parametrize("value", [None, "", "   ", "話" * 512])
+def test_speaker_observation_preserves_nullable_zero_to_512_characters(
+    contracts: ContractSet, field: str, value: str | None
+) -> None:
+    source = deepcopy(contracts["get_processing_artifact"].output_examples[1])
+    source["payload"]["evidence"][0][field] = value
+    contracts.validate_output("get_processing_artifact", source)
+
+
+@pytest.mark.parametrize("field", ["speaker_label", "speaker_name"])
+def test_speaker_observation_rejects_more_than_512_characters(
+    contracts: ContractSet, field: str
+) -> None:
+    source = deepcopy(contracts["get_processing_artifact"].output_examples[1])
+    source["payload"]["evidence"][0][field] = "話" * 513
+    with pytest.raises(ContractMismatchError):
         contracts.validate_output("get_processing_artifact", source)
 
 
