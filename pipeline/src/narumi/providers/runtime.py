@@ -78,7 +78,7 @@ class RuntimePreparation:
                 {
                     "provider_id": provider_id,
                     "display_name": display_name,
-                    "roles": ["llm"],
+                    "roles": ["llm", "transcription"] if provider_id == "openai-api" else ["llm"],
                     "auth_methods": [AUTH_METHODS[provider_id]],
                     "availability": availability,
                     "reason": reason,

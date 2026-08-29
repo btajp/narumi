@@ -12,6 +12,7 @@ MODEL_ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,255}\Z")
 _CREDENTIAL = re.compile(r"(?:sk-(?:ant-|proj-|svcacct-)[A-Za-z0-9_-]+|Bearer\s+\S+)")
 APP_MAX_OUTPUT_TOKENS = 32_768
 DEFAULT_OUTPUT_TOKENS = 4096
+MAX_PUBLIC_PAYLOAD_NODES = 200_000
 
 
 def invalid_metadata(reason: str = "invalid_metadata") -> EngineUnavailableError:
@@ -49,20 +50,26 @@ def require_object(value: Any) -> dict[str, Any]:
 
 
 def check_public_payload(
-    value: Any, *, secrets: tuple[str, ...] = (), reject_credentials: bool = True
+    value: Any,
+    *,
+    secrets: tuple[str, ...] = (),
+    reject_credentials: bool = True,
+    max_nodes: int = 20_000,
 ) -> None:
     """Bound JSON structure and reject secret reflections before exposing any fields."""
+    if type(max_nodes) is not int or not 1 <= max_nodes <= MAX_PUBLIC_PAYLOAD_NODES:
+        raise invalid_metadata()
     pending = [(value, 0)]
     visited = 0
     while pending:
         item, depth = pending.pop()
         visited += 1
-        if depth > 32 or visited > 20_000:
+        if depth > 32 or visited > max_nodes:
             raise invalid_metadata("metadata_structure_limit")
         if isinstance(item, dict):
             pending.extend((key, depth + 1) for key in item)
             pending.extend((child, depth + 1) for child in item.values())
-        elif isinstance(item, list):
+        elif isinstance(item, (list, tuple)):
             pending.extend((child, depth + 1) for child in item)
         elif isinstance(item, float) and not math.isfinite(item):
             raise invalid_metadata("invalid_metadata")

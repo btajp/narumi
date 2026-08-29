@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import http.client
 import ipaddress
+import select
 import socket
+import ssl
 import threading
 import time
 import urllib.request
@@ -27,6 +29,7 @@ class RequestDeadline:
         *,
         monotonic: Callable[[], float] = time.monotonic,
         should_cancel: Callable[[], bool] | None = None,
+        interruptible_write: bool = False,
     ):
         self._clock = monotonic
         self._expires_at = monotonic() + timeout
@@ -40,6 +43,7 @@ class RequestDeadline:
         self._timer = threading.Timer(timeout, self.expire)
         self._timer.daemon = True
         self.request_started = False
+        self.interruptible_write = interruptible_write
 
     def start(self) -> None:
         self.remaining()
@@ -192,7 +196,41 @@ class _TrackedSend:
                 raise http.client.NotConnected()
             self.connect()
         self.deadline.mark_request_started()
+        if self.deadline.interruptible_write and isinstance(data, bytes):
+            self._send_interruptibly(data)
+            return
         super().send(data)
+
+    def _send_interruptibly(self, data: bytes) -> None:
+        # A blocking sendall can outlive shutdown from another thread while a
+        # large upload is flow-controlled. Continue only the application bytes
+        # not yet accepted by send(); never restart the request or its body.
+        connection = self.sock
+        original_timeout = connection.gettimeout()
+        pending = memoryview(data)
+        connection.setblocking(False)
+        try:
+            while pending:
+                self.deadline.remaining()
+                try:
+                    sent = connection.send(pending)
+                except ssl.SSLWantReadError:
+                    readers, writers = [connection], []
+                except (BlockingIOError, ssl.SSLWantWriteError):
+                    readers, writers = [], [connection]
+                else:
+                    if sent <= 0:
+                        raise OSError("HTTP upload connection closed")
+                    pending = pending[sent:]
+                    continue
+                select.select(
+                    readers, writers, [], min(CANCEL_POLL_INTERVAL, self.deadline.remaining())
+                )
+        finally:
+            try:
+                connection.settimeout(original_timeout)
+            except OSError:
+                pass
 
 
 class _HTTPConnection(_TrackedSend, http.client.HTTPConnection):

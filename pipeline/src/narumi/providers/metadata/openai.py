@@ -1,4 +1,4 @@
-"""Intersect the OpenAI Models API with reviewed text adapter capabilities."""
+"""Intersect the OpenAI Models API with reviewed text and audio capabilities."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime
 from typing import Any
 
+from narumi.providers.metadata.audio_capabilities import audio_model_capabilities
 from narumi.providers.metadata.openai_capabilities import model_capabilities
 from narumi.providers.metadata.validation import (
     billing,
@@ -81,6 +82,18 @@ def _model(raw: dict[str, Any], *, fetched_at: str, now: datetime) -> dict[str, 
             parameter_schema=capabilities.parameter_schema(),
             availability="available",
             reason=None,
+        )
+    elif (audio := audio_model_capabilities(model_id)) is not None:
+        candidate.update(
+            display_name=audio.display_name,
+            resolved_revision=audio.resolved_revision,
+            input_modalities=["audio"],
+            output_modalities=["text"],
+            roles=["transcription"],
+            timestamp_support=audio.timestamp_support,
+            parameter_schema=audio.parameter_schema(),
+            availability=audio.availability,
+            reason=audio.reason,
         )
     # The provider supplies a date, not a shutdown instant or timezone. Preserve
     # that date; the UTC comparison is Narumi's conservative application rule.

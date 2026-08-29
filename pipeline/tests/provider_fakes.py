@@ -364,3 +364,93 @@ def prepared_http_connection(
     )
     assert result["connected"] is True
     return result["connection"]
+
+
+def api_transcription_config(model_id="whisper-1", **updates):
+    """Explicit fake selection; neither configuration nor resolution opens a key store."""
+    from narumi.models import MeetingConfig
+    from narumi.transcription_selection import TranscriptionModelSelection
+
+    values = {
+        "transcription_engine": "fake",
+        "transcription_model": TranscriptionModelSelection(
+            provider="openai-api",
+            connection_id="conn-0123456789abcdef",
+            connection_revision=1,
+            model_id=model_id,
+        ),
+        "external_send_policy": "api_ok",
+    }
+    return MeetingConfig(**(values | updates))
+
+
+class FakeTranscriptionResolver:
+    """A deterministic audio response with no service, metadata, key or network access."""
+
+    def __init__(self):
+        self.calls = []
+        self.resolve_calls = []
+        self.failures = {}
+        self.after_reply = None
+        self.reply_factory = None
+
+    def resolve(self, config, *, should_cancel=None):
+        from narumi.providers.audio_transcription import fixed_transcription_parameters
+
+        selected = config.transcription_model
+        assert selected is not None
+        self.resolve_calls.append(config.model_copy(deep=True))
+        self.transcription_params = {
+            "provider": selected.provider,
+            "connection_id": selected.connection_id,
+            "connection_revision": selected.connection_revision,
+            "model_id": selected.model_id,
+            "language": config.language,
+            "effective_parameters": fixed_transcription_parameters(
+                selected.model_id, config.language
+            ),
+            "adapter_version": "fixture-1",
+            "capability_table_version": "fixture-1",
+            "runtime_version": "fixture-1",
+            "runtime_sha256": "a" * 64,
+            "runtime_catalog_revision": "fixture-1",
+            "model_capabilities_sha256": "b" * 64,
+            "endpoint": "https://api.openai.com",
+        }
+        return self
+
+    def transcribe_chunk(self, audio, duration_sec):
+        from narumi.providers.audio_response import (
+            AudioSegment,
+            AudioTranscriptionResult,
+            AudioWord,
+        )
+
+        index = len(self.calls)
+        self.calls.append((audio, duration_sec, copy.deepcopy(self.transcription_params)))
+        if index in self.failures:
+            raise self.failures[index]
+        if self.reply_factory is not None:
+            result = self.reply_factory(index, duration_sec)
+        else:
+            diarized = self.transcription_params["model_id"] == "gpt-4o-transcribe-diarize"
+            end = min(duration_sec, 0.25)
+            text = f"合成発話{index}"
+            result = AudioTranscriptionResult(
+                text=text,
+                duration=duration_sec,
+                segments=(
+                    AudioSegment(
+                        native_id=f"segment-{index}" if diarized else index,
+                        start=0.0,
+                        end=end,
+                        text=text,
+                        speaker="A" if diarized else None,
+                    ),
+                ),
+                words=None if diarized else (AudioWord(start=0.0, end=end, text=text),),
+                language=None if diarized else "ja",
+            )
+        if self.after_reply is not None:
+            self.after_reply(index)
+        return result

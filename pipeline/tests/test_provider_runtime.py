@@ -1,11 +1,15 @@
 """Runtime inspection jobs have durable receipts, process leases and safe cancellation."""
 
+import hashlib
 import importlib.metadata
+import importlib.util
 import json
 import os
+import shutil
 import stat
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 from narumi.contracts.loader import load_contracts
@@ -18,6 +22,7 @@ from narumi.errors import (
 )
 from narumi.providers import _io
 from narumi.providers import runtime as runtime_module
+from narumi.providers import runtime_catalog as runtime_catalog_module
 from narumi.providers.runtime import RuntimeInspector
 from narumi.providers.service import ProviderService
 
@@ -51,6 +56,27 @@ def runtime_setup(tmp_path):
     )
     yield service, jobs, inspector, secrets
     service.close()
+
+
+@pytest.fixture
+def openai_source_package(tmp_path, monkeypatch):
+    package = tmp_path / "installed-source" / "narumi"
+    for relative_path in runtime_catalog_module._OPENAI_AUDIO_SOURCES:
+        source = package / relative_path
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(f"fixture source: {relative_path}\n")
+    monkeypatch.setattr(runtime_catalog_module, "_PACKAGE_ROOT", package)
+
+    class Distribution:
+        version = "1.2.3"
+        metadata = {"License-Expression": "MIT"}
+
+        @staticmethod
+        def read_text(name):
+            return {"METADATA": "fixture metadata", "RECORD": "fixture record"}[name]
+
+    monkeypatch.setattr(importlib.metadata, "distribution", lambda _: Distribution())
+    return package
 
 
 def provider(service, provider_id="claude-agent-sdk"):
@@ -411,6 +437,222 @@ def test_distribution_fingerprint_is_required_only_for_http_runtime(
         evidence = tmp_path / "providers" / "runtime" / provider_id / "inspection.json"
         assert not evidence.exists()
     assert service.metadata.calls == service.secrets.calls == []
+    service.close()
+
+
+@pytest.mark.parametrize("relative_path", runtime_catalog_module._OPENAI_AUDIO_SOURCES)
+def test_each_audio_source_changes_only_openai_runtime_identity(
+    openai_source_package, relative_path
+):
+    inspector = RuntimeInspector()
+    before = {
+        provider_id: inspector.resource(provider_id)
+        for provider_id in runtime_catalog_module.RESOURCES
+    }
+    source = openai_source_package / relative_path
+    source.write_bytes(source.read_bytes() + b"fixture changed audio behavior\n")
+    after = {
+        provider_id: inspector.resource(provider_id)
+        for provider_id in runtime_catalog_module.RESOURCES
+    }
+    assert before["openai-api"]["sha256"] is not None
+    assert after["openai-api"]["sha256"] != before["openai-api"]["sha256"]
+    assert inspector.catalog_revision(after["openai-api"]) != inspector.catalog_revision(
+        before["openai-api"]
+    )
+    legacy_digest = hashlib.sha256(b"fixture metadata\nfixture record").hexdigest()
+    for provider_id in ("anthropic-api", "ollama", "claude-agent-sdk"):
+        assert after[provider_id] == before[provider_id]
+        assert after[provider_id]["sha256"] == legacy_digest
+
+
+def test_openai_runtime_identity_ignores_unlisted_files_and_directory_bookkeeping(
+    openai_source_package, monkeypatch
+):
+    inspector = RuntimeInspector()
+    before = inspector.resource("openai-api")
+    (openai_source_package / runtime_catalog_module._OPENAI_AUDIO_SOURCES[0]).touch()
+    unlisted = openai_source_package / "unlisted-runtime.py"
+    unlisted.write_text("fixture not part of audio runtime\n")
+    original_digest = runtime_catalog_module._source_digest
+
+    def create_bytecode_cache(descriptor, directory, name):
+        cache = openai_source_package / "providers" / "__pycache__"
+        cache.mkdir(exist_ok=True)
+        (cache / "fixture.pyc").write_bytes(b"fixture cache")
+        return original_digest(descriptor, directory, name)
+
+    monkeypatch.setattr(runtime_catalog_module, "_source_digest", create_bytecode_cache)
+    assert inspector.resource("openai-api") == before
+
+
+def test_runtime_import_through_symlink_ancestor_uses_canonical_root(
+    openai_source_package, tmp_path
+):
+    package = openai_source_package
+    (package / "providers" / "runtime_catalog.py").write_bytes(
+        Path(runtime_catalog_module.__file__).read_bytes()
+    )
+    alias = tmp_path / "import-alias"
+    alias.symlink_to(package.parent, target_is_directory=True)
+    spec = importlib.util.spec_from_file_location(
+        "fixture_runtime_catalog_alias", alias / "narumi" / "providers" / "runtime_catalog.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    resource = module.RuntimeInspector().resource("openai-api")
+    assert module._PACKAGE_ROOT == package.resolve()
+    assert resource["sha256"] is not None
+    assert resource == RuntimeInspector().resource("openai-api")
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["missing", "unreadable", "symlink", "directory_symlink", "directory", "fifo", "oversized"],
+)
+def test_unsafe_audio_source_cannot_prepare_openai_runtime(
+    openai_source_package, tmp_path, monkeypatch, failure
+):
+    source = openai_source_package / runtime_catalog_module._OPENAI_AUDIO_SOURCES[0]
+    inspector = RuntimeInspector()
+    other_provider = inspector.resource("anthropic-api")
+    if failure == "missing":
+        source.unlink()
+    elif failure == "unreadable":
+        original_open = os.open
+
+        def denied_open(path, *args, **kwargs):
+            if path == source.name and kwargs.get("dir_fd") is not None:
+                raise PermissionError("fixture unreadable source")
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", denied_open)
+    elif failure == "symlink":
+        target = openai_source_package / "unapproved.py"
+        source.rename(target)
+        source.symlink_to(target)
+    elif failure == "directory_symlink":
+        target = tmp_path / "unapproved-provider-directory"
+        source.parent.rename(target)
+        source.parent.symlink_to(target, target_is_directory=True)
+    elif failure == "oversized":
+        with source.open("wb") as stream:
+            stream.truncate(runtime_catalog_module._MAX_SOURCE_BYTES + 1)
+    else:
+        source.unlink()
+        if failure == "directory":
+            source.mkdir()
+        else:
+            os.mkfifo(source, mode=0o600)
+    resource = inspector.resource("openai-api")
+    assert resource["sha256"] is None
+    with pytest.raises(EngineUnavailableError, match="runtime distribution metadata is incomplete"):
+        inspector.prepare(
+            tmp_path / "runtime-state", "openai-api", resource, FakeProgress("fixture-job")
+        )
+    assert inspector.resource("anthropic-api") == other_provider
+    assert not (tmp_path / "runtime-state").exists()
+
+
+def test_audio_source_mutation_during_read_rejects_identity(openai_source_package, monkeypatch):
+    source = openai_source_package / runtime_catalog_module._OPENAI_AUDIO_SOURCES[0]
+    inode = source.stat().st_ino
+    original_read = os.read
+    changed = False
+
+    def changing_read(descriptor, size):
+        nonlocal changed
+        block = original_read(descriptor, size)
+        if not changed and os.fstat(descriptor).st_ino == inode:
+            changed = True
+            with source.open("ab") as stream:
+                stream.write(b"fixture concurrent source edit\n")
+        return block
+
+    monkeypatch.setattr(os, "read", changing_read)
+    assert RuntimeInspector().resource("openai-api")["sha256"] is None
+    assert changed
+
+
+@pytest.mark.parametrize("location", ["ancestor", "package", "providers", "metadata"])
+@pytest.mark.parametrize("replacement", ["directory", "symlink"])
+def test_audio_source_parent_replacement_rejects_identity(
+    openai_source_package, tmp_path, monkeypatch, location, replacement
+):
+    package = openai_source_package
+    target = {
+        "ancestor": package.parent,
+        "package": package,
+        "providers": package / "providers",
+        "metadata": package / "providers" / "metadata",
+    }[location]
+    relative = runtime_catalog_module._OPENAI_AUDIO_SOURCES[2 if location == "metadata" else 0]
+    trigger = (package / relative).name
+    original_digest = runtime_catalog_module._source_digest
+    changed = False
+    inspector = RuntimeInspector()
+    before = inspector.resource("openai-api")
+    assert before["sha256"] is not None
+
+    def replace_parent(descriptor, directory, name):
+        nonlocal changed
+        if not changed and name == trigger:
+            changed = True
+            previous = target.with_name(target.name + ".old")
+            target.rename(previous)
+            if replacement == "symlink":
+                target.symlink_to(previous, target_is_directory=True)
+            else:
+                shutil.copytree(previous, target)
+                (package / relative).write_text("fixture replaced audio source\n")
+        return original_digest(descriptor, directory, name)
+
+    monkeypatch.setattr(runtime_catalog_module, "_source_digest", replace_parent)
+    assert inspector.resource("openai-api")["sha256"] is None
+    assert changed
+    with pytest.raises(EngineUnavailableError, match="runtime changed during preparation"):
+        inspector.prepare(
+            tmp_path / "runtime-state", "openai-api", before, FakeProgress("fixture-job")
+        )
+
+
+def test_audio_source_change_requires_repreparation_and_model_refresh(
+    openai_source_package, tmp_path
+):
+    jobs = JobQueue()
+    metadata = FakeMetadata()
+    service = ProviderService(
+        tmp_path / "runtime-state",
+        secret_store=MemorySecretStore(),
+        metadata_client=metadata,
+        auth_executor=ManualExecutor(),
+        submit_job=jobs,
+        runtime_inspector=RuntimeInspector(),
+        codex_backend=FakeCodexBackend(),
+    )
+    service.prepare_runtime(prepare_args(service, "openai-api"))
+    jobs.run()
+    record = create_connection(service, provider_id="openai-api")
+    args = {"connection_id": record["connection_id"], "expected_revision": record["revision"]}
+    assert service.test_connection(args)["connected"] is True
+    before_codex = provider(service, "codex-app-server")
+    source = openai_source_package / runtime_catalog_module._OPENAI_AUDIO_SOURCES[0]
+    source.write_bytes(source.read_bytes() + b"fixture upgraded audio behavior\n")
+    assert provider(service, "openai-api")["runtime"]["state"] == "not_prepared"
+    assert (
+        service.list_models({"connection_id": record["connection_id"]})["catalog_state"] == "stale"
+    )
+    service.prepare_runtime(prepare_args(service, "openai-api", "prepare-upgraded-audio-runtime"))
+    jobs.run(1)
+    assert (
+        service.list_models({"connection_id": record["connection_id"]})["catalog_state"] == "stale"
+    )
+    assert service.test_connection(args)["connected"] is True
+    assert (
+        service.list_models({"connection_id": record["connection_id"]})["catalog_state"] == "ready"
+    )
+    assert provider(service, "codex-app-server") == before_codex
     service.close()
 
 
