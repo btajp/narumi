@@ -178,6 +178,23 @@ final class MinutesModelCatalogStoreTests: XCTestCase {
         XCTAssertFalse(store.isLoading)
         XCTAssertNotNil(store.validationMessage(for: ProcessingConfigurationForm(config: MinutesModelFixtures.config())))
     }
+
+    func testIndependentStoreCopiesMetadataWithoutSharingLoadingOrInvalidationState() async {
+        let client = FakeMinutesCatalogClient()
+        let shared = MinutesModelCatalogStore(client: client, supportedProviders: ["codex-app-server"])
+        await shared.loadCachedCatalog(connectionID: MinutesModelFixtures.connectionID)
+        let independent = shared.independentStore()
+        XCTAssertEqual(independent.connections, shared.connections)
+        XCTAssertEqual(independent.providers, shared.providers)
+        XCTAssertEqual(independent.catalogs, shared.catalogs)
+
+        independent.setSupportedProviders([])
+        XCTAssertEqual(shared.supportedProviders, ["codex-app-server"])
+        XCTAssertTrue(independent.supportedProviders.isEmpty)
+        shared.invalidate()
+        XCTAssertFalse(independent.connections.isEmpty)
+        XCTAssertTrue(shared.connections.isEmpty)
+    }
 }
 
 private actor FakeMinutesCatalogClient: MinutesModelCatalogClient {

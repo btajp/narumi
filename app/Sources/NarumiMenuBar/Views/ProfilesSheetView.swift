@@ -10,6 +10,7 @@ struct ProfilesSheetView: View {
     @State private var saving = false
     @State private var selectionGeneration: UInt64 = 0
     @State private var loadingProfile = false
+    @State private var minutesValidationMessage: String?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -48,6 +49,7 @@ struct ProfilesSheetView: View {
                         selectionGeneration &+= 1
                         let generation = selectionGeneration
                         loadingProfile = true
+                        minutesValidationMessage = nil
                         Task {
                             let loaded = await model.editProfile(name: profile.name)
                             guard selectionGeneration == generation else { return }
@@ -62,6 +64,7 @@ struct ProfilesSheetView: View {
                 Button {
                     selectionGeneration &+= 1
                     loadingProfile = false
+                    minutesValidationMessage = nil
                     form = MainWindowModel.ProfileForm()
                 } label: {
                     Label("新規", systemImage: "plus")
@@ -103,8 +106,9 @@ struct ProfilesSheetView: View {
                     }
                     ProcessingConfigurationFields(
                         form: binding.processing, capabilities: capabilities,
+                        contractVersion: model.serverInfo?.contractVersion,
                         catalog: model.minutesModelCatalog, transcriptionCatalog: model.transcriptionModelCatalog,
-                        isProfile: true)
+                        isProfile: true, minutesValidationMessage: $minutesValidationMessage)
                     TextField("既定 scope（任意）", text: binding.scope)
                     TextField("既定 engagement（任意）", text: binding.engagement)
                 }
@@ -148,6 +152,7 @@ struct ProfilesSheetView: View {
                                 Task {
                                     await model.deleteProfile(name: name)
                                     form = nil
+                                    minutesValidationMessage = nil
                                     saving = false
                                 }
                             }
@@ -169,6 +174,7 @@ struct ProfilesSheetView: View {
                     }
                 }
                 .disabled(saving || loadingProfile || binding.wrappedValue.name.trimmingCharacters(in: .whitespaces).isEmpty
+                    || minutesValidationMessage != nil
                     || model.configurationValidationMessage(for: binding.wrappedValue.processing) != nil)
                 .keyboardShortcut(.defaultAction)
             }

@@ -46,10 +46,10 @@ public struct MinutesEnsembleForm: Equatable, Sendable {
             synthesizer = MinutesModelForm(selection: selection.synthesizer)
         } else {
             generators = [
-                MinutesEnsembleGeneratorForm(label: "案1"),
-                MinutesEnsembleGeneratorForm(label: "案2"),
+                MinutesEnsembleGeneratorForm(label: "案1", model: Self.emptyModel()),
+                MinutesEnsembleGeneratorForm(label: "案2", model: Self.emptyModel()),
             ]
-            synthesizer = MinutesModelForm()
+            synthesizer = Self.emptyModel()
         }
     }
 
@@ -59,7 +59,7 @@ public struct MinutesEnsembleForm: Equatable, Sendable {
     ) -> Bool {
         guard generators.count < 4, !generators.contains(where: { $0.id == id }) else { return false }
         generators.append(MinutesEnsembleGeneratorForm(
-            id: id, label: label ?? "案\(generators.count + 1)"))
+            id: id, label: label ?? "案\(generators.count + 1)", model: Self.emptyModel()))
         return true
     }
 
@@ -77,6 +77,11 @@ public struct MinutesEnsembleForm: Equatable, Sendable {
         for index in fromOffsets.sorted(by: >) { generators.remove(at: index) }
         let removedBefore = fromOffsets.filter { $0 < toOffset }.count
         generators.insert(contentsOf: moving, at: max(0, min(generators.count, toOffset - removedBefore)))
+    }
+
+    public mutating func activateEditing() {
+        for index in generators.indices { generators[index].model.mode = .selected }
+        synthesizer.mode = .selected
     }
 
     public var selection: MinutesEnsembleSelection? {
@@ -105,5 +110,11 @@ public struct MinutesEnsembleForm: Equatable, Sendable {
             }
         }
         return synthesizer.selection == nil ? "統合担当の接続・モデル・パラメータを選んでください。" : nil
+    }
+
+    private static func emptyModel() -> MinutesModelForm {
+        var form = MinutesModelForm()
+        form.mode = .selected
+        return form
     }
 }

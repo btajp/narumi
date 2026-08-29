@@ -6,6 +6,8 @@ struct MinutesModelSelectionView: View {
     let catalog: MinutesModelCatalogStore
     let externalSendPolicy: String
     var isProfile = false
+    var showsModePicker = true
+    var validationChanged: ((String?) -> Void)?
     @State private var showNewAttemptConfirmation = false
     @State private var preparedNewAttempt = false
 
@@ -31,8 +33,10 @@ struct MinutesModelSelectionView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Picker("議事録の生成方法", selection: $form.mode) {
-                ForEach(MinutesModelForm.Mode.allCases, id: \.self) { Text($0.title).tag($0) }
+            if showsModePicker {
+                Picker("議事録の生成方法", selection: $form.mode) {
+                    ForEach(MinutesModelForm.Mode.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
             }
             if form.mode == .selected {
                 providerPicker
@@ -40,9 +44,7 @@ struct MinutesModelSelectionView: View {
                 connectionPicker
                 modelPicker
                 parameterControls
-                if let message = form.validationMessage(
-                    connections: catalog.connections, catalog: response, externalSendPolicy: externalSendPolicy,
-                    supportedProviders: catalog.supportedProviders, providers: catalog.providers) {
+                if let message = selectionValidationMessage {
                     Text(message).font(.caption).foregroundStyle(.orange)
                 }
                 if let message = catalog.errorMessage {
@@ -70,6 +72,8 @@ struct MinutesModelSelectionView: View {
             guard form.mode == .selected else { return }
             await catalog.loadCachedCatalog(connectionID: form.connectionID, selectedModelID: form.modelID)
         }
+        .onAppear { validationChanged?(currentValidationMessage) }
+        .onChange(of: currentValidationMessage) { validationChanged?(currentValidationMessage) }
     }
 
     private var providerPicker: some View {
@@ -263,6 +267,18 @@ struct MinutesModelSelectionView: View {
 
     private func providerName(_ provider: String) -> String {
         ProviderID(rawValue: provider).map { ProviderDisplay.name($0) } ?? provider
+    }
+
+    private var currentValidationMessage: String? {
+        guard form.mode == .selected else { return nil }
+        if catalog.isLoading { return "議事録モデルの情報を確認しています。" }
+        return selectionValidationMessage ?? catalog.errorMessage
+    }
+
+    private var selectionValidationMessage: String? {
+        form.validationMessage(
+            connections: catalog.connections, catalog: response, externalSendPolicy: externalSendPolicy,
+            supportedProviders: catalog.supportedProviders, providers: catalog.providers)
     }
 
     private var providerDisclosure: String {

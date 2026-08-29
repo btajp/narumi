@@ -13,6 +13,7 @@ struct SettingsTabView: View {
     @State private var showDiscardConfirm = false
     @State private var showDeleteConfirm = false
     @State private var saving = false
+    @State private var minutesValidationMessage: String?
 
     var body: some View {
         Form {
@@ -40,6 +41,7 @@ struct SettingsTabView: View {
         discardScreen = false
         discardMic = false
         discardSystem = false
+        minutesValidationMessage = nil
     }
 
     private var capabilities: ServerCapabilities? { model.serverInfo?.capabilities }
@@ -48,8 +50,10 @@ struct SettingsTabView: View {
     private var configSection: some View {
         Section("会議設定（保存後、反映には再生成が必要）") {
             ProcessingConfigurationFields(
-                form: $form.processing, capabilities: capabilities, catalog: model.minutesModelCatalog,
-                transcriptionCatalog: model.transcriptionModelCatalog)
+                form: $form.processing, capabilities: capabilities,
+                contractVersion: model.serverInfo?.contractVersion, catalog: model.minutesModelCatalog,
+                transcriptionCatalog: model.transcriptionModelCatalog,
+                minutesValidationMessage: $minutesValidationMessage)
             TextField("scope（空 = scope なし）", text: $form.scopeText)
             Button(saving ? "保存中…" : "保存") {
                 let draft = form
@@ -63,6 +67,7 @@ struct SettingsTabView: View {
                 }
             }
             .disabled(saving || loadedMeetingID != model.selectedMeetingID
+                || minutesValidationMessage != nil
                 || model.configurationValidationMessage(for: form.processing) != nil)
             Button("保存済みの設定を読み直す") {
                 let meetingID = model.selectedMeetingID

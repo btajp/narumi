@@ -53,6 +53,7 @@ public struct ProcessingConfigurationForm: Equatable, Sendable {
         ensembleMode = mode == .ensemble
         if mode == .legacy { minutesModel.mode = .legacy }
         if mode == .single { minutesModel.mode = .selected }
+        if mode == .ensemble { minutesEnsemble.activateEditing() }
     }
 
     public func makeUpdate(

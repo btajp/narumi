@@ -5,9 +5,11 @@ import SwiftUI
 struct ProcessingConfigurationFields: View {
     @Binding var form: ProcessingConfigurationForm
     let capabilities: ServerCapabilities?
+    let contractVersion: String?
     let catalog: MinutesModelCatalogStore
     let transcriptionCatalog: TranscriptionModelCatalogStore
     var isProfile = false
+    @Binding var minutesValidationMessage: String?
 
     var body: some View {
         capabilityPicker("ローカル文字起こしエンジン", selection: $form.transcriptionEngine,
@@ -34,9 +36,17 @@ struct ProcessingConfigurationFields: View {
         TranscriptionModelSelectionView(
             form: $form.transcriptionModel, catalog: transcriptionCatalog,
             externalSendPolicy: form.effectiveExternalSendPolicy, language: form.effectiveLanguage, isProfile: isProfile)
-        MinutesModelSelectionView(
-            form: $form.minutesModel, catalog: catalog,
-            externalSendPolicy: form.effectiveExternalSendPolicy, isProfile: isProfile)
+        if capabilities?.supportsMinutesEnsembleWire(contractVersion: contractVersion) == true
+            || form.minutesGenerationMode == .ensemble {
+            MinutesGenerationSelectionView(
+                form: $form, capabilities: capabilities, contractVersion: contractVersion, catalog: catalog,
+                externalSendPolicy: form.effectiveExternalSendPolicy, isProfile: isProfile,
+                validationMessage: $minutesValidationMessage)
+        } else {
+            MinutesModelSelectionView(
+                form: $form.minutesModel, catalog: catalog,
+                externalSendPolicy: form.effectiveExternalSendPolicy, isProfile: isProfile)
+        }
         TextField("自分の名前（マイク話者の表示名）", text: $form.selfName)
         Text("空欄で名前を解除します。API 音声認識へ既知話者の名前や参照音声は送りません。")
             .font(.caption).foregroundStyle(.secondary)

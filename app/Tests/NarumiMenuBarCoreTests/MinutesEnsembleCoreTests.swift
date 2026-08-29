@@ -43,6 +43,16 @@ final class MinutesEnsembleCoreTests: XCTestCase {
         XCTAssertEqual(form.generators.map(\.label), ["案1", "案2", "案3", "案4"])
     }
 
+    func testSelectingEnsembleActivatesEveryParticipantEditor() {
+        var form = ProcessingConfigurationForm()
+        XCTAssertEqual(form.minutesGenerationMode, .legacy)
+        form.selectMinutesGenerationMode(.ensemble)
+        XCTAssertEqual(form.minutesGenerationMode, .ensemble)
+        XCTAssertTrue(form.minutesEnsemble.generators.allSatisfy { $0.model.mode == .selected })
+        XCTAssertEqual(form.minutesEnsemble.synthesizer.mode, .selected)
+        XCTAssertNil(form.minutesEnsemble.selection)
+    }
+
     func testConfigurationSwitchWritesBothSidesOfExclusiveOverride() throws {
         var form = ProcessingConfigurationForm(config: MeetingConfig(
             externalSendPolicy: "api_ok", minutesModel: selection()))
@@ -117,5 +127,55 @@ final class MinutesEnsembleCoreTests: XCTestCase {
             with: JSONEncoder().encode(update)) as? [String: Any])
         XCTAssertTrue(object["minutes_ensemble"] is NSNull)
         XCTAssertNil(update.applying(to: original).minutesEnsemble)
+    }
+
+    func testEnsembleExecutionAvailabilityExplainsCapabilityFailures() {
+        let readyWorkflow = ProviderWorkflowCapabilities(
+            providerConnections: true, providerModels: true,
+            stageModelSelection: true, ensembleGeneration: true)
+        var capabilities = ServerCapabilities(
+            recording: true, transports: ["streamable-http"], transcriptionEngines: [],
+            diarizationEngines: [], llmProviders: [], exportDestinations: [], workflow: readyWorkflow,
+            minutesModelProviders: ["openai-api"], minutesEnsembleLimits: MinutesEnsembleLimits())
+        XCTAssertNil(MinutesEnsembleExecutionAvailability.unavailableReason(
+            capabilities: capabilities, contractVersion: "6.0.0", supportedProviders: ["openai-api"]))
+
+        capabilities.workflow = ProviderWorkflowCapabilities(
+            providerConnections: true, providerModels: true,
+            stageModelSelection: true, ensembleGeneration: false)
+        let stopped = MinutesEnsembleExecutionAvailability.unavailableReason(
+            capabilities: capabilities, contractVersion: "6.0.0", supportedProviders: ["openai-api"])
+        XCTAssertTrue(stopped?.contains("保存済み設定は確認できます") == true)
+        XCTAssertTrue(stopped?.contains("新しい実行には使えません") == true)
+
+        capabilities.workflow = readyWorkflow
+        capabilities.minutesEnsembleLimits = nil
+        XCTAssertTrue(MinutesEnsembleExecutionAvailability.unavailableReason(
+            capabilities: capabilities, contractVersion: "6.0.0", supportedProviders: ["openai-api"]
+        )?.contains("保存済み設定は確認できます") == true)
+        capabilities.minutesEnsembleLimits = MinutesEnsembleLimits()
+        XCTAssertTrue(MinutesEnsembleExecutionAvailability.unavailableReason(
+            capabilities: capabilities, contractVersion: "6.0.0",
+            supportedProviders: [])?.contains("プロバイダ") == true)
+        XCTAssertTrue(MinutesEnsembleExecutionAvailability.unavailableReason(
+            capabilities: capabilities, contractVersion: "5.0.0",
+            supportedProviders: ["openai-api"])?.contains("この契約") == true)
+    }
+
+    func testParticipantDisclosureUsesProviderDestinationAndBillingBoundary() throws {
+        let codex = try XCTUnwrap(MinutesParticipantDisclosure.make(provider: "codex-app-server"))
+        XCTAssertEqual(codex.destination, "OpenAI（chatgpt.com）")
+        XCTAssertEqual(codex.billing, .subscription)
+        let openAI = try XCTUnwrap(MinutesParticipantDisclosure.make(provider: "openai-api"))
+        XCTAssertEqual(openAI.destination, "OpenAI API（api.openai.com）")
+        XCTAssertEqual(openAI.billing, .api)
+        let anthropic = try XCTUnwrap(MinutesParticipantDisclosure.make(provider: "anthropic-api"))
+        XCTAssertEqual(anthropic.destination, "Anthropic API（api.anthropic.com）")
+        XCTAssertEqual(anthropic.billing, .api)
+        let ollama = try XCTUnwrap(MinutesParticipantDisclosure.make(
+            provider: "ollama", endpoint: "http://127.0.0.1:11434"))
+        XCTAssertEqual(ollama.destination, "この Mac の Ollama（http://127.0.0.1:11434）")
+        XCTAssertEqual(ollama.billing, .local)
+        XCTAssertNil(MinutesParticipantDisclosure.make(provider: "claude-agent-sdk"))
     }
 }

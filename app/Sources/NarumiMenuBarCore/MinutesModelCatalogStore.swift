@@ -25,6 +25,15 @@ public final class MinutesModelCatalogStore {
         self.supportedProviders = MinutesModelSelection.providers.filter { supportedProviders.contains($0) }
     }
 
+    /// Each ensemble card owns one copy so concurrent catalog reads cannot cancel another card.
+    public func independentStore() -> MinutesModelCatalogStore {
+        let copy = MinutesModelCatalogStore(client: client, supportedProviders: supportedProviders)
+        copy.connections = connections
+        copy.providers = providers
+        copy.catalogs = catalogs
+        return copy
+    }
+
     public func setSupportedProviders(_ values: [String]) {
         let next = MinutesModelSelection.providers.filter { values.contains($0) }
         guard next != supportedProviders else { return }

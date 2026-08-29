@@ -72,3 +72,27 @@ extension ServerCapabilities {
         canExecuteMinutesEnsemble(contractVersion: contractVersion)
     }
 }
+
+public enum MinutesEnsembleExecutionAvailability {
+    public static func unavailableReason(
+        capabilities: ServerCapabilities?, contractVersion: String?, supportedProviders: [String]
+    ) -> String? {
+        guard let capabilities else { return "サーバーの複数案生成への対応をまだ確認できません。" }
+        guard capabilities.supportsMinutesEnsembleWire(contractVersion: contractVersion) else {
+            return "この契約では複数案生成の設定に対応していません。"
+        }
+        guard capabilities.minutesEnsembleLimits?.isSupportedBaseline == true else {
+            return "サーバーが対応する複数案生成の上限を公開していません。保存済み設定は確認できますが、新しい実行には使えません。"
+        }
+        guard capabilities.transports.contains("streamable-http") else {
+            return "複数案生成は認証済みの常駐サーバー接続でのみ実行できます。"
+        }
+        guard capabilities.workflow?.ensembleGeneration == true else {
+            return "サーバーが複数案生成の実行能力を公開していません。保存済み設定は確認できますが、新しい実行には使えません。"
+        }
+        guard !supportedProviders.isEmpty else {
+            return "複数案生成に利用できる議事録プロバイダがありません。接続と実行環境を確認してください。"
+        }
+        return nil
+    }
+}
