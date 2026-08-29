@@ -21,7 +21,9 @@ Python 本体と ML 依存（mlx / torch 等）を `.app` に埋め込むと数�
 | `wheels/narumi-<ver>-py3-none-any.whl` / `wheels/narumi_server-<ver>-py3-none-any.whl`（`uv build` の出力） | pipeline / server 本体 |
 | `requirements.txt`（`uv export --frozen --no-dev --no-emit-workspace --format requirements-txt` を `--package narumi-server` と `--package narumi --extra whisper-mlx --extra claude --extra anthropic --extra html --extra slides` で出力して結合・重複排除。ハッシュ付き） | サードパーティ依存の完全固定 |
 | `contracts/`（manifest に列挙した契約と defs だけをコピー） | サーバーが起動時に読む契約。`NARUMI_CONTRACTS_DIR` で指す。未管理ファイルは含めない |
-| `manifest.json` `{ "app_version", "python": "3.13", "uv_version", "wheels": {name: sha256}, "requirements_sha256" }` | 再同期要否の判定材料 |
+| `codex/0.150.1/codex` | OpenAI 公式 `rust-v0.150.1` の arm64 Codex CLI。準備時は外部通信せず専用領域へコピーする |
+| `licenses/openai-codex-*` | Apache-2.0 LICENSE と upstream NOTICE |
+| `manifest.json` `{ "app_version", "python": "3.13", "uv_version", "wheels", "requirements_sha256", "codex" }` | 再同期要否と固定 Codex artifact の検査材料 |
 
 初回起動（および manifest の内容が変わった更新後）の手順（`ServerLauncher` の bundled モード）:
 
@@ -35,7 +37,7 @@ Python 本体と ML 依存（mlx / torch 等）を `.app` に埋め込むと数�
 
 モード選択: 明示的な `NARUMI_RUNTIME_MODE=repo|bundled` → 明示的な `NARUMI_REPO` → 同梱 runtime → 保存済み設定や配置から解決した repo → 未設定。配布版は保存済み repoPath だけで開発ソースへ切り替わらない。bundled モードで外部 URL の明示がないときは、未所有の既存サーバーを採用せずポート競合にする。準備中はメイン画面とメニューに状態を表示し、ログは `~/Library/Logs/narumi/runtime.log`。失敗時は状態 `failed` と再試行操作を出し、黙って別モードへ切り替えない。
 
-初回は Python と ML 依存をダウンロードする。torch は現行 mlx-whisper の依存として含まれる。pyannote は同梱しない。ffmpeg / ffprobe は既存のインストールを使用し、GUI 起動後の診断で検出を確認する。
+初回は Python と ML 依存をダウンロードする。torch は現行 mlx-whisper の依存として含まれる。pyannote は同梱しない。ffmpeg / ffprobe は既存のインストールを使用し、GUI 起動後の診断で検出を確認する。Codex binary は展開後 228,986,048 bytes。`runtime.lock.json` で tag commit、artifact URL・SHA-256・サイズ、展開 entry、binary SHA-256・サイズ、arm64、OpenAI Developer ID Team、LICENSE / NOTICE を固定し、実行時 trust anchor との完全一致をビルド前に検査する。Codex は再署名せず上流署名を保持し、アプリ署名後の inventory と署名も検査する。
 
 ## 2. 更新機構: Sparkle 2
 
@@ -44,7 +46,7 @@ Python 本体と ML 依存（mlx / torch 等）を `.app` に埋め込むと数�
 - コード: `AppDelegate` が `DesktopUpdater` を持ち、その内部で `SPUStandardUpdaterController` と各更新段階の busy gate を管理する。メニュー「アップデートを確認…」も同じ経路を使う。定期チェックは Sparkle のスケジューラに任せる。delegate の `feedURLString(for:)` は `NARUMI_SPARKLE_FEED_URL` があればそれを返す（開発用。本番設定には入れない）
 - 更新確認・適用は録画中、開始停止中、起動準備中、既知ジョブの処理中には延期する。適用時は通常の終了経路で管理中 server を停止する。新バージョン起動時は manifest 差分で venv を再同期し、server の実体確認後に切替を確定する
 - 別の CLI / MCP クライアントによるジョブ開始と更新の原子的な排他は保証しない。今回の保護範囲はアプリが開始・把握したジョブで、外部クライアントの処理中は更新しない
-- `.app` 組み立て（`scripts/build-app.sh`）: Sparkle を `Contents/Frameworks/` にコピーし、非サンドボックス構成に不要な XPCServices を除く。Sparkle helpers → framework → 同梱 uv・recorder → `.app` の内側から順に署名する。署名に `--deep` は使わず、正式版は Developer ID と hardened runtime / timestamp を必須にする
+- `.app` 組み立て（`scripts/build-app.sh`）: Sparkle を `Contents/Frameworks/` にコピーし、非サンドボックス構成に不要な XPCServices を除く。Sparkle helpers → framework → 同梱 uv・recorder → `.app` の内側から順に署名する。Codex は検証済みの OpenAI 署名を保持する。署名に `--deep` は使わず、正式版は Developer ID と hardened runtime / timestamp を必須にする
 
 ## 3. 署名・公証・リリース（`scripts/release-app.sh <version>`）
 

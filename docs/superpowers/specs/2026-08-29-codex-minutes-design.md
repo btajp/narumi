@@ -53,10 +53,17 @@ Codex を選択した会議の `regenerate` と、生成も行う `register_cont
 
 ## 4. 実行環境と認証の境界
 
-対応版は Codex CLI 0.150.1。公式 npm パッケージの版と、既知の配置先の
-ネイティブ実行ファイルを確認し、narumi 専用領域へコピーして実版・SHA-256 を検査する。
-対応する導入済みパッケージがない場合は準備できない。版を特定できない
-Codex.app 内の実行ファイルや、任意の PATH 上のコマンドは採用しない。
+対応版は Codex CLI 0.150.1。配布版は OpenAI 公式 `rust-v0.150.1` の
+Apple Silicon 用 artifact から取得したネイティブ実行ファイルを `.app` に同梱する。
+tag commit、artifact URL・SHA-256・サイズ、展開 entry、binary の SHA-256・サイズ・arm64、
+OpenAI の Developer ID Team、Apache-2.0 LICENSE / NOTICE を lock と inventory で固定する。
+lock は実行時 trust anchor と完全一致しなければビルドを開始しない。
+上流署名は保持し、外側のアプリ署名後も hash と署名を再検査する。
+「確認・準備」は同梱 binary を narumi 専用領域へコピーして実版・SHA-256 を検査し、
+ダウンロードや外部通信を行わない。同梱物が欠落・変更していれば外部インストールへ
+切り替えず、配布版の更新または再インストールが必要な状態として停止する。
+repo モードでは、公式 npm パッケージの既知の配置先を従来どおり検査できる。
+版を特定できない Codex.app 内の実行ファイルや、任意の PATH 上のコマンドは採用しない。
 narumi が所有する実行環境と接続ごとの認証領域を使う。
 普段の Codex の設定、資格情報、MCP、プラグイン、会話をコピーしない。
 グローバルツールの追加インストールや、利用者指定のコマンド実行は提供しない。
@@ -113,6 +120,9 @@ request/stream retry は 0、WebSocket は無効にする。ただし SDK 内に
 固定版プロトコルの検証と、実アカウントへのログイン・実生成は分けて記録する。
 実アカウントと会議の送信は明示オプトインとし、通常の CI では実行しない。
 署名・公証・配布物照合の後に公開し、実機の UI 確認はインストール済みアプリの更新で行う。
+通常テストは fake archive と失敗する download stub を使う。固定した実 artifact の
+archive / binary hash、arm64、上流署名、`--version` のオフライン起動も認証なしで検査する。
+実 ChatGPT ログイン、実 provider 送信、Apple 公証はこの検査に含めない。
 
 `uv run python scripts/check_codex_protocol.py` は macOS 上の固定 CLI を検証する。
 許可した loopback ポートへの接続成功・別ポートへの接続拒否を先に検査し、

@@ -49,7 +49,7 @@ open dist/narumi.app     # メイン画面と、名前付きのメニューバ�
 `narumi.app` は起動時に `narumi-server`（認証付き Streamable HTTP、既定 `https://127.0.0.1:8765/mcp`）を自分で起動し、終了時に停止します。アプリは所有者専用の起動情報から証明書とサーバー識別情報を確認し、Keychain のトークンで認証します。Terminal でサーバーを起動しておく必要はありません。起動方法は 2 モードあります（詳細は [app/README.md](app/README.md) の「ランタイムモード」）。
 
 - **repo モード**（開発用。上の `scripts/build-app.sh` のとおりオプション無しでビルドした場合）: アプリがリポジトリの `uv run narumi-server` を起動します。動かすマシンには **uv と、このリポジトリのチェックアウト（`uv sync` 済み）** が必要です。
-- **bundled モード**（配布用。`scripts/build-app.sh --runtime` でビルドした場合）: `.app` が同梱の uv・wheels・requirements から `NARUMI_HOME/runtime/` に venv を自分で作って起動します。**リポジトリのチェックアウトも uv のインストールも不要**です（初回はネットワーク必須。後述「配布」参照）。
+- **bundled モード**（配布用。`scripts/build-app.sh --runtime` でビルドした場合）: `.app` が同梱の uv・wheels・requirements から `NARUMI_HOME/runtime/` に venv を自分で作って起動します。固定版 Codex も `.app` に含みます。**リポジトリのチェックアウト、uv、Codex CLI の事前インストールは不要**です（Python 依存を初回取得するためネットワークは必要。後述「配布」参照）。
 
 - `NARUMI_RUNTIME_MODE=repo|bundled` と明示的な `NARUMI_REPO` 指定を除き、同梱ランタイムがあれば bundled モードを優先します。以前保存したリポジトリ設定だけでは配布版を開発モードへ切り替えません。
 - 開発用 repo モード、または `NARUMI_SERVER_URL` を明示した場合は、同じデータルートの起動情報を持つローカル常駐サーバーへ接続できます。URL は起動情報と一致する数値 loopback の HTTPS に限ります。通常の bundled 起動で既存サーバーがポートを使用している場合は、競合として表示します。
@@ -226,7 +226,7 @@ OpenAI が返す `shutdown_date` は `availability_expires_on`（`YYYY-MM-DD`）
 接続追加 → 実行環境の準備 → 確認コードで専用ログイン → モデル選択と送信許可の保存 → 再生成、の順に進めます。
 
 1. **接続を追加**: 「AI 接続」で「Codex App Server」と接続名（例: `議事録用 Codex`）を選び、「接続を追加して保存」を押します。API キーは不要で、既存 Codex の認証情報を流用しません。
-2. **実行環境を準備**: 「実行環境」の「確認・準備」を使います。対応する公式 npm 版 Codex CLI **0.150.1** の既存インストールから専用領域へコピーし、版と SHA256 を確認します。対応版がない場合は準備できません。Codex.app 内の版を確認できない実行ファイルは対象外で、自動インストール・ダウンロードや任意コマンドの指定は行いません。
+2. **実行環境を準備**: 「実行環境」の「確認・準備」を使います。配布版は `.app` に同梱した公式 Codex CLI **0.150.1** を専用領域へコピーし、固定した版・サイズ・SHA256 を確認します。この準備と版確認は外部通信せず、グローバルツールを変更しません。同梱物を検証できない場合は停止し、外部の Codex へ切り替えず、公式配布版の更新または再インストールを案内します。repo モードだけは、従来どおり対応版の既存 npm インストールを検査できます。
 3. **専用ログイン**: 準備後に「ChatGPT でログイン」を押すと「確認コード」が表示されます。「ブラウザで続ける」で [OpenAI のデバイスログイン画面](https://auth.openai.com/codex/device) を開き、利用者がそのコードを入力して承認します。「確認コードをコピー」は必要な場合だけ使います。API キーの入力は不要です。
 4. **モデル候補を取得**: 「接続先から候補を更新」を押します。画面を開くだけでは保存済み候補を読み、更新時にモデル情報を照会します。会議内容は送信しません。候補取得の成功と、実際の生成成功は別です。
 5. **会議設定・プロファイルへ保存**: 上記の共通手順で「議事録の生成方法」を「接続とモデルを指定」、「議事録プロバイダ」を「Codex App Server」にします。「保存済み接続」「議事録モデル」「推論量」を選び、`subscription_ok` または `api_ok` を明示して保存します。`api_ok` でも Codex が API キー方式へ切り替わることはなく、ChatGPT の利用枠を使います。保存だけでは送信・生成しません。
@@ -411,7 +411,9 @@ args = ["--directory", "/path/to/narumi", "run", "narumi-server", "--stdio-bridg
 scripts/build-app.sh --runtime    # dist/narumi.app（ランタイム同梱、ad-hoc 署名）
 ```
 
-`--runtime` は `Contents/Resources/runtime/` に uv 単体バイナリ（版と sha256 は `scripts/runtime.lock.json` に固定）・narumi / narumi-server の wheel・ハッシュ付き `requirements.txt`・契約 manifest に列挙された契約ファイル・runtime manifest を同梱します。初回起動と更新時に、必要に応じて `NARUMI_HOME/runtime/` の Python 3.13 と venv を準備します。**リポジトリのチェックアウトも uv の事前インストールも不要**ですが、初回の依存取得にはネットワークが必要で、ffmpeg / ffprobe は別途必要です。スライド処理の依存も含みます。進捗はアプリに表示し、ログは `~/Library/Logs/narumi/runtime.log` に保存します。
+`--runtime` は `Contents/Resources/runtime/` に uv、narumi / narumi-server の wheel、ハッシュ付き `requirements.txt`、契約ファイル、Codex CLI 0.150.1、Apache-2.0 の LICENSE / NOTICE、runtime manifest を同梱します。Codex は OpenAI 公式 `rust-v0.150.1` の Apple Silicon 用 artifact を使用し、URL・tag commit・archive SHA256・展開後 SHA256・サイズ・arm64・OpenAI の Developer ID Team を `scripts/runtime.lock.json` で固定し、実行時 trust anchor との完全一致もビルド前に確認します。展開後 binary は 228,986,048 bytes（約 218.4 MiB）で、上流署名を保持します。署名前後の inventory と署名を検査し、未列挙ファイルや変更を拒否します。
+
+初回起動と更新時に、必要に応じて `NARUMI_HOME/runtime/` の Python 3.13 と venv を準備します。**リポジトリのチェックアウト、uv、Codex CLI の事前インストールは不要**ですが、Python 依存の初回取得にはネットワークが必要で、ffmpeg / ffprobe は別途必要です。Codex の準備と版確認はオフラインで完了しますが、ChatGPT ログイン・モデル照会・議事録生成には通信が必要です。進捗はアプリに表示し、ログは `~/Library/Logs/narumi/runtime.log` に保存します。
 
 版は `VERSION` ファイルが正本（`CFBundleShortVersionString`）、`CFBundleVersion` は `git rev-list --count HEAD` です。Python パッケージ、サーバー、録画ヘルパー、`CHANGELOG.md` の版との一致は `scripts/check-version.sh` で検査します。
 

@@ -151,7 +151,7 @@ Codex は「ChatGPT でログイン」で公式 App Server の `chatgptDeviceCod
 
 ログイン・接続確認・候補更新では会議データを送らない。応答が失われた場合は新しい認証操作を始めず、元の `operation_id` / `start_request_id` から状態を確認する。
 
-実行環境の準備は `provider_setup` ジョブで追跡し、取消と状態確認を使う。Codex は公式 npm 版 CLI **0.150.1** の既存インストールから narumi 専用 runtime へコピーし、版・SHA256 を検証する。対応インストールがない場合は準備不可で、Codex.app 内の版不明の実行ファイルは採用しない。OpenAI / Anthropic / Ollama は内蔵 HTTP アダプタの版・配布メタデータを確認して結果を保存する。Claude SDK は既存依存の検査のみ。グローバルツールの追加、SDK・モデルのダウンロード、利用者指定コマンドの実行は提供しない。
+実行環境の準備は `provider_setup` ジョブで追跡し、取消と状態確認を使う。配布版の Codex は `.app` に固定同梱した公式 CLI **0.150.1** を narumi 専用 runtime へコピーし、版・サイズ・SHA256 をオフラインで検証する。同梱物が欠落・変更していれば外部インストールへ切り替えず、更新または再インストールが必要な状態として表示する。repo モードでは対応版の既存 npm インストールを検査できるが、Codex.app 内の版不明の実行ファイルは採用しない。OpenAI / Anthropic / Ollama は内蔵 HTTP アダプタの版・配布メタデータを確認して結果を保存する。Claude SDK は既存依存の検査のみ。グローバルツールの追加、SDK・モデルのダウンロード、利用者指定コマンドの実行は提供しない。
 
 候補一覧は画面表示時にはキャッシュだけを読み、明示的な更新で通信する。議事録は `role=llm`、音声認識は `role=transcription` としてカタログと UI キャッシュを分け、同じ OpenAI 接続でも候補を混ぜない。Claude Agent SDK の生成、全工程のモデル選択、API の画像入力、複数案の生成・統合は未対応。接続確認・候補取得の成功を、実認識・実生成の成功とは扱わない。
 
@@ -224,7 +224,7 @@ Codex の固定 provider では要求・ストリームの再試行を 0 にし�
 `narumi-server` の起動方法は 2 モード（設計: `docs/superpowers/specs/2026-08-27-narumi-app-distribution-design.md` §1）。
 
 - **判定**（`ServerConfig.RuntimeMode`）: 明示的な `NARUMI_RUNTIME_MODE=repo|bundled` → 明示的な `NARUMI_REPO` → 同梱 runtime があれば **bundled** → リポジトリが解決できれば **repo** → 未設定。保存済み repoPath や配置場所だけでは同梱 runtime より優先しない。
-- **bundled モード**: `.app` は `uv` バイナリ・`wheels/`・ハッシュ付き `requirements.txt`・`contracts/`・`manifest.json` を同梱する。起動時は既定のデータルート（または `NARUMI_HOME`）の `runtime/` に Python と venv を作る。`RuntimeSyncPlan` が Python の取得、relocatable な `venv.new` の作成、ハッシュ付き依存と本体 wheel のインストールを順に実行する。切替は journal に記録し、旧 venv を `venv.previous` に保持したまま新版を起動する。新 server の検証後に `installed.json` を確定し、旧 venv を片付ける。`--relocatable` は、移動後のエントリポイントが移動前のパスを参照しないために必要。
+- **bundled モード**: `.app` は `uv` バイナリ・`wheels/`・ハッシュ付き `requirements.txt`・`contracts/`・固定 Codex binary と LICENSE / NOTICE・`manifest.json` を同梱する。起動時は既定のデータルート（または `NARUMI_HOME`）の `runtime/` に Python と venv を作る。`RuntimeSyncPlan` が Python の取得、relocatable な `venv.new` の作成、ハッシュ付き依存と本体 wheel のインストールを順に実行する。切替は journal に記録し、旧 venv を `venv.previous` に保持したまま新版を起動する。新 server の検証後に `installed.json` を確定し、旧 venv を片付ける。`--relocatable` は、移動後のエントリポイントが移動前のパスを参照しないために必要。
 - **再同期と復旧**: 起動のたびに `Resources/runtime/manifest.json` と `installed.json` を比較し、不一致なら同期する。旧 venv と旧 marker は、新 server の応答・期待版・recorder/contracts の実体確認まで保持する。失敗時は復元し、未完了の切替 journal があれば次回起動時に回復する。旧版へ黙って接続を切り替えることはしない。
 - **進捗・失敗**: 同期中はメニューに「サーバー: 環境を準備中…（<ステップ名>）」、uv の出力は `~/Library/Logs/narumi/runtime.log`。失敗（ネットワーク無しなど）は「起動失敗（ログ参照）」で止まり、「サーバーを再起動」で再試行する。黙って repo モードには落ちない。初回同期はネットワーク必須（Python 取得と PyPI から数百 MB）。
 - **サーバー起動（bundled）**: `<venv>/bin/python3 -I -m narumi_server.cli --http --host 127.0.0.1 --port <port> --data-root <data-root> --recorder <.app>/Contents/MacOS/narumi-recorder`。環境変数 `NARUMI_CONTRACTS_DIR` に同梱 contracts、`NARUMI_KEYCHAIN_HELPER` に同じアプリのヘルパーの絶対パスを渡す。Python の環境上書きは除外し、旧 checkout や user site を import しない。データルートはアプリと同じ値に固定する。uv とサーバーは、固定の `/bin/sh` gate で所有情報の保存を待ってから絶対パスで起動する（ログインシェルや PATH 探索は使わない）。異常終了後も前回のプロセスが生きていれば、勝手に停止したり venv を置換したりせず、再同期を止める。

@@ -130,6 +130,8 @@ public enum ProviderDisplay {
             return ToolErrorInfo.generationOutcomeMessage(reason: code, unknown: true)
         case "credential_required", "authentication_required": return "この接続の認証設定と認証確認が必要です。"
         case "runtime_verification_pending", "runtime_preparation_required": return "実行環境の準備・確認が必要です。"
+        case "bundled_runtime_unavailable":
+            return "同梱の Codex 実行環境を検証できません。公式配布版を更新または再インストールしてください。外部の実行環境へは切り替えません。"
         case "runtime_preparation_failed": return "実行環境の準備に失敗しました。準備状態を確認してください。"
         case "local_server_verification_required": return "ローカルサーバーの接続確認が必要です。"
         case "adapter_capability_verification_required": return "このモデルを実行するアダプタの対応を確認できていません。"

@@ -33,6 +33,7 @@ def forbidden(*args, **kwargs):
 
 @pytest.fixture(autouse=True)
 def isolate_runtime(monkeypatch):
+    monkeypatch.delenv("NARUMI_CONTRACTS_DIR", raising=False)
     monkeypatch.setattr(_runtime, "installed_candidates", lambda: [])
     monkeypatch.setattr(_runtime, "verify_version", forbidden)
     monkeypatch.setattr(_runtime.subprocess, "Popen", forbidden)
@@ -80,12 +81,29 @@ def assert_private_failure(error, reason):
     assert SECRET not in "".join(traceback.format_exception(error))
 
 
+@pytest.mark.parametrize("anchor", ["relative", "repo_override", "wrong_leaf"])
+def test_repo_contracts_override_keeps_installed_fallback(installed_runtime, monkeypatch, anchor):
+    fixture = installed_runtime
+    if anchor == "relative":
+        configured = Path("runtime/contracts")
+    elif anchor == "repo_override":
+        configured = fixture.root / "runtime/contracts"
+    else:
+        configured = fixture.root / "narumi.app/Contents/Resources/runtime/other-contracts"
+    monkeypatch.setenv("NARUMI_CONTRACTS_DIR", str(configured))
+    resource = fixture.runtime.resource()
+    assert resource["source"] == "installed"
+    assert resource["version"] == _runtime.SUPPORTED_VERSION
+    assert resource["sha256"] == hashlib.sha256(NATIVE_BYTES).hexdigest()
+
+
 def test_listing_is_passive_and_does_not_prepare_or_touch_installation(installed_runtime):
     fixture = installed_runtime
     fixture.source.chmod(0o755)
     before = fixture.source.stat()
     metadata_before = fixture.metadata.stat()
     resource = fixture.runtime.resource()
+    assert resource["source"] == "installed"
     assert resource["sha256"] == hashlib.sha256(NATIVE_BYTES).hexdigest()
     assert fixture.runtime.resource() == resource
     assert fixture.verified == []

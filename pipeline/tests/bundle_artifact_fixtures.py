@@ -16,10 +16,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 INVENTORY = ROOT / "scripts" / "bundle_inventory.py"
 VERSION = "0.1.1"
+CODEX_VERSION = "0.150.1"
+CODEX_SOURCE_TAG = f"rust-v{CODEX_VERSION}"
 PROMPTS = {
     "narumi/generate/prompts/integrate_interval.md",
     "narumi/generate/prompts/minutes_chunk.md",
     "narumi/generate/prompts/minutes_final.md",
+    "narumi/generate/prompts/minutes_reduce.md",
     "narumi/slides/prompts/layer3_speakers.md",
 }
 
@@ -28,6 +31,51 @@ def write_file(path: Path, data: bytes | str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data.encode() if isinstance(data, str) else data)
     return path
+
+
+def arm64_macho(payload: bytes = b"") -> bytes:
+    """Small thin arm64 Mach-O fixture; it is inspected but never executed."""
+    header = struct.pack("<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, 2, 0, 0, 0, 0)
+    return header + payload
+
+
+def codex_manifest(binary: bytes, license_text: bytes, notice_text: bytes) -> dict:
+    return {
+        "version": CODEX_VERSION,
+        "source": f"https://github.com/openai/codex/releases/tag/{CODEX_SOURCE_TAG}",
+        "source_tag": CODEX_SOURCE_TAG,
+        "source_commit": "9" * 40,
+        "artifact": {
+            "name": "codex-aarch64-apple-darwin.tar.gz",
+            "url": (
+                "https://github.com/openai/codex/releases/download/"
+                f"{CODEX_SOURCE_TAG}/codex-aarch64-apple-darwin.tar.gz"
+            ),
+            "sha256": "a" * 64,
+            "size": 91_484_322,
+            "entry": "codex-aarch64-apple-darwin",
+        },
+        "binary": {
+            "path": f"codex/{CODEX_VERSION}/codex",
+            "sha256": hashlib.sha256(binary).hexdigest(),
+            "size": len(binary),
+            "architecture": "arm64",
+            "version_output": f"codex-cli {CODEX_VERSION}",
+            "publisher_team_id": "2DC432GLL2",
+        },
+        "license": {
+            "spdx": "Apache-2.0",
+            "path": "licenses/openai-codex-Apache-2.0.txt",
+            "source": f"https://github.com/openai/codex/blob/{CODEX_SOURCE_TAG}/LICENSE",
+            "source_tag": CODEX_SOURCE_TAG,
+            "sha256": hashlib.sha256(license_text).hexdigest(),
+            "size": len(license_text),
+            "notice_path": "licenses/openai-codex-NOTICE.txt",
+            "notice_source": f"https://github.com/openai/codex/blob/{CODEX_SOURCE_TAG}/NOTICE",
+            "notice_sha256": hashlib.sha256(notice_text).hexdigest(),
+            "notice_size": len(notice_text),
+        },
+    }
 
 
 def run_inventory(*args: str | Path) -> subprocess.CompletedProcess:
@@ -81,14 +129,20 @@ def make_app(parent: Path, *, runtime: bool = True) -> Path:
     }
     write_file(app / "Contents/Info.plist", plistlib.dumps(plist))
     write_file(app / "Contents/PkgInfo", "APPL????")
-    write_file(app / "Contents/MacOS/NarumiMenuBar", "fake menu app")
-    write_file(app / "Contents/MacOS/narumi-recorder", "fake recorder")
-    write_file(app / "Contents/MacOS/narumi-keychain", "fake keychain helper")
+    write_file(app / "Contents/MacOS/NarumiMenuBar", arm64_macho(b"fake menu app"))
+    write_file(app / "Contents/MacOS/narumi-recorder", arm64_macho(b"fake recorder"))
+    write_file(app / "Contents/MacOS/narumi-keychain", arm64_macho(b"fake keychain helper"))
     icon = b"icns" + struct.pack(">I", 16) + b"icp4" + struct.pack(">I", 8)
     write_file(app / "Contents/Resources/AppIcon.icns", icon)
     if runtime:
         directory = app / "Contents/Resources/runtime"
-        write_file(directory / "uv", "fake uv")
+        write_file(directory / "uv", arm64_macho(b"fake uv"))
+        codex = arm64_macho(b"fake OpenAI signed Codex")
+        license_text = b"fixture Apache-2.0 license\n"
+        notice_text = b"fixture OpenAI Codex notice\n"
+        write_file(directory / f"codex/{CODEX_VERSION}/codex", codex)
+        write_file(directory / "licenses/openai-codex-Apache-2.0.txt", license_text)
+        write_file(directory / "licenses/openai-codex-NOTICE.txt", notice_text)
         requirements = write_file(directory / "requirements.txt", "pillow==11.0.0\n")
         wheels = {}
         for package in ("narumi", "narumi_server"):
@@ -106,6 +160,7 @@ def make_app(parent: Path, *, runtime: bool = True) -> Path:
                     "uv_version": "0.12.6",
                     "wheels": wheels,
                     "requirements_sha256": hashlib.sha256(requirements.read_bytes()).hexdigest(),
+                    "codex": codex_manifest(codex, license_text, notice_text),
                 }
             ),
         )

@@ -28,15 +28,142 @@ REQUIRED = {
     "Contents/Resources/AppIcon.icns",
 }
 SIGNATURE_FILES = {"Contents/_CodeSignature/CodeResources", "Contents/CodeResources"}
+CODEX_TEAM_ID = "2DC432GLL2"
+ARM64_MACHO = b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01"
 
 
-def matches_hash(entry: Entry, expected: object) -> None:
+def matches_hash(entry: Entry, expected: object) -> bytes:
+    data = entry.data()
     if (
         not isinstance(expected, str)
         or re.fullmatch(r"[0-9a-f]{64}", expected) is None
-        or hashlib.sha256(entry.data()).hexdigest() != expected
+        or hashlib.sha256(data).hexdigest() != expected
     ):
         raise InventoryError(f"runtime manifest hash mismatch: {entry.path}")
+    return data
+
+
+def matches_size(entry: Entry, expected: object) -> None:
+    if not isinstance(expected, int) or isinstance(expected, bool) or entry.size != expected:
+        raise InventoryError(f"runtime manifest size mismatch: {entry.path}")
+
+
+def exact_object(value: object, label: str, keys: set[str]) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != keys:
+        raise InventoryError(f"{label} must contain exactly: {', '.join(sorted(keys))}")
+    return value
+
+
+def require_string(value: object, label: str, pattern: str | None = None) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or (pattern and re.fullmatch(pattern, value) is None)
+    ):
+        raise InventoryError(f"invalid {label}")
+    return value
+
+
+def require_positive_int(value: object, label: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise InventoryError(f"invalid {label}")
+    return value
+
+
+def require_arm64_macho(data: bytes, path: str) -> None:
+    if not data.startswith(ARM64_MACHO):
+        raise InventoryError(f"expected an arm64 Mach-O binary: {path}")
+
+
+def codex_files(entries: dict[str, Entry], value: object) -> set[str]:
+    codex = exact_object(
+        value,
+        "runtime manifest codex",
+        {"version", "source", "source_tag", "source_commit", "artifact", "binary", "license"},
+    )
+    version = require_string(
+        codex["version"],
+        "Codex version",
+        r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)",
+    )
+    source_tag = require_string(codex["source_tag"], "Codex source_tag")
+    if source_tag != f"rust-v{version}":
+        raise InventoryError("Codex source_tag differs from version")
+    if codex["source"] != f"https://github.com/openai/codex/releases/tag/{source_tag}":
+        raise InventoryError("invalid Codex source")
+    require_string(codex["source_commit"], "Codex source_commit", r"[0-9a-f]{40}")
+
+    artifact = exact_object(
+        codex["artifact"],
+        "runtime manifest codex artifact",
+        {"name", "url", "sha256", "size", "entry"},
+    )
+    name = require_string(artifact["name"], "Codex artifact name")
+    if name != "codex-aarch64-apple-darwin.tar.gz":
+        raise InventoryError("invalid Codex artifact name")
+    if artifact["url"] != f"https://github.com/openai/codex/releases/download/{source_tag}/{name}":
+        raise InventoryError("invalid Codex artifact URL")
+    require_string(artifact["sha256"], "Codex artifact sha256", r"[0-9a-f]{64}")
+    require_positive_int(artifact["size"], "Codex artifact size")
+    if artifact["entry"] != "codex-aarch64-apple-darwin":
+        raise InventoryError("invalid Codex archive entry")
+
+    binary = exact_object(
+        codex["binary"],
+        "runtime manifest codex binary",
+        {"path", "sha256", "size", "architecture", "version_output", "publisher_team_id"},
+    )
+    binary_path = require_string(binary["path"], "Codex binary path")
+    if binary_path != f"codex/{version}/codex":
+        raise InventoryError("Codex binary path differs from version")
+    if binary["architecture"] != "arm64" or binary["version_output"] != f"codex-cli {version}":
+        raise InventoryError("invalid Codex binary architecture or version output")
+    if binary["publisher_team_id"] != CODEX_TEAM_ID:
+        raise InventoryError("invalid Codex publisher TeamIdentifier")
+    bundled_binary = required_file(entries, f"{RUNTIME}/{binary_path}")
+    matches_size(bundled_binary, binary["size"])
+    require_arm64_macho(matches_hash(bundled_binary, binary["sha256"]), bundled_binary.path)
+
+    license_metadata = exact_object(
+        codex["license"],
+        "runtime manifest codex license",
+        {
+            "spdx",
+            "path",
+            "source",
+            "source_tag",
+            "sha256",
+            "size",
+            "notice_path",
+            "notice_source",
+            "notice_sha256",
+            "notice_size",
+        },
+    )
+    if license_metadata["spdx"] != "Apache-2.0" or license_metadata["source_tag"] != source_tag:
+        raise InventoryError("invalid Codex license identity")
+    license_path = "licenses/openai-codex-Apache-2.0.txt"
+    notice_path = "licenses/openai-codex-NOTICE.txt"
+    if license_metadata["path"] != license_path or license_metadata["notice_path"] != notice_path:
+        raise InventoryError("invalid Codex license path")
+    if license_metadata["source"] != f"https://github.com/openai/codex/blob/{source_tag}/LICENSE":
+        raise InventoryError("invalid Codex license source")
+    if (
+        license_metadata["notice_source"]
+        != f"https://github.com/openai/codex/blob/{source_tag}/NOTICE"
+    ):
+        raise InventoryError("invalid Codex NOTICE source")
+    license_entry = required_file(entries, f"{RUNTIME}/{license_path}")
+    notice_entry = required_file(entries, f"{RUNTIME}/{notice_path}")
+    matches_size(license_entry, license_metadata["size"])
+    matches_hash(license_entry, license_metadata["sha256"])
+    matches_size(notice_entry, license_metadata["notice_size"])
+    matches_hash(notice_entry, license_metadata["notice_sha256"])
+    return {
+        bundled_binary.path,
+        license_entry.path,
+        notice_entry.path,
+    }
 
 
 def runtime_files(
@@ -48,6 +175,8 @@ def runtime_files(
     manifest = json_object(entries[f"{RUNTIME}/manifest.json"].data(JSON_LIMIT), "runtime manifest")
     if manifest.get("app_version") != app_version:
         raise InventoryError("runtime manifest app_version differs from Info.plist")
+    allowed |= codex_files(entries, manifest.get("codex"))
+    require_arm64_macho(entries[f"{RUNTIME}/uv"].data(), f"{RUNTIME}/uv")
     wheels = manifest.get("wheels")
     if not isinstance(wheels, dict) or len(wheels) != 2:
         raise InventoryError("runtime manifest must declare exactly two wheels")
@@ -91,6 +220,9 @@ def inspect(
     if require_runtime and not has_runtime:
         raise InventoryError("distribution app is missing its bundled runtime")
     if has_runtime:
+        for executable in ("NarumiMenuBar", "narumi-recorder", "narumi-keychain"):
+            path = f"Contents/MacOS/{executable}"
+            require_arm64_macho(entries[path].data(), path)
         allowed |= runtime_files(entries, plist.get("CFBundleShortVersionString", ""), tracked)
     has_sparkle = any(path.startswith(bundle_sparkle.PREFIX + "/") for path in entries)
     if has_sparkle:

@@ -131,6 +131,12 @@ final class ProviderSettingsStateTests: XCTestCase {
         XCTAssertEqual(ProviderDisplay.price(nil, unit: "token"), "不明（無料とは扱いません）")
     }
 
+    func testBundledRuntimeFailureExplainsRecoveryAndNoFallback() {
+        let message = ProviderDisplay.reason("bundled_runtime_unavailable")
+        XCTAssertTrue(message?.contains("更新または再インストール") == true)
+        XCTAssertTrue(message?.contains("外部の実行環境へは切り替えません") == true)
+    }
+
     func testMissingActiveAuthNeverClearsLostStartReceipt() throws {
         var recovery = ProviderSettingsRecovery()
         XCTAssertTrue(recovery.beginAuthentication(connectionID: ProviderSettingsFixtures.connectionID, requestID: "lost-start"))
