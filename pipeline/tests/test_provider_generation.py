@@ -556,3 +556,30 @@ def test_codex_v030_provenance_is_reused_without_an_adapter_migration_send(tmp_p
     result = run_generate(Bundle.open(bundle.path), minutes_resolver=MinutesResolver(service))
     assert result.skipped and result.path.read_text() == "# Existing Codex minutes\n"
     assert completions(backend) == []
+
+
+def test_explicit_inspection_preserves_the_exact_legacy_single_parameters(generation):
+    service, backend, config = generation
+    resolver = MinutesResolver(service)
+    expected = resolver.validate(config)
+    with service.store.transaction() as document:
+        inspection = resolver.validate_selection_in_transaction(
+            config.minutes_model,
+            config.external_send_policy,
+            document,
+        )
+
+    assert inspection.legacy_generation_params == expected
+    assert "endpoint" not in inspection.legacy_generation_params
+    assert "model_capabilities_sha256" not in inspection.legacy_generation_params
+    assert inspection.content_conditions.endpoint == "https://chatgpt.com"
+    assert inspection.content_conditions.model_capabilities_sha256
+    assert completions(backend) == []
+
+    bound = resolver.resolve_selection(
+        config.minutes_model,
+        config.external_send_policy,
+    )
+    assert bound.inspection.content_conditions_sha256 == inspection.content_conditions_sha256
+    assert bound.provider.generation_params == expected
+    assert completions(backend) == []

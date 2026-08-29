@@ -35,9 +35,17 @@ from narumi.llm.base import CapabilityProfile, CostClass, LLMProvider
 from narumi.llm.policy import check_policy
 from narumi.llm.registry import select_provider
 from narumi.model_selection import MINUTES_PARAMETER_NAMES, ModelSelection
-from narumi.models import MeetingConfig
+from narumi.models import ExternalSendPolicy, MeetingConfig
 from narumi.providers._common import check_provider_idle, check_revision, connection
 from narumi.providers.metadata import validate_endpoint
+from narumi.providers.minutes_selection import (
+    AuthorizationPin,
+    BoundMinutesSelection,
+    ConnectionScope,
+    MinutesContentConditions,
+    MinutesSelectionInspection,
+    SelectionObservations,
+)
 
 if TYPE_CHECKING:
     from narumi.providers.service import ProviderService
@@ -107,6 +115,7 @@ class MinutesResolver:
         Callers must not enter another provider-store transaction inside this context.
         The connection reference callback only reads atomic files; it takes no meeting lock.
         """
+        self._reject_ensemble(config)
         if config.minutes_model is None:
             yield {}
             return
@@ -117,9 +126,21 @@ class MinutesResolver:
         self, config: MeetingConfig, document: dict[str, Any]
     ) -> dict[str, Any]:
         """Validate with the caller's provider transaction while atomically saving config."""
+        self._reject_ensemble(config)
         if config.minutes_model is None:
             return {}
         return copy.deepcopy(self._selection(config, document).params)
+
+    def validate_selection_in_transaction(
+        self,
+        selection: ModelSelection,
+        external_send_policy: ExternalSendPolicy,
+        document: dict[str, Any],
+    ) -> MinutesSelectionInspection:
+        """Inspect one explicit selection using the caller's provider snapshot."""
+        config = self._selection_config(selection, external_send_policy)
+        verified = self._selection(config, document)
+        return self._inspection(external_send_policy, verified)
 
     def validate(self, config: MeetingConfig) -> dict[str, Any]:
         with self.validated(config) as params:
@@ -128,11 +149,106 @@ class MinutesResolver:
     def resolve(
         self, config: MeetingConfig, *, should_cancel: CancelCheck | None = None
     ) -> LLMProvider:
+        self._reject_ensemble(config)
         if config.minutes_model is None:
             return select_provider(config)
         with self.service.store.transaction() as document:
             selection = self._selection(config, document)
         return _ConnectedMinutesProvider(self, config, selection, should_cancel)
+
+    def resolve_selection(
+        self,
+        selection: ModelSelection,
+        external_send_policy: ExternalSendPolicy,
+        *,
+        should_cancel: CancelCheck | None = None,
+    ) -> BoundMinutesSelection:
+        """Bind one explicit selection without generating or reading its credential."""
+        with self.service.store.transaction() as document:
+            return self._resolve_selection_in_transaction(
+                selection,
+                external_send_policy,
+                document,
+                should_cancel=should_cancel,
+            )
+
+    def _resolve_selection_in_transaction(
+        self,
+        selection: ModelSelection,
+        external_send_policy: ExternalSendPolicy,
+        document: dict[str, Any],
+        *,
+        should_cancel: CancelCheck | None = None,
+    ) -> BoundMinutesSelection:
+        config = self._selection_config(selection, external_send_policy)
+        verified = self._selection(config, document)
+        return BoundMinutesSelection(
+            inspection=self._inspection(external_send_policy, verified),
+            provider=_ConnectedMinutesProvider(self, config, verified, should_cancel),
+        )
+
+    @staticmethod
+    def _selection_config(
+        selection: ModelSelection, external_send_policy: ExternalSendPolicy
+    ) -> MeetingConfig:
+        try:
+            selected = ModelSelection.model_validate(selection.model_dump(warnings=False))
+            return MeetingConfig(
+                minutes_model=selected,
+                external_send_policy=ExternalSendPolicy(external_send_policy),
+            )
+        except (ModelValidationError, ValueError, AttributeError):
+            raise InvalidArgumentError("The minutes model selection is invalid") from None
+
+    @staticmethod
+    def _reject_ensemble(config: MeetingConfig) -> None:
+        if config.minutes_ensemble is not None:
+            raise InvalidArgumentError("Use the ensemble resolver for ensemble minutes")
+
+    @staticmethod
+    def _inspection(
+        external_send_policy: ExternalSendPolicy,
+        verified: _Selection,
+    ) -> MinutesSelectionInspection:
+        spec = _PROVIDERS[verified.provider_id]
+        capability_table_version = verified.params.get("capability_table_version")
+        conditions = MinutesContentConditions.create(
+            provider=verified.provider_id,
+            endpoint=verified.endpoint,
+            model_id=verified.model_id,
+            resolved_revision=verified.model.get("resolved_revision"),
+            effective_parameters=verified.parameters,
+            context_window=verified.params["context_window"],
+            max_output_tokens=verified.params["max_output_tokens"],
+            model_capabilities_sha256=_capabilities_fingerprint(verified.model),
+            runtime_version=verified.params["runtime_version"],
+            runtime_sha256=verified.params["runtime_sha256"],
+            adapter_version=verified.params["adapter_version"],
+            capability_table_version=capability_table_version,
+        )
+        return MinutesSelectionInspection.create(
+            authorization=AuthorizationPin(
+                provider=verified.provider_id,
+                connection_id=verified.connection_id,
+                connection_revision=verified.params["minutes_model"]["connection_revision"],
+                external_send_policy=ExternalSendPolicy(external_send_policy).value,
+                auth_method=spec.auth_method,
+                data_destination=spec.destination,
+                cost_class=spec.cost_class,
+            ),
+            connection_scope=ConnectionScope(
+                provider=verified.provider_id,
+                connection_id=verified.connection_id,
+            ),
+            observations=SelectionObservations(
+                runtime_catalog_revision=verified.params["runtime_catalog_revision"],
+                availability_expires_on=verified.model.get("availability_expires_on"),
+            ),
+            content_conditions=conditions,
+            content_conditions_sha256=sha256_params(conditions.to_dict()),
+            cache_epoch=verified.params["minutes_model"]["cache_epoch"],
+            legacy_generation_params=verified.params,
+        )
 
     def _selection(self, config: MeetingConfig, document: dict[str, Any]) -> _Selection:
         if config.minutes_model is None:
