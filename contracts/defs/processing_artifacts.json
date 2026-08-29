@@ -360,7 +360,8 @@
           "description": "Hash of the stable downstream content projection. A changed response projection prevents reuse even when a canonical provider request was identical."
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "description": "One exact direct-edge substitution from an immutable origin dependency to a current-run input. Within one binding, typed/server validation requires every changed direct dependency to have exactly one mapping with the same content projection and rejects duplicate, missing, stale or extra direct mappings; an unchanged dependency identity needs no entry. This object never stands for a transitive dependency. For effective-current comparison, use current_artifact_id only when this exact frozen direct mapping exists; otherwise the immutable dependency ID is its identity mapping. A matching content projection alone never authorizes substitution to a different artifact ID."
     },
     "processing_artifact_binding": {
       "type": "object",
@@ -410,7 +411,7 @@
         }
       },
       "additionalProperties": false,
-      "description": "Current requested-run adoption of an immutable artifact. Only this public dependency closure is registered for reused read membership; raw provider responses and private authorization state are excluded."
+      "description": "Current requested-run adoption of an immutable artifact. Only this public dependency closure is registered for reused read membership; raw provider responses and private authorization state are excluded. This binding's authorization_snapshot_id and dependency_mappings cover only its exact current authorization and direct dependency substitutions, with no missing or extra direct edge. Separately, typed/server publication validation recursively follows those exact direct edges and requires every reached artifact to be owned by or explicitly adopted into the same run under its frozen authorization snapshot."
     },
     "published_ensemble_generator": {
       "type": "object",
@@ -432,7 +433,8 @@
           "$ref": "#/$defs/minutes_model_selection"
         },
         "artifact_id": {
-          "$ref": "#/$defs/processing_artifact_id"
+          "$ref": "#/$defs/processing_artifact_id",
+          "description": "Canonical draft root frozen for this generator by the publication preflight. Its draft parts enumerate the exact (source_artifact_id, document_artifact_id) packet pairs whose packet-local synthesis consumption was proven for this published version."
         },
         "reused": {
           "type": "boolean"
@@ -452,7 +454,8 @@
           "$ref": "#/$defs/minutes_model_selection"
         },
         "artifact_id": {
-          "$ref": "#/$defs/processing_artifact_id"
+          "$ref": "#/$defs/processing_artifact_id",
+          "description": "Validated final synthesis root frozen by the publication preflight. It is one root of the publication proof, not by itself proof that every canonical generator draft part was consumed."
         },
         "reused": {
           "type": "boolean"
@@ -493,7 +496,7 @@
         }
       },
       "additionalProperties": false,
-      "description": "Immutable public selection/artifact snapshot for the published minutes version. Generator IDs must be unique. This snapshot shows adopted outputs; actual provider execution and historical connection revision are followed through artifact origin and generation metadata."
+      "description": "Immutable public selection/artifact snapshot for one published minutes version. The side-effect-free publication preflight freezes this exact existing shape from its run and current bindings before the manifest write: run_id and input_artifact_id; every unique generator ID, label, full selection, canonical draft artifact_id and reused value; and the synthesizer's full selection, final synthesis artifact_id and reused value. These values must equal the preflight-time canonical-slot and binding projection, not a later mutable run display projection. The generator artifact IDs are the canonical draft roots and the synthesizer artifact ID is the final synthesis root; together these multiple roots explain publication coverage. For every raw (source_artifact_id, document_artifact_id) pair in the union of all frozen canonical draft parts, typed/server validation first normalizes both direct IDs through that draft root's frozen dependency_mappings to their effective current-run IDs, using the unchanged ID as an identity mapping when no substitution entry exists. It performs the same normalization for each leaf artifact's immutable direct source/draft_chunk dependencies through that leaf binding. Every mapped artifact ID must be an exact frozen run member or adoption under the frozen authorization snapshot and must satisfy its mapping projection; content equality alone never permits an unrelated current artifact. From the normalized source/document pair, validation reconstructs the draft_chunk's canonical claim/question unit stream and fixed deterministic partition; an empty document contributes one empty sentinel unit. The succeeded or reused packet-local synthesis leaf wires must form the exact disjoint union of those normalized partition occurrences: every nonempty unit and empty sentinel occurs exactly once and no unit is omitted, duplicated or added. Because one document may span partitions, the same source/document pair may legitimately bind multiple leaves; within each leaf its exact current inputs are the packet source plus precisely the unique draft_chunk artifacts contributing units to that occurrence. Every validated nonempty synthesis leaf must also reach the final synthesis root through the effective frozen current-run dependency closure. Only a leaf whose closed artifact validation proves an empty document may remain outside that final closure. All roots, leaves, stable partition ordinals/hashes, downstream aggregation order, run membership, authorization snapshot and direct dependency mappings must match the same frozen publication proof exactly. On acknowledgement, the store persists the published_version and this exact provenance as an immutable publication record. Later generator ID/label/display rebinding never rewrites it and reads never regenerate it from the mutable run public snapshot. get_minutes must acquire the same publication fence, first reconcile an exact manifest candidate whose acknowledgement was interrupted, then compare manifest meta provenance exactly with store get_published_provenance(run_id, published_version). After that reconciliation, a missing record or any mismatch is an internal error. Actual provider execution and historical connection revision remain available through artifact origin and generation metadata."
     },
     "processing_artifact_response": {
       "type": "object",
@@ -709,7 +712,7 @@
           }
         }
       ],
-      "description": "Artifact as adopted by requested_run_id. The server requires requested_run_id == binding.run_id, artifact.artifact_id == binding.artifact_id, reused == binding.reused and verified ownership/reuse membership; artifact.run_id remains its immutable original owner. For a generated external-call artifact, generation.retry_lineage and binding.retry_lineage are both null or exactly equal and also match the corresponding processing node. Kind, payload, origin and generation-nullability are validated together."
+      "description": "Artifact as adopted by requested_run_id. The server requires requested_run_id == binding.run_id, artifact.artifact_id == binding.artifact_id, reused == binding.reused and verified ownership/reuse membership; artifact.run_id remains its immutable original owner. For a generated external-call artifact, generation.retry_lineage and binding.retry_lineage are both null or exactly equal and also match the corresponding processing node. Kind, payload, origin and generation-nullability are validated together. For publication coverage, exact direct mappings are checked per binding, then the effective dependency closure recursively checks ownership or recorded reuse and frozen authorization against the requested run; none is inferred from artifact IDs alone."
     }
   }
 }

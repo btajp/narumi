@@ -15,7 +15,7 @@
         "cancelled",
         "interrupted"
       ],
-      "description": "succeeded means the validated final version is published in the meeting manifest. A running run without an active execution-lease owner is recovered as interrupted if no pending call remains, or blocked with unknown nodes for unresolved pending calls; valid saved receipts are restored without resending. Volatile job disappearance is never proof of completion."
+      "description": "succeeded means the validated final version is published in the meeting manifest. A running run without an active execution-lease owner is recovered as interrupted if no pending call remains, or blocked with unknown nodes for unresolved pending calls; valid saved receipts are restored without resending. Volatile job disappearance is never proof of completion. Ensemble succeeded is acknowledged only after a side-effect-free preflight freezes the exact multi-root coverage proof, the meeting manifest durably publishes that candidate, and acknowledgement revalidates and stores the same proof. One exclusive meeting/configuration/provider publication fence is held across preflight, durable manifest write and acknowledgement, so cancellation or run, authorization, membership or dependency change cannot interleave. Publication-sensitive reads acquire that same fence and cannot observe the manifest between write and acknowledgement. A stop after the manifest write but before acknowledgement is recovered under the fence by first verifying the exact same candidate and version and then completing the acknowledgement; it never republishes, substitutes or regenerates a result. A mismatch is storage corruption/internal error."
     },
     "processing_node_status": {
       "type": "string",
@@ -238,7 +238,7 @@
           }
         }
       ],
-      "description": "One planned text-ensemble node. succeeded and reused require an adopted artifact; succeeded has reused=false, while reused status is equivalent to reused=true. A deterministic derived artifact may legitimately have origin=null. Planned models come from the run ensemble snapshot, not a fabricated origin on an unexecuted node. Implementations validate graph membership, unique IDs, role/generator/slot association, status/artifact/origin/retry-lineage consistency and the 8192 aggregate-binding limit. For a generated external-call artifact with non-null lineage, origin equals resolved_by, and node lineage, artifact generation lineage and public binding lineage are identical; typed/server validation also requires their call/node content fingerprints to equal every attempt fingerprint in the lineage. An original unknown node stays unknown even when a later confirmed attempt succeeds; the resulting artifact keeps the successful retry origin and complete lineage. Reused output is not another independent provider execution."
+      "description": "One planned text-ensemble node. succeeded and reused require an adopted artifact; succeeded has reused=false, while reused status is equivalent to reused=true. A deterministic derived artifact may legitimately have origin=null. Planned models come from the run ensemble snapshot, not a fabricated origin on an unexecuted node. Implementations validate graph membership, unique IDs, role/generator/slot association, status/artifact/origin/retry-lineage consistency and the 8192 aggregate-binding limit. For a generated external-call artifact with non-null lineage, origin equals resolved_by, and node lineage, artifact generation lineage and public binding lineage are identical; typed/server validation also requires their call/node content fingerprints to equal every attempt fingerprint in the lineage. An original unknown node stays unknown even when a later confirmed attempt succeeds; the resulting artifact keeps the successful retry origin and complete lineage. Reused output is not another independent provider execution. A synthesizer chunk leaf is one stable deterministic partition occurrence for one packet. Its current input bindings are exactly the packet source artifact plus only the unique draft_chunk artifacts whose canonical units appear in that occurrence. Its dependency_node_ids are exactly the corresponding generator chunk node IDs; the source is an artifact input, not a node dependency. A draft_chunk may bind multiple leaf occurrences when its units span partitions. Its model-visible request may additionally contain the fixed synthesis instructions and common brief, while its request hash and content fingerprint also bind the selected model content conditions. No request, hash, fingerprint, input binding or dependency includes an aggregate draft or another packet. Stable partition ordinal/hash and canonical unit order determine leaf identity and downstream aggregation order."
     },
     "processing_canonical_slot": {
       "type": "object",
@@ -288,7 +288,7 @@
         }
       },
       "additionalProperties": false,
-      "description": "Current UI generator-to-canonical-slot/artifact projection. In the run array, slot_id, generator_id and canonical_ordinal are each unique; canonical ordinals are 0..n-1. Items are sorted by (selection_scope_sha256, cache_epoch, duplicate_ordinal), and duplicate ordinals within one scope+epoch are 0..k-1. Typed/server validation enforces these cross-item rules."
+      "description": "Current UI generator-to-canonical-slot/artifact projection. In the run array, slot_id, generator_id and canonical_ordinal are each unique; canonical ordinals are 0..n-1. Items are sorted by (selection_scope_sha256, cache_epoch, duplicate_ordinal), and duplicate ordinals within one scope+epoch are 0..k-1. Typed/server validation enforces these cross-item rules. A non-null draft_artifact_id is the current canonical draft root for the slot; its parts form the complete, duplicate-free mapping from every run source packet to that slot's validated draft_chunk artifact. Publication freezes a separate immutable projection, so a later display-only generator ID or label rebind does not change past provenance."
     },
     "processing_draft_artifact_binding": {
       "type": "object",
@@ -305,7 +305,7 @@
         }
       },
       "additionalProperties": false,
-      "description": "A generator draft artifact adopted by this run. Different generators may explicitly share a validated artifact; this is not evidence of two independent generations."
+      "description": "A generator draft artifact adopted by this run. Different generators may explicitly share a validated artifact; this is not evidence of two independent generations. At publication it is a coverage root, not an assertion that the final synthesis artifact alone reaches this draft."
     },
     "processing_run_summary": {
       "type": "object",
@@ -445,7 +445,8 @@
           "items": {
             "$ref": "#/$defs/processing_draft_artifact_binding"
           },
-          "maxItems": 8192
+          "maxItems": 8192,
+          "description": "Current generator-to-canonical-draft roots. Publication coverage uses these roots together with synthesis_artifact_id and requires exact agreement with canonical_slots."
         },
         "synthesis_artifact_id": {
           "oneOf": [
@@ -455,7 +456,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Validated final synthesis root, or null before publication. This single closure is not the whole coverage proof; canonical draft roots and their exact packet-part consumption are validated alongside it."
         },
         "published_version": {
           "type": [
@@ -539,7 +541,7 @@
           }
         }
       ],
-      "description": "Durable minutes-ensemble execution record. succeeded means a non-null synthesis artifact and published version, no blocked call and no run error; blocked means at least one typed blocked call. ensemble and policy are the fixed current-run authorization snapshot; historical calls retain separate origin. The semantic run/64-attempt identity excludes connection revision, generator IDs, labels and UI order: it uses the multiset of resolver content scopes with cache_epoch, deterministic duplicate ordinals and synthesizer content scope. Changes to excluded identities adopt canonical slots/artifacts without starting a new run or provider send, while current authorization is still revalidated. A read validates at most 4096 nodes and 8192 aggregate bindings, graph/artifact membership, unique current generator identity and publication truth. Partial successful drafts remain readable without a published final version. No synthetic runs are created for legacy single generation or ASR."
+      "description": "Durable minutes-ensemble execution record. succeeded means a non-null synthesis artifact and published version, no blocked call and no run error; blocked means at least one typed blocked call. ensemble and policy are the fixed current-run authorization snapshot; historical calls retain separate origin. The semantic run/64-attempt identity excludes connection revision, generator IDs, labels and UI order: it uses the multiset of resolver content scopes with cache_epoch, deterministic duplicate ordinals and synthesizer content scope. Changes to excluded identities adopt canonical slots/artifacts without starting a new run or provider send, while current authorization is still revalidated. A read validates at most 4096 nodes and 8192 aggregate bindings, graph/artifact membership, unique current generator identity and publication truth. Partial successful drafts remain readable without a published final version. No synthetic runs are created for legacy single generation or ASR. Publication uses a frozen multi-root proof rather than requiring every canonical draft root to appear in the final artifact's single dependency closure. The proof consists of all preflight-time canonical draft roots plus the final synthesis root. For every canonical draft's raw source/document pair and every leaf artifact's immutable direct source/draft_chunk dependency, validation first applies that artifact binding's frozen direct dependency mapping to obtain the effective current-run IDs, using the unchanged ID as an identity mapping. The mapped IDs must be exact frozen members/adoptions under the frozen authorization and mapping projection; content equality alone cannot select a different artifact. Each normalized draft pair's canonical claim/question unit stream is then deterministically partitioned under the fixed limits, with one sentinel for an empty document. The leaf wires must be the exact disjoint union of these stable normalized partition occurrences: every unit/sentinel appears once with no omission, duplicate or extra unit. The same source/document pair may repeat across leaves only when its document spans occurrences; each leaf's current inputs must equal its packet source plus exactly the contributing draft_chunk artifacts. Every validated nonempty leaf reaches the final root through effective frozen current-run direct dependency mappings; only a validated empty leaf may be outside that closure. Partition ordinal/hash and the provider-free downstream aggregation order are frozen too. Preflight is side-effect-free and freezes the run, invocation, authorization, membership, roots, current bindings, mappings and public provenance. One exclusive publication fence is held until the manifest write is durable and the same proof/version is revalidated and saved as an immutable publication record. Cancellation, mutation and publication-sensitive reads cannot interleave. Stop recovery first reconciles an already-written exact manifest candidate and completes acknowledgement; a different candidate/version or proof is corruption and never replaces the published result."
     }
   }
 }
