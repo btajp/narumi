@@ -129,6 +129,7 @@ struct JobsToolbarButton: View {
 
 struct JobsListView: View {
     @ObservedObject var model: MainWindowModel
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -141,9 +142,21 @@ struct JobsListView: View {
                 .disabled(model.jobs.allSatisfy(\.isActive))
             }
             if model.unresolvedJobRequestCount > 0 {
-                Text("操作結果を再確認中です。確認が終わるまでアップデートを延期します。")
+                Text(model.transcriptionRequestRecovery.requests.isEmpty
+                     ? "操作結果を再確認中です。確認が終わるまでアップデートを延期します。"
+                     : "音声再送の受付結果が未確認です。自動では再送せず、録画開始と更新を保留しています。")
                     .font(.caption)
                     .foregroundStyle(.orange)
+            }
+            ForEach(model.transcriptionRequestRecovery.requests) { request in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(request.meetingID).font(.caption)
+                    Button("文字起こしタブで元の要求を確認") {
+                        model.selectedMeetingID = request.meetingID
+                        model.selectedTab = .transcript
+                        dismiss()
+                    }
+                }
             }
             if model.jobs.isEmpty {
                 Text(model.activeJobCount > 0 ? "ジョブの状態を確認中…" : "ジョブはありません")

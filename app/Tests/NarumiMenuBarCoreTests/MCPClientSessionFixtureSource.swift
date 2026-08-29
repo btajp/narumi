@@ -22,22 +22,26 @@ enum MCPClientSessionFixtureSource {
         private var tools: [String] = []
         private var methods: [String] = []
         private var argumentsByTool: [String: [[String: JSONNode]]] = [:]
+        private var httpMethodsByTool: [String: [String]] = [:]
         private var savedConfig: [String: JSONNode] = [:]
         private var savedProfile: JSONNode = .object([:])
+        private var acceptedGenerationRequests = 0
         init(_ scenario: String) { self.scenario = scenario }
         func invalidate() {}
         func count(_ tool: String) -> Int { lock.withLock { tools.filter { $0 == tool }.count } }
         var calls: [String] { lock.withLock { tools } }
         var allMethods: [String] { lock.withLock { methods } }
+        var acceptedGenerationCount: Int { lock.withLock { acceptedGenerationRequests } }
         func arguments(_ tool: String) -> [[String: JSONNode]] { lock.withLock { argumentsByTool[tool] ?? [] } }
+        func httpMethods(_ tool: String) -> [String] { lock.withLock { httpMethodsByTool[tool] ?? [] } }
 
         private var contractVersion: String {
             switch scenario {
             case "v1": return "1.1.0"
-            case "future_contract": return "5.0.0"
+            case "future_contract": return "6.0.0"
             case "codex_minutes_requests": return "3.0.0"
-            case "minutes_requests": return "4.0.0"
-            default: return "2.0.0"
+            case "minutes_requests", "minutes_retry_response_lost": return "4.0.0"
+            default: return scenario.hasPrefix("transcription_") ? "5.0.0" : "2.0.0"
             }
         }
 
@@ -49,7 +53,10 @@ enum MCPClientSessionFixtureSource {
             let id = rpc["id"]!
             if method == "initialize" { return try result(request, id: id, value: .object([:])) }
             let name = rpc["params"]!["name"]!.stringValue!
-            lock.withLock { tools.append(name) }
+            lock.withLock {
+                tools.append(name)
+                httpMethodsByTool[name, default: []].append(request.httpMethod ?? "")
+            }
             if let value = rpc["params"]?["arguments"], case .object(let arguments) = value {
                 lock.withLock { argumentsByTool[name, default: []].append(arguments) }
             }
@@ -82,6 +89,9 @@ enum MCPClientSessionFixtureSource {
             }
             if scenario == "malformed" {
                 return response(request, status: 200, body: Data(("invalid-json " + fixtureSecret).utf8))
+            }
+            if let transcription = try transcriptionResponse(request, id: id, name: name) {
+                return transcription
             }
             if ["minutes_requests", "codex_minutes_requests", "legacy_minutes_requests"].contains(scenario) {
                 let input = arguments(name).last ?? [:]
@@ -180,9 +190,11 @@ enum MCPClientSessionFixtureSource {
                 certificatePEM: LoopbackTLSCertificate.certificatePEM,
                 tokenAccount: "transport:" + String(repeating: "a", count: 64) + ":" + instance)
             let connection = try MCPServerConnection(bootstrap: bootstrap, token: "fixture-public-token-long-enough-1234")
-            func client(_ scenario: String, failBootstrap: Bool = false) -> (MCPClient, FakeHTTP) {
+            func client(
+                _ scenario: String, failBootstrap: Bool = false, observer: MCPClient.JobRequestObserver? = nil
+            ) -> (MCPClient, FakeHTTP) {
                 let http = FakeHTTP(scenario)
-                return (MCPClient(config: config, clientVersion: "test",
+                return (MCPClient(config: config, clientVersion: "test", jobRequestObserver: observer,
                     bootstrapLoader: FakeBootstrap(connection: connection, fail: failBootstrap),
                     transportFactory: { _ in http }), http)
             }
@@ -266,12 +278,14 @@ enum MCPClientSessionFixtureSource {
             let reloadedLegacy = try await legacyTyped.meeting(id: "20260829T000000Z-a1b2c3d4", scope: nil)
             checks["legacy_meeting_config_omits_new_field"] =
                 legacyWire.arguments(ToolCatalog.setMeetingConfig).last?["minutes_model"] == nil
+                && legacyWire.arguments(ToolCatalog.setMeetingConfig).last?["transcription_model"] == nil
                 && savedLegacy.config == legacy && reloadedLegacy.config == legacy
             let legacyProfile = try await legacyTyped.setProfile(
                 name: "fixture-legacy", updates: ["config": .object(legacyUpdates)])
             let reloadedLegacyProfile = try await legacyTyped.profile(name: "fixture-legacy")
             checks["legacy_profile_omits_new_field"] =
                 legacyWire.arguments(ToolCatalog.setProfile).last?["config"]?["minutes_model"] == nil
+                && legacyWire.arguments(ToolCatalog.setProfile).last?["config"]?["transcription_model"] == nil
                 && legacyProfile.config == legacy && reloadedLegacyProfile.config == legacy
             checks["legacy_save_does_not_regenerate"] = legacyWire.count(ToolCatalog.regenerate) == 0
             _ = try await legacyTyped.regenerate(
@@ -283,6 +297,59 @@ enum MCPClientSessionFixtureSource {
             checks["legacy_generation_omits_new_config_field"] = legacyGeneration["expected_config"] == nil
                 && legacyGeneration["force"] == .bool(true)
                 && legacyWire.arguments(ToolCatalog.registerContext).last?["expected_config"] == nil
+            for (prefix, modelID) in [("v5_whisper", "whisper-1"), ("v5_diarize", "gpt-4o-transcribe-diarize")] {
+                let (transcriptionMCP, transcriptionWire) = client("transcription_requests")
+                let results = try await checkTranscriptionSelection(
+                    modelID: modelID, client: NarumiClient(mcp: transcriptionMCP), wire: transcriptionWire)
+                for (name, passed) in results { checks[prefix + "_" + name] = passed }
+            }
+            let (v4MCP, v4Wire) = client("minutes_requests")
+            for (name, passed) in try await checkTranscriptionLegacy(client: NarumiClient(mcp: v4MCP), wire: v4Wire) {
+                checks[name] = passed
+            }
+            for scenario in ["transcription_unknown", "transcription_unknown_invalid"] {
+                let (unknownMCP, _) = client(scenario)
+                for (name, passed) in try await checkTranscriptionUnknown(
+                    client: NarumiClient(mcp: unknownMCP), valid: scenario == "transcription_unknown") {
+                    checks[name] = passed
+                }
+            }
+            let (profileUnknownMCP, profileUnknownWire) = client("transcription_profile_save_unknown")
+            let (profileRawMCP, _) = client("transcription_profile_save_unknown")
+            for (name, passed) in try await checkProfileSaveUnknown(
+                client: NarumiClient(mcp: profileUnknownMCP), wire: profileUnknownWire, rawClient: profileRawMCP) {
+                checks[name] = passed
+            }
+            for event in ["unreached", "response_lost", "cancelled", "wrong_meeting", "invalid_receipt"] {
+                let (retryMCP, retryWire) = client("transcription_retry_" + event)
+                for (name, passed) in try await checkTranscriptionRetryLoss(
+                    client: NarumiClient(mcp: retryMCP), wire: retryWire, accepted: event != "unreached") {
+                    checks["asr_retry_" + event + "_" + name] = passed
+                }
+            }
+            for code in ["configuration_conflict", "authentication_required", "model_unavailable"] {
+                let (rejectedMCP, rejectedWire) = client("transcription_retry_rejected_" + code)
+                checks["asr_retry_preflight_" + code] = try await checkTranscriptionRetryRejection(
+                    client: NarumiClient(mcp: rejectedMCP), wire: rejectedWire, code: code)
+            }
+            for (scenario, key, minutes) in [
+                ("transcription_ordinary_response_lost", "ordinary_asr_response_loss_recovers", false),
+                ("minutes_retry_response_lost", "minutes_response_loss_recovers", true),
+            ] {
+                let (ordinaryMCP, ordinaryWire) = client(scenario)
+                checks[key] = try await checkOrdinaryGenerationRecovery(
+                    client: NarumiClient(mcp: ordinaryMCP), wire: ordinaryWire, minutes: minutes)
+            }
+            for outcome in ["success", "configuration_conflict", "authentication_required", "model_unavailable", "invalid_receipt", "wrong_meeting"] {
+                let notifications = FixtureJobNotifications()
+                let (manualMCP, manualWire) = client("transcription_manual_" + outcome, observer: { _, pending, _, jobs in
+                    notifications.record(pending: pending, jobs: jobs)
+                })
+                for (name, passed) in try await checkManualTranscriptionRecovery(
+                    client: NarumiClient(mcp: manualMCP), wire: manualWire, notifications: notifications, outcome: outcome) {
+                    checks["asr_manual_" + outcome + "_" + name] = passed
+                }
+            }
             print(String(decoding: try JSONEncoder().encode(checks), as: UTF8.self))
         }
 

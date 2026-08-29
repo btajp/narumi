@@ -8,6 +8,8 @@ struct TranscriptTabView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            TranscriptionRetryView(model: model)
+            TranscriptionRequestRecoveryView(model: model)
             controls
             Divider()
             content

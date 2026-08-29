@@ -48,7 +48,8 @@ struct SettingsTabView: View {
     private var configSection: some View {
         Section("会議設定（保存後、反映には再生成が必要）") {
             ProcessingConfigurationFields(
-                form: $form.processing, capabilities: capabilities, catalog: model.minutesModelCatalog)
+                form: $form.processing, capabilities: capabilities, catalog: model.minutesModelCatalog,
+                transcriptionCatalog: model.transcriptionModelCatalog)
             TextField("scope（空 = scope なし）", text: $form.scopeText)
             Button(saving ? "保存中…" : "保存") {
                 let draft = form
@@ -61,9 +62,18 @@ struct SettingsTabView: View {
                     saving = false
                 }
             }
-            .disabled(saving || (form.processing.minutesModel.mode == .selected
-                && (model.minutesModelCatalog.isLoading
-                    || model.minutesModelCatalog.validationMessage(for: form.processing) != nil)))
+            .disabled(saving || loadedMeetingID != model.selectedMeetingID
+                || model.configurationValidationMessage(for: form.processing) != nil)
+            Button("保存済みの設定を読み直す") {
+                let meetingID = model.selectedMeetingID
+                Task {
+                    await model.loadDetail()
+                    guard model.selectedMeetingID == meetingID else { return }
+                    loadedMeetingID = nil
+                    syncForm()
+                }
+            }
+            .help("入力中の変更を破棄し、現在保存されている設定を読み込みます。")
         }
         .disabled(saving)
     }

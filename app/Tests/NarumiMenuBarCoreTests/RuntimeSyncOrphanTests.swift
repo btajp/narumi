@@ -145,7 +145,8 @@ final class RuntimeSyncOrphanTests: XCTestCase {
             + [
                 "RuntimeSyncOwnership.swift", "RuntimeGuards.swift", "RuntimeInstallation.swift", "RuntimeSyncPlan.swift", "RuntimeManifest.swift",
                 "ServerCommand.swift", "ServerConfig.swift", "ServerReadiness.swift", "ServerState.swift", "OwnedServerRecovery.swift",
-                "ContractModels.swift", "MinutesModelSelection.swift", "RecordingPermissionModels.swift", "ToolCatalog.swift",
+                "ContractModels.swift", "MinutesModelSelection.swift", "TranscriptionModelSelection.swift",
+                "TranscriptionRetry.swift", "ToolErrorInfo.swift", "RecordingPermissionModels.swift", "ToolCatalog.swift",
                 "MCPServerEndpoint.swift", "ProviderWorkflowCapabilities.swift", "KeychainHelperLocation.swift",
             ]
                 .map { core.appendingPathComponent($0).path }
