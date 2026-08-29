@@ -3,6 +3,7 @@
 import json
 import plistlib
 import stat
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 
 from .bundle_artifact_fixtures import (
     PROMPTS,
+    ROOT,
     app_zip,
     make_app,
     replace_wheel,
@@ -33,6 +35,33 @@ def test_inventory_accepts_runtime_and_tracked_prompts(tmp_path: Path, archive: 
     files = {entry["path"]: entry for entry in inventory["entries"]}
     assert files["Contents/Resources/runtime/uv"]["sha256"]
     assert all(not path.startswith("/") for path in files)
+
+
+def test_repository_wheels_match_tracked_package_sources(tmp_path: Path):
+    """Exercise real package data so matching synthetic allowlists cannot hide omissions."""
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z", "--", "pipeline/src/narumi", "server/src/narumi_server"],
+        cwd=ROOT,
+        capture_output=True,
+        check=True,
+        timeout=20,
+    )
+    source_list = write_file(tmp_path / "tracked-sources.nul", tracked.stdout)
+    wheels = tmp_path / "wheels"
+    for package in ("narumi", "narumi-server"):
+        build = subprocess.run(
+            ["uv", "build", "--wheel", "--package", package, "--out-dir", str(wheels)],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=120,
+        )
+        assert build.returncode == 0, build.stderr
+    result = run_inventory(
+        "copy-wheels", wheels, tmp_path / "runtime-wheels", "--tracked-sources", source_list
+    )
+    assert result.returncode == 0, result.stderr
+    assert len(json.loads(result.stdout)["files"]) == 2
 
 
 @pytest.mark.parametrize("archive", [False, True])

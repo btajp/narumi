@@ -324,6 +324,13 @@ final class ContractModelsTests: XCTestCase {
         XCTAssertEqual(stdio.serverInstanceID, "00000000-0000-4000-8000-000000000002")
         XCTAssertFalse(stdio.capabilities.recording)
         XCTAssertFalse(stdio.capabilities.permissionSetupInProgress)
+        XCTAssertEqual(stdio.capabilities.workflow?.providerConnections, false)
+        XCTAssertEqual(stdio.capabilities.workflow?.providerModels, false)
+        XCTAssertEqual(stdio.capabilities.workflow?.stageModelSelection, false)
+        XCTAssertEqual(stdio.capabilities.minutesModelProviders ?? [], [])
+        XCTAssertEqual(stdio.secureTransport?.mode, "stdio")
+        XCTAssertEqual(stdio.secureTransport?.tlsRequired, false)
+        XCTAssertEqual(stdio.secureTransport?.clientAuthRequired, false)
         XCTAssertNil(stdio.capabilities.permissions)
         XCTAssertNil(stdio.diagnostics.ffmpeg)  // JSON null
         XCTAssertNil(stdio.diagnostics.recorderPath)
