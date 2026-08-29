@@ -215,7 +215,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Durable minutes-ensemble run produced by this successful job, or null when the successful operation did not run a minutes ensemble. The field is never omitted from a success result."
+              "description": "Durable minutes-ensemble run produced by this successful job, or null when the successful operation did not run a minutes ensemble. A succeeded regenerate whose result.stages contains minutes_ensemble must return a non-null run ID. The field is never omitted from a success result."
             }
           },
           "additionalProperties": true
@@ -273,6 +273,48 @@
                 "properties": {
                   "processing_run_id": {
                     "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "status",
+              "kind",
+              "result"
+            ],
+            "properties": {
+              "status": {
+                "const": "succeeded"
+              },
+              "kind": {
+                "const": "regenerate"
+              },
+              "result": {
+                "required": [
+                  "stages"
+                ],
+                "properties": {
+                  "stages": {
+                    "type": "array",
+                    "contains": {
+                      "const": "minutes_ensemble"
+                    },
+                    "minContains": 1
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "properties": {
+                  "processing_run_id": {
+                    "$ref": "#/$defs/processing_run_id"
                   }
                 }
               }

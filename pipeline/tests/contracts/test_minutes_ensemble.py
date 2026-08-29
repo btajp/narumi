@@ -361,6 +361,22 @@ def test_success_job_result_requires_nullable_processing_run_id(
     with pytest.raises(ContractMismatchError):
         contracts.validate_output("get_job_status", export)
 
+    ensemble = deepcopy(
+        next(
+            item
+            for item in contracts["get_job_status"].output_examples
+            if "minutes_ensemble" in item["job"].get("result", {}).get("stages", [])
+        )
+    )
+    ensemble["job"]["result"]["processing_run_id"] = None
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("get_job_status", ensemble)
+
+    single = deepcopy(ensemble)
+    single["job"]["processing_run_id"] = None
+    single["job"]["result"]["stages"] = ["generate"]
+    contracts.validate_output("get_job_status", single)
+
 
 @pytest.mark.parametrize("tool", ["get_job_status", "cancel_job"])
 def test_every_job_requires_nullable_processing_run_id(contracts: ContractSet, tool: str) -> None:
