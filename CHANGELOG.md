@@ -6,6 +6,7 @@ narumi（narumi.app / pipeline / server）の変更履歴。最新の版を先�
 
 ## 0.5.0 - 2026-08-29
 
+- 配布版に OpenAI 公式 Codex CLI 0.150.1 の arm64 runtime と Apache-2.0 LICENSE / NOTICE を固定同梱。外部インストール不要で準備でき、欠落・変更時は外部環境へ切り替えず停止
 - OpenAI 音声認識 API の `whisper-1` と `gpt-4o-transcribe-diarize` を追加。ローカル Whisper の既定設定は維持
 - 会議設定とプロファイルから音声用の接続・モデル・言語を選択可能にし、議事録用モデル候補とは用途を分離
 - API 音声送信には `api_ok` の明示選択を必須化。保存・候補表示だけでは音声を送らず、マイクとシステム音声は別々に処理

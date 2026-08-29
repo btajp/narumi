@@ -8,8 +8,8 @@
 #   --release               リリースビルド: ${APPLE_SIGNING_IDENTITY}（Developer ID）必須、
 #                           hardened runtime + timestamp で署名、Sparkle.framework と
 #                           SUPublicEDKey が無ければエラー
-#   --runtime               Contents/Resources/runtime/ を組み立てる（uv バイナリ・wheels・
-#                           requirements.txt・contracts・manifest.json — 自己完結 .app 用）
+#   --runtime               Contents/Resources/runtime/ を組み立てる（uv / Codex バイナリ・
+#                           wheels・requirements.txt・contracts・manifest.json — 自己完結 .app 用）
 #   --version-override <v>  CFBundleShortVersionString / manifest の app_version を上書き
 #                           （既定: VERSION ファイル。更新 E2E 用）
 #   --build-override <n>    CFBundleVersion を上書き（既定: git rev-list --count HEAD。
@@ -23,6 +23,8 @@
 #                            無ければ警告してキーを埋め込まない。--release では必須）
 #   NARUMI_UV_CACHE_DIR      uv 配布物のダウンロードキャッシュ
 #                            （既定 ~/Library/Caches/narumi-build/uv。sha256 は毎回検証）
+#   NARUMI_CODEX_CACHE_DIR   OpenAI Codex 配布物のダウンロードキャッシュ
+#                            （既定 ~/Library/Caches/narumi-build/codex。size / sha256 は毎回検証）
 #   NARUMI_TRACKED_SOURCES   wheel と照合する Git 管理下の source path（NUL 区切り）。
 #                            release-app.sh が作成する。指定時は未管理ファイル混入を拒否
 set -euo pipefail
@@ -34,11 +36,13 @@ APP_NAME="narumi"
 BUNDLE_ID="jp.btajp.narumi"
 BUNDLE="$DIST_DIR/$APP_NAME.app"
 RUNTIME_LOCK="$ROOT/scripts/runtime.lock.json"
+CODEX_LOCK_ANCHOR="$ROOT/pipeline/src/narumi/providers/codex/_runtime_lock.py"
 APP_ICON="$APP_DIR/Assets/AppIcon.icns"
 RECORDING_ENTITLEMENTS="$APP_DIR/recording.entitlements.plist"
 INVENTORY="$ROOT/scripts/bundle_inventory.py"
 PUBLIC_KEY_FILE="${SPARKLE_PUBLIC_KEY_FILE:-$APP_DIR/sparkle-public-key.txt}"
 UV_CACHE_DIR="${NARUMI_UV_CACHE_DIR:-$HOME/Library/Caches/narumi-build/uv}"
+CODEX_CACHE_DIR="${NARUMI_CODEX_CACHE_DIR:-$HOME/Library/Caches/narumi-build/codex}"
 FEED_URL="https://github.com/btajp/narumi/releases/latest/download/appcast.xml"
 
 SKIP_BUILD=0
@@ -74,6 +78,34 @@ key = "com.apple.security.device.audio-input"
 if not isinstance(entitlements, dict) or set(entitlements) != {key} or entitlements[key] is not True:
     sys.exit(1)
 '
+}
+
+require_arm64_macho() {
+  python3 - "$1" <<'PY'
+import struct
+import sys
+
+with open(sys.argv[1], "rb") as binary:
+    header = binary.read(8)
+if len(header) != 8 or header[:4] != b"\xcf\xfa\xed\xfe":
+    sys.exit(1)
+if struct.unpack("<I", header[4:])[0] != 0x0100000C:
+    sys.exit(1)
+PY
+}
+
+runtime_lock_value() {
+  python3 -c '
+import json
+import sys
+
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+for key in sys.argv[2:]:
+    value = value[key]
+if isinstance(value, (dict, list, bool)) or value is None:
+    raise SystemExit("runtime lock scalar expected")
+print(value)
+' "$RUNTIME_LOCK" "$@"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -119,6 +151,28 @@ validate_recording_entitlements < "$RECORDING_ENTITLEMENTS" \
 python3 "$INVENTORY" --help >/dev/null || fail "bundle inventory helper を起動できません"
 if [[ -n "${NARUMI_TRACKED_SOURCES:-}" ]]; then
   [[ -f "$NARUMI_TRACKED_SOURCES" ]] || fail "NARUMI_TRACKED_SOURCES のファイルがありません"
+fi
+if [[ $WITH_RUNTIME -eq 1 ]]; then
+  [[ "$(uname -m)" == "arm64" ]] \
+    || fail "bundled runtime は Apple Silicon（arm64）ホストでのみ組み立てられます"
+  command -v env >/dev/null 2>&1 || fail "env が必要です（Codex version 隔離検証）"
+  command -v arch >/dev/null 2>&1 || fail "arch が必要です（Codex version 検証）"
+  command -v codesign >/dev/null 2>&1 || fail "codesign が必要です（Codex 署名検証）"
+  [[ -f "$RUNTIME_LOCK" && ! -L "$RUNTIME_LOCK" ]] \
+    || fail "runtime.lock.json がありません: $RUNTIME_LOCK"
+  [[ -f "$CODEX_LOCK_ANCHOR" && ! -L "$CODEX_LOCK_ANCHOR" ]] \
+    || fail "Codex runtime trust anchor がありません: $CODEX_LOCK_ANCHOR"
+  python3 - "$RUNTIME_LOCK" "$CODEX_LOCK_ANCHOR" <<'PY' \
+    || fail "runtime.lock.json の Codex metadata が実行時 trust anchor と一致しません"
+import json
+import runpy
+import sys
+
+document = json.loads(open(sys.argv[1], encoding="utf-8").read())
+expected = runpy.run_path(sys.argv[2]).get("CODEX_RUNTIME_LOCK")
+if type(document) is not dict or type(expected) is not dict or document.get("codex") != expected:
+    raise SystemExit(1)
+PY
 fi
 
 # --- versions ------------------------------------------------------------------------------
@@ -168,6 +222,10 @@ BIN_DIR="$APP_DIR/.build/release"
 for bin in NarumiMenuBar narumi-recorder narumi-keychain; do
   [[ -x "$BIN_DIR/$bin" ]] \
     || fail "missing binary: $BIN_DIR/$bin (run without --skip-build)"
+  if [[ $WITH_RUNTIME -eq 1 ]]; then
+    require_arm64_macho "$BIN_DIR/$bin" \
+      || fail "bundled runtime 用の Swift バイナリは arm64 Mach-O が必要です: $BIN_DIR/$bin"
+  fi
 done
 
 echo "==> assembling $BUNDLE (version $VERSION, build $BUILD_NUMBER)"
@@ -211,11 +269,85 @@ if [[ $WITH_RUNTIME -eq 1 ]]; then
   RUNTIME_DIR="$BUNDLE/Contents/Resources/runtime"
   mkdir -p "$RUNTIME_DIR"
 
-  [[ -f "$RUNTIME_LOCK" ]] || fail "runtime.lock.json がありません: $RUNTIME_LOCK"
   UV_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["uv"]["version"])' "$RUNTIME_LOCK")"
   UV_ARTIFACT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["uv"]["artifact"])' "$RUNTIME_LOCK")"
   UV_URL="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["uv"]["url"])' "$RUNTIME_LOCK")"
   UV_SHA256="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["uv"]["sha256"])' "$RUNTIME_LOCK")"
+  CODEX_VERSION="$(runtime_lock_value codex version)"
+  CODEX_SOURCE_TAG="$(runtime_lock_value codex source_tag)"
+  CODEX_ARTIFACT="$(runtime_lock_value codex artifact name)"
+  CODEX_URL="$(runtime_lock_value codex artifact url)"
+  CODEX_ARCHIVE_SHA256="$(runtime_lock_value codex artifact sha256)"
+  CODEX_ARCHIVE_SIZE="$(runtime_lock_value codex artifact size)"
+  CODEX_ARCHIVE_ENTRY="$(runtime_lock_value codex artifact entry)"
+  CODEX_BINARY_PATH="$(runtime_lock_value codex binary path)"
+  CODEX_BINARY_SHA256="$(runtime_lock_value codex binary sha256)"
+  CODEX_BINARY_SIZE="$(runtime_lock_value codex binary size)"
+  CODEX_ARCHITECTURE="$(runtime_lock_value codex binary architecture)"
+  CODEX_VERSION_OUTPUT="$(runtime_lock_value codex binary version_output)"
+  CODEX_TEAM_ID="$(runtime_lock_value codex binary publisher_team_id)"
+  CODEX_LICENSE_PATH="$(runtime_lock_value codex license path)"
+  CODEX_LICENSE_SHA256="$(runtime_lock_value codex license sha256)"
+  CODEX_LICENSE_SIZE="$(runtime_lock_value codex license size)"
+  CODEX_NOTICE_PATH="$(runtime_lock_value codex license notice_path)"
+  CODEX_NOTICE_SHA256="$(runtime_lock_value codex license notice_sha256)"
+  CODEX_NOTICE_SIZE="$(runtime_lock_value codex license notice_size)"
+
+  [[ "$CODEX_SOURCE_TAG" == "rust-v$CODEX_VERSION" ]] \
+    || fail "Codex source tag と version が一致しません"
+  [[ "$CODEX_ARTIFACT" == "codex-aarch64-apple-darwin.tar.gz" \
+    && "$CODEX_ARCHIVE_ENTRY" == "codex-aarch64-apple-darwin" \
+    && "$CODEX_BINARY_PATH" == "codex/$CODEX_VERSION/codex" \
+    && "$CODEX_ARCHITECTURE" == "arm64" ]] \
+    || fail "Codex runtime lock の artifact / path / architecture が不正です"
+  [[ "$CODEX_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ \
+    && "$CODEX_BINARY_SHA256" =~ ^[0-9a-f]{64}$ \
+    && "$CODEX_LICENSE_SHA256" =~ ^[0-9a-f]{64}$ \
+    && "$CODEX_NOTICE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || fail "Codex runtime lock の sha256 が不正です"
+  [[ "$CODEX_ARCHIVE_SIZE" =~ ^[1-9][0-9]*$ \
+    && "$CODEX_BINARY_SIZE" =~ ^[1-9][0-9]*$ \
+    && "$CODEX_LICENSE_SIZE" =~ ^[1-9][0-9]*$ \
+    && "$CODEX_NOTICE_SIZE" =~ ^[1-9][0-9]*$ ]] \
+    || fail "Codex runtime lock の size が不正です"
+  [[ "$CODEX_LICENSE_PATH" == licenses/* && "$CODEX_LICENSE_PATH" != *".."* \
+    && "$CODEX_NOTICE_PATH" == licenses/* && "$CODEX_NOTICE_PATH" != *".."* ]] \
+    || fail "Codex license path が不正です"
+
+  verify_locked_file() {
+    local path="$1" expected_sha="$2" expected_size="$3"
+    [[ -f "$path" && ! -L "$path" ]] || return 1
+    [[ "$(wc -c < "$path" | tr -d '[:space:]')" == "$expected_size" ]] || return 1
+    echo "$expected_sha  $path" | shasum -a 256 --check --status
+  }
+
+  verify_codex_binary() {
+    local path="$1" version_output signature_details
+    verify_locked_file "$path" "$CODEX_BINARY_SHA256" "$CODEX_BINARY_SIZE" \
+      || fail "Codex binary の size / sha256 が runtime.lock.json と一致しません"
+    require_arm64_macho "$path" || fail "Codex binary は arm64 Mach-O ではありません"
+    version_output="$(
+      set -e
+      probe_root="$(mktemp -d)"
+      trap 'rm -rf "$probe_root"' EXIT
+      mkdir -p "$probe_root/home" "$probe_root/codex-home" "$probe_root/tmp"
+      env -i \
+        HOME="$probe_root/home" \
+        CODEX_HOME="$probe_root/codex-home" \
+        TMPDIR="$probe_root/tmp" \
+        PATH=/usr/bin:/bin \
+        arch -arm64 "$path" --version 2>&1
+    )" \
+      || fail "Codex binary の version を実行検証できません"
+    [[ "$version_output" == "$CODEX_VERSION_OUTPUT" ]] \
+      || fail "Codex binary の version output が runtime.lock.json と一致しません"
+    codesign --verify --strict --verbose=1 "$path" \
+      || fail "OpenAI Codex の署名を検証できません"
+    signature_details="$(codesign --display --verbose=4 "$path" 2>&1)" \
+      || fail "OpenAI Codex の署名情報を取得できません"
+    printf '%s\n' "$signature_details" | grep -Fqx "TeamIdentifier=$CODEX_TEAM_ID" \
+      || fail "OpenAI Codex の TeamIdentifier が一致しません"
+  }
 
   # uv 単体バイナリ: キャッシュ → sha256 検証 →（無ければ）ダウンロード → 再検証 → 展開
   UV_CACHED="$UV_CACHE_DIR/$UV_VERSION/$UV_ARTIFACT"
@@ -238,6 +370,66 @@ if [[ $WITH_RUNTIME -eq 1 ]]; then
   cp "$UV_EXTRACT/uv-aarch64-apple-darwin/uv" "$RUNTIME_DIR/uv"
   chmod 755 "$RUNTIME_DIR/uv"
   rm -rf "$UV_EXTRACT"
+
+  # OpenAI Codex: cache / archive / exact member / binary / publisher signature を検査する。
+  # upstream の Developer ID 署名を保持するため、このバイナリを narumi の identity では再署名しない。
+  CODEX_CACHED="$CODEX_CACHE_DIR/$CODEX_VERSION/$CODEX_ARTIFACT"
+  if verify_locked_file "$CODEX_CACHED" "$CODEX_ARCHIVE_SHA256" "$CODEX_ARCHIVE_SIZE"; then
+    echo "==> Codex $CODEX_VERSION (cached: $CODEX_CACHED)"
+  else
+    echo "==> downloading OpenAI Codex $CODEX_VERSION"
+    mkdir -p "$(dirname "$CODEX_CACHED")"
+    (
+      CODEX_DOWNLOAD="$(mktemp "$CODEX_CACHED.tmp.XXXXXX")"
+      trap 'rm -f "$CODEX_DOWNLOAD"' EXIT
+      curl -fsSL --retry 3 --max-time 600 -o "$CODEX_DOWNLOAD" "$CODEX_URL"
+      verify_locked_file "$CODEX_DOWNLOAD" "$CODEX_ARCHIVE_SHA256" "$CODEX_ARCHIVE_SIZE" \
+        || fail "Codex 配布物の size / sha256 が runtime.lock.json と一致しません"
+      mv "$CODEX_DOWNLOAD" "$CODEX_CACHED"
+    )
+  fi
+  (
+    CODEX_EXTRACT="$(mktemp -d)"
+    trap 'rm -rf "$CODEX_EXTRACT"' EXIT
+    python3 - "$CODEX_CACHED" "$CODEX_EXTRACT/codex" "$CODEX_ARCHIVE_ENTRY" \
+      "$CODEX_BINARY_SIZE" <<'PY'
+import pathlib
+import shutil
+import sys
+import tarfile
+
+archive_path, output_path, expected_name, expected_size = sys.argv[1:]
+with tarfile.open(archive_path, "r:gz") as archive:
+    members = archive.getmembers()
+    if len(members) != 1:
+        raise SystemExit("Codex archive must contain exactly one member")
+    member = members[0]
+    if member.name != expected_name or not member.isfile() or member.size != int(expected_size):
+        raise SystemExit("Codex archive member does not match runtime.lock.json")
+    source = archive.extractfile(member)
+    if source is None:
+        raise SystemExit("Codex archive member is unreadable")
+    with source, open(output_path, "wb") as destination:
+        shutil.copyfileobj(source, destination)
+pathlib.Path(output_path).chmod(0o755)
+PY
+    verify_codex_binary "$CODEX_EXTRACT/codex"
+    mkdir -p "$RUNTIME_DIR/$(dirname "$CODEX_BINARY_PATH")"
+    cp "$CODEX_EXTRACT/codex" "$RUNTIME_DIR/$CODEX_BINARY_PATH"
+    chmod 755 "$RUNTIME_DIR/$CODEX_BINARY_PATH"
+  )
+  verify_codex_binary "$RUNTIME_DIR/$CODEX_BINARY_PATH"
+
+  # Apache-2.0 LICENSE / NOTICE は release tag の原文をhash固定して同梱する。
+  for license_path in "$CODEX_LICENSE_PATH" "$CODEX_NOTICE_PATH"; do
+    mkdir -p "$RUNTIME_DIR/$(dirname "$license_path")"
+  done
+  verify_locked_file "$ROOT/scripts/$CODEX_LICENSE_PATH" "$CODEX_LICENSE_SHA256" \
+    "$CODEX_LICENSE_SIZE" || fail "OpenAI Codex LICENSE の size / sha256 が一致しません"
+  verify_locked_file "$ROOT/scripts/$CODEX_NOTICE_PATH" "$CODEX_NOTICE_SHA256" \
+    "$CODEX_NOTICE_SIZE" || fail "OpenAI Codex NOTICE の size / sha256 が一致しません"
+  cp "$ROOT/scripts/$CODEX_LICENSE_PATH" "$RUNTIME_DIR/$CODEX_LICENSE_PATH"
+  cp "$ROOT/scripts/$CODEX_NOTICE_PATH" "$RUNTIME_DIR/$CODEX_NOTICE_PATH"
 
   # wheels（narumi / narumi-server 本体）
   echo "==> uv build (wheels)"
@@ -350,7 +542,7 @@ PY
 
   # manifest.json（再同期要否の判定材料）
   echo "==> runtime manifest.json"
-  python3 - "$RUNTIME_DIR" "$VERSION" "$UV_VERSION" <<'PY'
+  python3 - "$RUNTIME_DIR" "$VERSION" "$UV_VERSION" "$RUNTIME_LOCK" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -376,6 +568,7 @@ manifest = {
     "uv_version": sys.argv[3],
     "wheels": wheels,
     "requirements_sha256": sha256(runtime / "requirements.txt"),
+    "codex": json.loads(pathlib.Path(sys.argv[4]).read_text(encoding="utf-8"))["codex"],
 }
 (runtime / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
 print(json.dumps(manifest, indent=2, ensure_ascii=False))
@@ -476,5 +669,12 @@ for recording_code in "$BUNDLE" "$BUNDLE/Contents/MacOS/narumi-recorder"; do
     | validate_recording_entitlements \
     || fail "署名済みの録音用 entitlement を検証できません: $recording_code"
 done
+
+# app の resource seal 作成後にも、allowlist と upstream Codex 署名が保持されたことを再検査する。
+python3 "$INVENTORY" "${INVENTORY_ARGS[@]}" >/dev/null \
+  || fail "署名後の bundle inventory 検査に失敗しました"
+if [[ $WITH_RUNTIME -eq 1 ]]; then
+  verify_codex_binary "$RUNTIME_DIR/$CODEX_BINARY_PATH"
+fi
 
 echo "built: $BUNDLE (version $VERSION, build $BUILD_NUMBER)"

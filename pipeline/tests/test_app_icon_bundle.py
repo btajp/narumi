@@ -15,8 +15,11 @@ from pathlib import Path
 import pytest
 
 from .bundle_artifact_fixtures import (
+    CODEX_SOURCE_TAG,
+    CODEX_VERSION,
     ROOT,
     VERSION,
+    arm64_macho,
     make_contracts,
     tracked_list,
     wheel_bytes,
@@ -29,7 +32,31 @@ tool = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
 with open(os.environ["NARUMI_TEST_LOG"], "a") as log:
     log.write(json.dumps({"tool": tool, "args": args}) + "\\n")
-if tool == "plutil":
+if tool == "env":
+    if args[0] != "-i" or "arch" not in args:
+        sys.exit("unexpected env arguments")
+    command_at = args.index("arch")
+    clean = dict(value.split("=", 1) for value in args[1:command_at])
+    if set(clean) != {"HOME", "CODEX_HOME", "TMPDIR", "PATH"}:
+        sys.exit("unexpected isolated environment")
+    if clean["PATH"] != "/usr/bin:/bin":
+        sys.exit("unsafe Codex probe PATH")
+    if not all(pathlib.Path(clean[key]).is_dir() for key in ("HOME", "CODEX_HOME", "TMPDIR")):
+        sys.exit("missing isolated Codex probe directory")
+    if len(args[command_at:]) != 4 or args[command_at] != "arch":
+        sys.exit("unexpected isolated command")
+    if args[command_at + 1] != "-arm64" or args[command_at + 3] != "--version":
+        sys.exit("unexpected isolated Codex version arguments")
+    print(os.environ["NARUMI_TEST_CODEX_VERSION_OUTPUT"])
+elif tool == "uname":
+    if args != ["-m"]:
+        sys.exit("unexpected uname arguments")
+    print(os.environ.get("NARUMI_TEST_HOST_ARCH", "arm64"))
+elif tool == "arch":
+    if len(args) != 3 or args[0] != "-arm64" or args[2] != "--version":
+        sys.exit("unexpected arch arguments")
+    print(os.environ["NARUMI_TEST_CODEX_VERSION_OUTPUT"])
+elif tool == "plutil":
     with open(args[-1], "rb") as source:
         plistlib.load(source)
 elif tool == "ditto":
@@ -38,6 +65,7 @@ elif tool == "codesign":
     state = pathlib.Path(os.environ["NARUMI_TEST_LOG"]).with_name("signatures.json")
     signed = json.loads(state.read_text()) if state.exists() else {}
     target = args[-1]
+    upstream_codex = pathlib.Path(target).name == "codex"
     key = "com.apple.security.device.audio-input"
     if "--sign" in args:
         entitlements = None
@@ -46,16 +74,30 @@ elif tool == "codesign":
                 entitlements = plistlib.load(source)
         signed[target] = entitlements
         state.write_text(json.dumps(signed))
-    elif "--verify" in args or "--display" in args:
-        if target not in signed:
+        tamper = os.environ.get("NARUMI_TEST_TAMPER_AFTER_APP_SIGN")
+        if target.endswith("/narumi.app") and tamper:
+            with open(pathlib.Path(target) / tamper, "ab") as bundled:
+                bundled.write(b"tampered after signing")
+    elif "--verify" in args:
+        if target not in signed and not upstream_codex:
             sys.exit("unsigned code")
         mode = ""
         if target == os.environ.get("NARUMI_TEST_CODESIGN_FAULT_TARGET"):
             mode = os.environ["NARUMI_TEST_CODESIGN_FAULT"]
-        if "--verify" in args:
-            if mode == "verify-error":
-                sys.exit("invalid signature")
+        if mode == "verify-error":
+            sys.exit("invalid signature")
+    elif "--display" in args:
+        if "--verbose=4" in args:
+            if not upstream_codex:
+                sys.exit("unexpected publisher signature target")
+            team = os.environ.get("NARUMI_TEST_CODEX_TEAM_ID", "2DC432GLL2")
+            sys.stderr.write("TeamIdentifier=" + team + "\\n")
         else:
+            if target not in signed:
+                sys.exit("unsigned code")
+            mode = ""
+            if target == os.environ.get("NARUMI_TEST_CODESIGN_FAULT_TARGET"):
+                mode = os.environ["NARUMI_TEST_CODESIGN_FAULT"]
             entitlements = signed[target]
             replacements = {
                 "empty": None, "missing": {}, "false": {key: False},
@@ -110,12 +152,23 @@ def build_fixture(tmp_path: Path):
         ROOT / "app/recording.entitlements.plist", project / "app/recording.entitlements.plist"
     )
     for name in ("NarumiMenuBar", "narumi-recorder", "narumi-keychain"):
-        write_file(project / "app/.build/release" / name, "#!/bin/sh\nexit 0\n").chmod(0o755)
+        write_file(project / "app/.build/release" / name, arm64_macho(name.encode())).chmod(0o755)
     key = write_file(project / "app/sparkle-public-key.txt", "fixture-public-key")
     commands = project / "test-bin"
     commands.mkdir()
     stub = f"#!{sys.executable}\n" + textwrap.dedent(TOOL_STUB)
-    for name in ("swift", "uv", "codesign", "plutil", "ditto", "curl", "git"):
+    for name in (
+        "swift",
+        "uv",
+        "codesign",
+        "plutil",
+        "ditto",
+        "curl",
+        "git",
+        "uname",
+        "arch",
+        "env",
+    ):
         write_file(commands / name, stub).chmod(0o755)
     (commands / "python3").symlink_to(sys.executable)
     framework = project / "app/.build/artifacts/sparkle/macos/Sparkle.framework"
@@ -139,21 +192,79 @@ def build_fixture(tmp_path: Path):
     cache = project / "uv-cache"
     archive = cache / "0.12.6/uv-aarch64-apple-darwin.tar.gz"
     archive.parent.mkdir(parents=True)
-    data = b"#!/bin/sh\nexit 0\n"
+    data = arm64_macho(b"fixture uv")
     with tarfile.open(archive, "w:gz") as output:
         member = tarfile.TarInfo("uv-aarch64-apple-darwin/uv")
         member.mode = 0o755
         member.size = len(data)
         output.addfile(member, io.BytesIO(data))
+    codex_cache = project / "codex-cache"
+    codex_archive = codex_cache / CODEX_VERSION / "codex-aarch64-apple-darwin.tar.gz"
+    codex_archive.parent.mkdir(parents=True)
+    codex_data = arm64_macho(b"fixture signed OpenAI Codex")
+    with tarfile.open(codex_archive, "w:gz") as output:
+        member = tarfile.TarInfo("codex-aarch64-apple-darwin")
+        member.mode = 0o755
+        member.size = len(codex_data)
+        output.addfile(member, io.BytesIO(codex_data))
+    license_path = "licenses/openai-codex-Apache-2.0.txt"
+    notice_path = "licenses/openai-codex-NOTICE.txt"
+    for relative in (license_path, notice_path):
+        source = ROOT / "scripts" / relative
+        destination = scripts / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
     lock = {
         "uv": {
             "version": "0.12.6",
             "artifact": archive.name,
             "url": "https://example.invalid/never-download",
             "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
-        }
+        },
+        "codex": {
+            "version": CODEX_VERSION,
+            "source": f"https://github.com/openai/codex/releases/tag/{CODEX_SOURCE_TAG}",
+            "source_tag": CODEX_SOURCE_TAG,
+            "source_commit": "90854393966b21e9ebfd21b122334eb09a20c93d",
+            "artifact": {
+                "name": codex_archive.name,
+                "url": (
+                    "https://github.com/openai/codex/releases/download/"
+                    f"{CODEX_SOURCE_TAG}/codex-aarch64-apple-darwin.tar.gz"
+                ),
+                "sha256": hashlib.sha256(codex_archive.read_bytes()).hexdigest(),
+                "size": codex_archive.stat().st_size,
+                "entry": "codex-aarch64-apple-darwin",
+            },
+            "binary": {
+                "path": f"codex/{CODEX_VERSION}/codex",
+                "sha256": hashlib.sha256(codex_data).hexdigest(),
+                "size": len(codex_data),
+                "architecture": "arm64",
+                "version_output": f"codex-cli {CODEX_VERSION}",
+                "publisher_team_id": "2DC432GLL2",
+            },
+            "license": {
+                "spdx": "Apache-2.0",
+                "path": license_path,
+                "source": f"https://github.com/openai/codex/blob/{CODEX_SOURCE_TAG}/LICENSE",
+                "source_tag": CODEX_SOURCE_TAG,
+                "sha256": hashlib.sha256((scripts / license_path).read_bytes()).hexdigest(),
+                "size": (scripts / license_path).stat().st_size,
+                "notice_path": notice_path,
+                "notice_source": (
+                    f"https://github.com/openai/codex/blob/{CODEX_SOURCE_TAG}/NOTICE"
+                ),
+                "notice_sha256": hashlib.sha256((scripts / notice_path).read_bytes()).hexdigest(),
+                "notice_size": (scripts / notice_path).stat().st_size,
+            },
+        },
     }
     write_file(scripts / "runtime.lock.json", json.dumps(lock))
+    write_file(
+        project / "pipeline/src/narumi/providers/codex/_runtime_lock.py",
+        f"CODEX_RUNTIME_LOCK = {lock['codex']!r}\n",
+    )
     environment = {
         **{
             name: os.environ[name]
@@ -164,9 +275,11 @@ def build_fixture(tmp_path: Path):
         "DIST_DIR": str(project / "output"),
         "SPARKLE_PUBLIC_KEY_FILE": str(key),
         "NARUMI_UV_CACHE_DIR": str(cache),
+        "NARUMI_CODEX_CACHE_DIR": str(codex_cache),
         "NARUMI_TRACKED_SOURCES": str(tracked_list(project)),
         "NARUMI_TEST_WHEELS": str(wheels),
         "NARUMI_TEST_LOG": str(project / "tools.jsonl"),
+        "NARUMI_TEST_CODEX_VERSION_OUTPUT": f"codex-cli {CODEX_VERSION}",
     }
     return project, environment
 
@@ -188,6 +301,13 @@ def run_build(project: Path, environment: dict, *options: str):
     )
 
 
+def write_codex_anchor(project: Path, codex: dict) -> None:
+    write_file(
+        project / "pipeline/src/narumi/providers/codex/_runtime_lock.py",
+        f"CODEX_RUNTIME_LOCK = {codex!r}\n",
+    )
+
+
 def test_build_uses_system_shell_and_minimal_environment(build_fixture):
     project, environment = build_fixture
     assert (project / "scripts/build-app.sh").read_text().splitlines()[0] == "#!/bin/bash"
@@ -199,9 +319,11 @@ def test_build_uses_system_shell_and_minimal_environment(build_fixture):
         "DIST_DIR",
         "SPARKLE_PUBLIC_KEY_FILE",
         "NARUMI_UV_CACHE_DIR",
+        "NARUMI_CODEX_CACHE_DIR",
         "NARUMI_TRACKED_SOURCES",
         "NARUMI_TEST_WHEELS",
         "NARUMI_TEST_LOG",
+        "NARUMI_TEST_CODEX_VERSION_OUTPUT",
     }
 
 
@@ -254,9 +376,16 @@ def test_icon_is_registered_in_every_bundle_mode(build_fixture, options):
         )
     for action in ("--verify", "--display"):
         checked = [
-            call["args"] for call in calls if call["tool"] == "codesign" and action in call["args"]
+            call["args"]
+            for call in calls
+            if call["tool"] == "codesign"
+            and action in call["args"]
+            and (action != "--display" or "--entitlements" in call["args"])
+            and call["args"][-1].startswith(str(app))
         ]
         expected = recording_targets | ({str(keychain)} if action == "--verify" else set())
+        if action == "--verify" and "--runtime" in options:
+            expected.add(str(app / f"Contents/Resources/runtime/codex/{CODEX_VERSION}/codex"))
         assert {args[-1] for args in checked} == expected
         for args in checked:
             if action == "--verify":
@@ -270,6 +399,30 @@ def test_icon_is_registered_in_every_bundle_mode(build_fixture, options):
     if "--runtime" in options:
         runtime = app / "Contents/Resources/runtime"
         assert signing[0][-1] == str(runtime / "uv")
+        codex = runtime / f"codex/{CODEX_VERSION}/codex"
+        assert codex.read_bytes() == arm64_macho(b"fixture signed OpenAI Codex")
+        assert str(codex) not in signed
+        publisher_checks = [
+            call["args"]
+            for call in calls
+            if call["tool"] == "codesign"
+            and "--display" in call["args"]
+            and "--verbose=4" in call["args"]
+        ]
+        assert sum(args[-1] == str(codex) for args in publisher_checks) >= 2
+        isolated_probes = [call["args"] for call in calls if call["tool"] == "env"]
+        assert len(isolated_probes) >= 3
+        for args in isolated_probes:
+            home = Path(next(value for value in args if value.startswith("HOME=")).split("=", 1)[1])
+            assert not home.parent.exists()
+        assert not any(call["tool"] == "arch" for call in calls)
+        manifest = json.loads((runtime / "manifest.json").read_text())
+        assert (
+            manifest["codex"]
+            == json.loads((project / "scripts/runtime.lock.json").read_text())["codex"]
+        )
+        assert (runtime / manifest["codex"]["license"]["path"]).is_file()
+        assert (runtime / manifest["codex"]["license"]["notice_path"]).is_file()
         assert {path.name for path in (runtime / "wheels").iterdir()} == {
             f"{package}-{VERSION}-py3-none-any.whl" for package in ("narumi", "narumi_server")
         }
@@ -338,3 +491,91 @@ def test_release_requires_developer_id_application(build_fixture, identity):
     assert "Developer ID Application" in result.stderr
     assert sentinel.read_text() == "keep existing app"
     assert not (project / "tools.jsonl").exists()
+
+
+def test_runtime_requires_arm64_host_before_replacing_bundle(build_fixture):
+    project, environment = build_fixture
+    environment["NARUMI_TEST_HOST_ARCH"] = "x86_64"
+    sentinel = write_file(project / "output/narumi.app/keep.txt", "keep existing app")
+    result = run_build(project, environment, "--skip-build", "--runtime")
+    assert result.returncode == 1
+    assert "Apple Silicon" in result.stderr
+    assert sentinel.read_text() == "keep existing app"
+
+
+def test_runtime_lock_must_match_runtime_trust_anchor_before_replacing_bundle(build_fixture):
+    project, environment = build_fixture
+    lock_path = project / "scripts/runtime.lock.json"
+    lock = json.loads(lock_path.read_text())
+    lock["codex"]["source_commit"] = "0" * 40
+    lock_path.write_text(json.dumps(lock))
+    sentinel = write_file(project / "output/narumi.app/keep.txt", "keep existing app")
+    result = run_build(project, environment, "--skip-build", "--runtime")
+    assert result.returncode == 1
+    assert "trust anchor" in result.stderr
+    assert sentinel.read_text() == "keep existing app"
+    assert "assembling" not in result.stdout
+
+
+def test_runtime_requires_arm64_swift_binaries_before_replacing_bundle(build_fixture):
+    project, environment = build_fixture
+    (project / "app/.build/release/NarumiMenuBar").write_bytes(b"not a Mach-O")
+    sentinel = write_file(project / "output/narumi.app/keep.txt", "keep existing app")
+    result = run_build(project, environment, "--skip-build", "--runtime")
+    assert result.returncode == 1
+    assert "Swift バイナリは arm64 Mach-O" in result.stderr
+    assert sentinel.read_text() == "keep existing app"
+
+
+@pytest.mark.parametrize(
+    ("variable", "value", "error"),
+    [
+        ("NARUMI_TEST_CODEX_VERSION_OUTPUT", "codex-cli 0.150.0", "version output"),
+        ("NARUMI_TEST_CODEX_TEAM_ID", "NOTOPENAI00", "TeamIdentifier"),
+    ],
+)
+def test_runtime_rejects_unexpected_codex_identity(build_fixture, variable, value, error):
+    project, environment = build_fixture
+    environment[variable] = value
+    result = run_build(project, environment, "--skip-build", "--runtime")
+    assert result.returncode == 1
+    assert error in result.stderr
+    assert "built:" not in result.stdout
+
+
+def test_runtime_rejects_archive_with_extra_member(build_fixture):
+    project, environment = build_fixture
+    lock_path = project / "scripts/runtime.lock.json"
+    lock = json.loads(lock_path.read_text())
+    archive = (
+        Path(environment["NARUMI_CODEX_CACHE_DIR"])
+        / CODEX_VERSION
+        / "codex-aarch64-apple-darwin.tar.gz"
+    )
+    data = arm64_macho(b"fixture signed OpenAI Codex")
+    with tarfile.open(archive, "w:gz") as output:
+        for name, contents in (
+            ("codex-aarch64-apple-darwin", data),
+            ("unexpected", b"must not extract"),
+        ):
+            member = tarfile.TarInfo(name)
+            member.size = len(contents)
+            output.addfile(member, io.BytesIO(contents))
+    lock["codex"]["artifact"]["size"] = archive.stat().st_size
+    lock["codex"]["artifact"]["sha256"] = hashlib.sha256(archive.read_bytes()).hexdigest()
+    lock_path.write_text(json.dumps(lock))
+    write_codex_anchor(project, lock["codex"])
+    result = run_build(project, environment, "--skip-build", "--runtime")
+    assert result.returncode != 0
+    assert "exactly one member" in result.stderr
+
+
+def test_runtime_inventory_is_rechecked_after_app_signing(build_fixture):
+    project, environment = build_fixture
+    environment["NARUMI_TEST_TAMPER_AFTER_APP_SIGN"] = (
+        "Contents/Resources/runtime/licenses/openai-codex-NOTICE.txt"
+    )
+    result = run_build(project, environment, "--skip-build", "--runtime")
+    assert result.returncode == 1
+    assert "署名後の bundle inventory" in result.stderr
+    assert "built:" not in result.stdout

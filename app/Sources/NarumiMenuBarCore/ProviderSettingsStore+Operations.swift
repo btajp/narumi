@@ -58,7 +58,13 @@ extension ProviderSettingsStore {
         if resource.source == .approvedDownload {
             return resource.downloadHost != nil && resource.sha256 != nil && resource.version != nil
         }
-        return true
+        if resource.source == .bundled {
+            guard resource.downloadHost == nil, resource.version?.isEmpty == false,
+                let sha256 = resource.sha256, sha256.count == 64
+            else { return false }
+            return sha256.allSatisfy { "0123456789abcdef".contains($0) }
+        }
+        return resource.downloadHost == nil
     }
 
     /// Downloads are accepted only after the caller shows the catalog's host and resource.

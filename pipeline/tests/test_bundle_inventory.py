@@ -1,5 +1,6 @@
 """Distribution inventory rejects unexpected local files before shipping."""
 
+import hashlib
 import json
 import plistlib
 import stat
@@ -10,9 +11,11 @@ from pathlib import Path
 import pytest
 
 from .bundle_artifact_fixtures import (
+    CODEX_VERSION,
     PROMPTS,
     ROOT,
     app_zip,
+    arm64_macho,
     make_app,
     replace_wheel,
     run_inventory,
@@ -34,6 +37,9 @@ def test_inventory_accepts_runtime_and_tracked_prompts(tmp_path: Path, archive: 
     assert inventory["runtime"] is True
     files = {entry["path"]: entry for entry in inventory["entries"]}
     assert files["Contents/Resources/runtime/uv"]["sha256"]
+    assert files[f"Contents/Resources/runtime/codex/{CODEX_VERSION}/codex"]["sha256"]
+    assert files["Contents/Resources/runtime/licenses/openai-codex-Apache-2.0.txt"]["size"]
+    assert files["Contents/Resources/runtime/licenses/openai-codex-NOTICE.txt"]["size"]
     assert all(not path.startswith("/") for path in files)
 
 
@@ -141,6 +147,69 @@ def test_runtime_hash_mismatch_is_rejected(tmp_path: Path):
     result = run_inventory("check-app", app)
     assert result.returncode == 1
     assert "hash mismatch" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        f"Contents/Resources/runtime/codex/{CODEX_VERSION}/codex",
+        "Contents/Resources/runtime/licenses/openai-codex-Apache-2.0.txt",
+        "Contents/Resources/runtime/licenses/openai-codex-NOTICE.txt",
+    ],
+)
+def test_codex_runtime_file_mismatch_is_rejected(tmp_path: Path, relative: str):
+    app = make_app(tmp_path)
+    with (app / relative).open("ab") as output:
+        output.write(b"altered")
+    result = run_inventory("check-app", app)
+    assert result.returncode == 1
+    assert "size mismatch" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    [
+        ("binary", "publisher_team_id", "NOTOPENAI00"),
+        ("binary", "version_output", "codex-cli 0.150.0"),
+        ("artifact", "entry", "nested/codex"),
+        ("license", "spdx", "MIT"),
+    ],
+)
+def test_codex_manifest_metadata_is_fail_closed(
+    tmp_path: Path, section: str, field: str, value: str
+):
+    app = make_app(tmp_path)
+    manifest_path = app / "Contents/Resources/runtime/manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["codex"][section][field] = value
+    manifest_path.write_text(json.dumps(manifest))
+    result = run_inventory("check-app", app)
+    assert result.returncode == 1
+    assert "Codex" in result.stderr
+
+
+def test_codex_binary_must_be_thin_arm64_even_with_updated_metadata(tmp_path: Path):
+    app = make_app(tmp_path)
+    binary_path = app / f"Contents/Resources/runtime/codex/{CODEX_VERSION}/codex"
+    x86_64 = bytearray(arm64_macho(b"wrong architecture"))
+    x86_64[4:8] = b"\x07\x00\x00\x01"
+    binary_path.write_bytes(x86_64)
+    manifest_path = app / "Contents/Resources/runtime/manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["codex"]["binary"]["size"] = len(x86_64)
+    manifest["codex"]["binary"]["sha256"] = hashlib.sha256(x86_64).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+    result = run_inventory("check-app", app)
+    assert result.returncode == 1
+    assert "arm64 Mach-O" in result.stderr
+
+
+def test_runtime_app_executables_must_be_arm64(tmp_path: Path):
+    app = make_app(tmp_path)
+    write_file(app / "Contents/MacOS/narumi-recorder", b"not a Mach-O")
+    result = run_inventory("check-app", app)
+    assert result.returncode == 1
+    assert "arm64 Mach-O" in result.stderr
 
 
 @pytest.mark.parametrize("invalid", [b"not-nul-terminated", b"../private.py\0", b"\0"])
