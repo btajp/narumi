@@ -33,6 +33,8 @@ MeetingConfigにnullableなminutes_ensembleを追加する。
 
 生成担当IDは一意で安定し、表示名と分離する。2〜4件を厳密に検査する。
 表示名は空白だけを拒否し、最大80文字とする。表示名と配列順をモデルのプロンプトへ渡さない。
+runの意味、試行上限、不明結果の遮断にも表示名・表示順・生成担当IDを含めない。
+選択内容のmultisetをcanonical slotへ正規化し、IDだけの付替えは同じrun・同じ試行上限で送信なしに反映する。
 省略は保存済み設定の保持、nullは解除、objectは全置換。
 モデル選択のprovider、connection_id/revision、model_id、閉じたparameters、cache_epochを再利用する。
 会議・プロファイル・録画開始・expected_configのすべてが同じ定義を参照する。
@@ -63,6 +65,8 @@ MeetingConfigにnullableなminutes_ensembleを追加する。
 原文ID・範囲・型の整合検査は、内容の真実性や意味的正しさの保証ではない。
 
 統合は専用プロンプトで全担当の案と原文根拠を照合する。
+案のwire順は本文projectionと決定的な重複ordinalで固定し、表示名・表示順・生成担当IDを送信しない。
+同じartifactを複数担当が共有する場合は一つの入力として扱い、担当とcanonical slotの対応は来歴だけに保存する。
 同じ意見の数だけで事実を決めず、不一致は確認事項として残すよう指示する。
 長文では区間ごとの根拠付き統合から開始し、その成果と対応する引用原文を段階的に縮約する。
 最後は検証済みの一つのJSONから決定的に完成版Markdownを描画する。
@@ -102,6 +106,8 @@ run/node/callは現在の確認対象を表し、元の送信先・run・nodeは
 古いrunの確認から現在の再送先を推測せず、現在の必須nodeと依存が一致しない確認を拒否する。
 全expected_configと現在の不明receiptを照合し、確認を新pendingとして送信前に一度だけ消費する。
 他の不明callや古いattemptの確認には流用しない。
+確認再送の来歴は、元の不明attempt、最大64件のretry ancestry、成功時の解消attemptを閉じた公開型で保持する。
+元のattemptは不明のまま書き換えず、実際に採用した成果の実行元と現在runへの採用を分けて表示する。
 対象の再送成功後は同じ確認済みrunの未実行依存処理と統合を継続する。
 別の不明callは再送せず、別枝の既知失敗もこの確認だけで追加再試行しない。
 minutes_retryはASRより前に、現在の上流入力と対象runの入力条件を外部送信なしで照合する。
