@@ -17,6 +17,7 @@ dev CLI cannot disagree:
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import sqlite3
 import threading
@@ -27,7 +28,12 @@ from typing import Any
 
 from narumi.bundle import Bundle, utc_now_iso
 from narumi.catalog.rebuild import RebuildStats
-from narumi.errors import InvalidArgumentError, NotFoundError, ScopeDeniedError
+from narumi.errors import (
+    ConfigurationConflictError,
+    InvalidArgumentError,
+    NotFoundError,
+    ScopeDeniedError,
+)
 from narumi.models import MergedTranscript
 
 MERGED_ARTIFACT_KEY = "merged/merged"
@@ -38,6 +44,7 @@ ACTIVE_JOB_STATUSES: tuple[str, ...] = ("queued", "running")
 CROSS_SCOPE_ACTION = "cross_scope_read"
 TRIGRAM_MIN_CHARS = 3
 """FTS5 ``trigram`` needs at least three characters; shorter queries fall back to ``LIKE``."""
+PROCESSING_RUN_ID_RE = re.compile(r"^run-[0-9a-f]{32}$")
 
 MEETING_COLUMNS: tuple[str, ...] = (
     "meeting_id",
@@ -87,6 +94,7 @@ _SCHEMA: tuple[str, ...] = (
         meeting_id TEXT,
         kind TEXT NOT NULL,
         status TEXT NOT NULL,
+        processing_run_id TEXT,
         progress TEXT,
         result_json TEXT,
         error_json TEXT,
@@ -252,6 +260,11 @@ class Catalog:
         with self._tx() as conn:
             for statement in _SCHEMA:
                 conn.execute(statement)
+            job_columns = {
+                str(row["name"]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+            if "processing_run_id" not in job_columns:
+                conn.execute("ALTER TABLE jobs ADD COLUMN processing_run_id TEXT")
 
     # ------------------------------------------------------------------ meetings
     def upsert_meeting(self, bundle: Bundle) -> None:
@@ -622,6 +635,46 @@ class Catalog:
             if cursor.rowcount == 0:
                 raise NotFoundError(f"job not found: {job_id}", details={"job_id": job_id})
 
+    def attach_job_processing_run(self, job_id: str, processing_run_id: str) -> None:
+        """Correlate one job with its durable ensemble run exactly once."""
+        if (
+            not isinstance(processing_run_id, str)
+            or PROCESSING_RUN_ID_RE.fullmatch(processing_run_id) is None
+        ):
+            raise InvalidArgumentError(
+                "invalid processing run ID", details={"processing_run_id": processing_run_id}
+            )
+        with self._tx() as conn:
+            row = conn.execute(
+                "SELECT kind, status, processing_run_id FROM jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise NotFoundError(f"job not found: {job_id}", details={"job_id": job_id})
+            if row["kind"] not in ("process", "regenerate"):
+                raise InvalidArgumentError(
+                    "only processing jobs can reference an ensemble run",
+                    details={"job_id": job_id, "kind": row["kind"]},
+                )
+            current = row["processing_run_id"]
+            if current is not None and current != processing_run_id:
+                raise ConfigurationConflictError(
+                    "job already references another processing run",
+                    details={
+                        "job_id": job_id,
+                        "processing_run_id": current,
+                    },
+                )
+            if current is None:
+                if row["status"] not in ACTIVE_JOB_STATUSES:
+                    raise ConfigurationConflictError(
+                        "finished job cannot be attached to a processing run",
+                        details={"job_id": job_id, "status": row["status"]},
+                    )
+                conn.execute(
+                    "UPDATE jobs SET processing_run_id = ?, updated_at = ? WHERE job_id = ?",
+                    (processing_run_id, utc_now_iso(), job_id),
+                )
+
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
@@ -670,6 +723,7 @@ class Catalog:
             job["meeting_id"] = row["meeting_id"]
         job["kind"] = row["kind"]
         job["status"] = row["status"]
+        job["processing_run_id"] = row["processing_run_id"]
         for key, column in (
             ("progress", "progress"),
             ("result", "result_json"),
@@ -677,6 +731,8 @@ class Catalog:
         ):
             value = _loads(row[column])
             if value is not None:
+                if key == "result" and isinstance(value, dict):
+                    value.setdefault("processing_run_id", job["processing_run_id"])
                 job[key] = value
         job["created_at"] = row["created_at"]
         job["updated_at"] = row["updated_at"]

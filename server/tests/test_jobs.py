@@ -34,7 +34,8 @@ def test_success_and_progress(catalog: Catalog):
         job_id = manager.submit("regenerate", "m1", work)
         job = manager.wait(job_id, timeout=10)
         assert job["status"] == "succeeded"
-        assert job["result"] == {"minutes_version": 3}
+        assert job["processing_run_id"] is None
+        assert job["result"] == {"minutes_version": 3, "processing_run_id": None}
         assert job["progress"] == {"stage": "generate", "fraction": 1.0}
         assert job["kind"] == "regenerate" and job["meeting_id"] == "m1"
         assert seen["job_id"] == job_id
@@ -81,6 +82,28 @@ def test_failures_are_persisted(catalog: Catalog):
         invalid = manager.wait(manager.submit("process", None, nonserializable), timeout=10)
         assert invalid["status"] == "failed"
         assert invalid["error"]["details"]["exception"] == "ValueError"
+    finally:
+        manager.shutdown()
+
+
+def test_processing_run_is_attached_before_work_and_copied_to_success(catalog: Catalog):
+    manager = JobManager(catalog)
+    run_id = "run-" + "a" * 32
+    try:
+
+        def work(progress: JobProgress) -> dict:
+            progress.attach_processing_run(run_id)
+            running = catalog.get_job(progress.job_id)
+            assert running is not None and running["processing_run_id"] == run_id
+            return {"stages": ["minutes_ensemble"]}
+
+        job = manager.wait(manager.submit("regenerate", "m1", work), timeout=10)
+        assert job["status"] == "succeeded"
+        assert job["processing_run_id"] == run_id
+        assert job["result"] == {
+            "stages": ["minutes_ensemble"],
+            "processing_run_id": run_id,
+        }
     finally:
         manager.shutdown()
 
@@ -238,7 +261,7 @@ def test_shutdown_only_fails_owned_work_dropped_from_the_queue(catalog: Catalog,
         assert not shutdown_errors
         completed = manager.wait(running, timeout=10)
         assert completed["status"] == "succeeded"
-        assert completed["result"] == {"completed": True}
+        assert completed["result"] == {"completed": True, "processing_run_id": None}
         dropped = catalog.get_job(queued)
         assert dropped["status"] == "failed"
         assert "shut down" in dropped["error"]["message"]

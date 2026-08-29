@@ -23,6 +23,13 @@ if TYPE_CHECKING:
     from narumi_server.context import ServerContext
 
 SERVER_NAME = "narumi"
+MINUTES_ENSEMBLE_LIMITS = {
+    "max_generators": 4,
+    "max_concurrency": 1,
+    "max_generation_attempts_per_run": 64,
+    "input_modalities": ["text"],
+    "max_reduction_depth": 6,
+}
 
 
 def capability_names() -> dict[str, list[str]]:
@@ -64,6 +71,7 @@ def get_server_info(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
         "transcription_model_providers": (
             ["openai-api"] if "streamable-http" in ctx.transports else []
         ),
+        "minutes_ensemble_limits": jsonable(MINUTES_ENSEMBLE_LIMITS),
     }
     if permissions is not None:
         capabilities["permissions"] = permissions

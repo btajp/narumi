@@ -104,6 +104,14 @@ async def test_get_server_info(client: PerCallClient, ctx: ServerContext):
     assert "none" in caps["diarization_engines"]
     assert "none" in caps["llm_providers"]
     assert "markdown" in caps["export_destinations"]
+    assert caps["workflow"]["ensemble_generation"] is False
+    assert caps["minutes_ensemble_limits"] == {
+        "max_generators": 4,
+        "max_concurrency": 1,
+        "max_generation_attempts_per_run": 64,
+        "input_modalities": ["text"],
+        "max_reduction_depth": 6,
+    }
 
 
 async def test_list_export_destinations(client: PerCallClient):
@@ -260,6 +268,7 @@ async def test_auto_process_job_success(
     assert status["job"]["kind"] == "process"
     assert status["job"]["meeting_id"] == meeting_id
     assert status["job"]["status"] == "succeeded"
+    assert status["job"]["processing_run_id"] is None
     assert status["job"]["progress"] == {"stage": "generate", "fraction": 1.0}
     assert status["job"]["result"] == {
         "meeting_id": meeting_id,
@@ -267,6 +276,7 @@ async def test_auto_process_job_success(
         "stages": ["merged/merged", "minutes/v1"],
         "skipped": [],
         "unresolved_speakers": ["other"],
+        "processing_run_id": None,
     }
 
     meeting = await call(client, "get_meeting", {"meeting_id": meeting_id})

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -15,7 +16,12 @@ from narumi.catalog import (
     rebuild_catalog,
     row_to_summary,
 )
-from narumi.errors import InvalidArgumentError, NotFoundError, ScopeDeniedError
+from narumi.errors import (
+    ConfigurationConflictError,
+    InvalidArgumentError,
+    NotFoundError,
+    ScopeDeniedError,
+)
 from narumi.models import MergedSegment, MergedTranscript, SpeakerEntry, SpeakerMap
 
 
@@ -360,22 +366,48 @@ def test_jobs_lifecycle(catalog: Catalog):
     assert job is not None
     assert job["status"] == "queued" and job["kind"] == "process"
     assert job["meeting_id"] == "20260827T010000Z-00000001"
-    assert set(job) == {"job_id", "meeting_id", "kind", "status", "created_at", "updated_at"}
+    assert set(job) == {
+        "job_id",
+        "meeting_id",
+        "kind",
+        "status",
+        "processing_run_id",
+        "created_at",
+        "updated_at",
+    }
+    assert job["processing_run_id"] is None
 
     catalog.update_job(job_id, status="running", progress={"stage": "transcribe", "fraction": 0.4})
     job = catalog.get_job(job_id)
     assert job is not None and job["status"] == "running"
     assert job["progress"] == {"stage": "transcribe", "fraction": 0.4}
 
+    run_id = "run-" + "1" * 32
+    catalog.attach_job_processing_run(job_id, run_id)
+    catalog.attach_job_processing_run(job_id, run_id)  # idempotent
     catalog.update_job(job_id, status="succeeded", result={"minutes_version": 1})
     job = catalog.get_job(job_id)
-    assert job is not None and job["result"] == {"minutes_version": 1}
+    assert job is not None and job["processing_run_id"] == run_id
+    assert job["result"] == {"minutes_version": 1, "processing_run_id": run_id}
+
+    with pytest.raises(ConfigurationConflictError):
+        catalog.attach_job_processing_run(job_id, "run-" + "2" * 32)
+    with pytest.raises(InvalidArgumentError):
+        catalog.attach_job_processing_run(job_id, "bad-run")
 
     failed = catalog.create_job("export", None)
     catalog.update_job(failed, status="failed", error={"code": "policy_violation", "message": "no"})
     job = catalog.get_job(failed)
     assert job is not None and "meeting_id" not in job
+    assert job["processing_run_id"] is None
     assert job["error"] == {"code": "policy_violation", "message": "no"}
+    with pytest.raises(InvalidArgumentError):
+        catalog.attach_job_processing_run(failed, run_id)
+
+    legacy_done = catalog.create_job("process", None)
+    catalog.update_job(legacy_done, status="succeeded", result={})
+    with pytest.raises(ConfigurationConflictError):
+        catalog.attach_job_processing_run(legacy_done, run_id)
 
     assert [j["job_id"] for j in catalog.list_jobs(statuses=["failed"])] == [failed]
     assert catalog.get_job("job-000000000000") is None
@@ -385,6 +417,42 @@ def test_jobs_lifecycle(catalog: Catalog):
         catalog.update_job(job_id, status="bogus")
     with pytest.raises(InvalidArgumentError):
         catalog.create_job("", None)
+
+
+def test_existing_job_table_is_migrated_with_nullable_processing_run_id(tmp_path: Path):
+    db = tmp_path / "narumi.db"
+    connection = sqlite3.connect(db)
+    connection.execute(
+        """
+        CREATE TABLE jobs (
+            job_id TEXT PRIMARY KEY,
+            meeting_id TEXT,
+            kind TEXT NOT NULL,
+            status TEXT NOT NULL,
+            progress TEXT,
+            result_json TEXT,
+            error_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO jobs (job_id, kind, status, created_at, updated_at)"
+        " VALUES ('job-1111111111111111', 'process', 'queued', ?, ?)",
+        ("2026-08-29T00:00:00Z", "2026-08-29T00:00:00Z"),
+    )
+    connection.commit()
+    connection.close()
+
+    with Catalog(db) as catalog:
+        job = catalog.get_job("job-1111111111111111")
+        assert job is not None and job["processing_run_id"] is None
+        columns = {
+            row[1]
+            for row in catalog._conn.execute("PRAGMA table_info(jobs)").fetchall()  # noqa: SLF001
+        }
+        assert "processing_run_id" in columns
 
 
 def test_mark_stale_jobs(catalog: Catalog):

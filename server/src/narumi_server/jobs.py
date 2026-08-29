@@ -77,6 +77,10 @@ class JobProgress:
         except NarumiError as exc:  # a vanished job row must not kill the pipeline
             logger.warning("progress update for %s failed: %s", self.job_id, exc)
 
+    def attach_processing_run(self, processing_run_id: str) -> None:
+        """Persist the durable ensemble run before any model call can be dispatched."""
+        self._catalog.attach_job_processing_run(self.job_id, processing_run_id)
+
 
 class JobManager:
     """Thread-pool job runner with catalog persistence (default one worker: 1 会議ずつ処理)."""
@@ -157,6 +161,20 @@ class JobManager:
                     details={"job_id": job_id},
                 )
             payload = dict(result)
+            result_run_id = payload.get("processing_run_id")
+            if result_run_id is not None:
+                self.catalog.attach_job_processing_run(job_id, result_run_id)
+            correlated = self.catalog.get_job(job_id)
+            if correlated is None:
+                raise NotFoundError(f"job not found: {job_id}", details={"job_id": job_id})
+            durable_run_id = correlated["processing_run_id"]
+            if result_run_id is not None and result_run_id != durable_run_id:
+                raise NarumiError(
+                    "job result references another processing run",
+                    code=ErrorCode.INTERNAL,
+                    details={"job_id": job_id},
+                )
+            payload["processing_run_id"] = durable_run_id
             self.catalog.update_job(job_id, status="succeeded", result=payload)
         except CancelledError as exc:
             if confidential:
