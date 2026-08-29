@@ -21,7 +21,8 @@ final class MCPClientSecureSessionTests: XCTestCase {
         let executable = root.appendingPathComponent("fixture")
         let appSources = [
             "MCPClient.swift", "MCPClient+Connection.swift", "MCPClient+JobRecovery.swift", "JSONNode.swift",
-            "NarumiClient.swift", "NarumiClient+Providers.swift", "NarumiClient+TranscriptionRetry.swift",
+            "NarumiClient.swift", "NarumiClient+ProcessingRuns.swift", "NarumiClient+Providers.swift",
+            "NarumiClient+TranscriptionRetry.swift",
         ]
             .map { app.appendingPathComponent("Sources/NarumiMenuBar/\($0)").path }
         let compiler = Process()
@@ -35,7 +36,7 @@ final class MCPClientSecureSessionTests: XCTestCase {
         guard compiler.terminationStatus == 0 else { return }
         let fixture = Process()
         fixture.executableURL = executable
-        fixture.arguments = [root.path]
+        fixture.arguments = [root.path, app.deletingLastPathComponent().path]
         let result = try run(fixture)
         XCTAssertEqual(fixture.terminationStatus, 0, result)
         let checks = try JSONDecoder().decode([String: Bool].self, from: Data(result.utf8))
@@ -56,6 +57,7 @@ final class MCPClientSecureSessionTests: XCTestCase {
             "asr_retry_preflight_model_unavailable", "ordinary_asr_response_loss_recovers", "minutes_response_loss_recovers",
             "asr_manual_success_stale_record_rejected",
             "v5_ensemble_field_fully_omitted", "v6_ensemble_field_preserved",
+            "processing_history_public_tools",
         ]
         for prefix in ["v4_codex", "v4_openai", "v4_anthropic", "v4_ollama", "v3_codex"] {
             for suffix in [

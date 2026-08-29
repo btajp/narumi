@@ -28,6 +28,7 @@ final class MainWindowModel: ObservableObject {
     let transcriptionModelCatalog: TranscriptionModelCatalogStore
     let transcriptionRetry: TranscriptionRetryStore
     let transcriptionRequestRecovery: TranscriptionRequestRecoveryStore
+    let processingRunHistory: ProcessingRunHistoryStore
     var hostActions = HostActions()
 
     // MARK: Sidebar
@@ -43,6 +44,7 @@ final class MainWindowModel: ObservableObject {
             if oldValue != selectedMeetingID {
                 transcriptionRetry.invalidate()
                 transcriptionRequestRecovery.invalidate()
+                processingRunHistory.invalidate()
             }
         }
     }
@@ -66,6 +68,7 @@ final class MainWindowModel: ObservableObject {
                 || oldValue?.config != detail?.config || oldValue?.recording != detail?.recording {
                 transcriptionRetry.invalidate()
                 transcriptionRequestRecovery.invalidate()
+                processingRunHistory.invalidate()
             }
         }
     }
@@ -89,6 +92,9 @@ final class MainWindowModel: ObservableObject {
                 transcriptionRequestRecovery.invalidate()
             } else {
                 Task { await transcriptionRequestRecovery.reload() }
+            }
+            if !supportsProcessingRunHistory {
+                processingRunHistory.invalidate()
             }
         }
     }
@@ -122,6 +128,7 @@ final class MainWindowModel: ObservableObject {
         transcriptionModelCatalog = TranscriptionModelCatalogStore(client: client)
         transcriptionRetry = TranscriptionRetryStore(client: client)
         transcriptionRequestRecovery = TranscriptionRequestRecoveryStore(client: client)
+        processingRunHistory = ProcessingRunHistoryStore(client: client)
     }
 
     // MARK: Polling lifecycle (owned by the window controller)
@@ -145,6 +152,7 @@ final class MainWindowModel: ObservableObject {
             transcriptionModelCatalog.invalidate()
             transcriptionRetry.invalidate()
             transcriptionRequestRecovery.invalidate()
+            processingRunHistory.invalidate()
             loadedServerGeneration = nil
             serverInfo = nil
             profilesList = nil
@@ -188,6 +196,7 @@ final class MainWindowModel: ObservableObject {
         pollTask = nil
         transcriptionRetry.invalidate()
         transcriptionRequestRecovery.invalidate()
+        processingRunHistory.invalidate()
     }
 
     var scopeValues: [String] { NarumiFormat.parseScopeInput(scopeText) }
@@ -198,6 +207,16 @@ final class MainWindowModel: ObservableObject {
             return detail.meeting.scope
         }
         return meetings.first(where: { $0.meetingID == meetingID })?.scope
+    }
+
+    var selectedMeetingScope: String? {
+        selectedMeetingID.flatMap(scopeFor(meetingID:))
+    }
+
+    var supportsProcessingRunHistory: Bool {
+        guard let serverInfo else { return false }
+        return serverInfo.capabilities.supportsProcessingRunHistory(
+            contractVersion: serverInfo.contractVersion)
     }
 
     var showsSearchHits: Bool {

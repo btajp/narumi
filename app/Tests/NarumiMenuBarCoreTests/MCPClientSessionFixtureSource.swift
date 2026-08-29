@@ -26,7 +26,11 @@ enum MCPClientSessionFixtureSource {
         private var savedConfig: [String: JSONNode] = [:]
         private var savedProfile: JSONNode = .object([:])
         private var acceptedGenerationRequests = 0
-        init(_ scenario: String) { self.scenario = scenario }
+        private let contractsRoot: URL
+        init(_ scenario: String, contractsRoot: URL) {
+            self.scenario = scenario
+            self.contractsRoot = contractsRoot
+        }
         func invalidate() {}
         func count(_ tool: String) -> Int { lock.withLock { tools.filter { $0 == tool }.count } }
         var calls: [String] { lock.withLock { tools } }
@@ -42,7 +46,7 @@ enum MCPClientSessionFixtureSource {
             case "codex_minutes_requests": return "3.0.0"
             case "minutes_requests", "minutes_retry_response_lost": return "4.0.0"
             case "ensemble_wire5": return "5.0.0"
-            case "ensemble_wire6": return "6.0.0"
+            case "ensemble_wire6", "processing_history": return "6.0.0"
             default: return scenario.hasPrefix("transcription_") ? "5.0.0" : "2.0.0"
             }
         }
@@ -94,6 +98,17 @@ enum MCPClientSessionFixtureSource {
             }
             if let transcription = try transcriptionResponse(request, id: id, name: name) {
                 return transcription
+            }
+            if scenario == "processing_history",
+                [ToolCatalog.listProcessingRuns, ToolCatalog.getProcessingRun,
+                 ToolCatalog.getProcessingArtifact].contains(name) {
+                let file = contractsRoot.appendingPathComponent("contracts/tools/\(name).json")
+                let contract = try JSONNode.parse(Data(contentsOf: file))
+                guard case .array(let outputs)? = contract["examples"]?["output"],
+                    let output = outputs.first else {
+                    throw MCPClientError.protocolError("missing processing history fixture")
+                }
+                return try structured(request, id: id, value: output)
             }
             if ["minutes_requests", "codex_minutes_requests", "legacy_minutes_requests", "ensemble_wire5", "ensemble_wire6"].contains(scenario) {
                 let input = arguments(name).last ?? [:]
@@ -195,7 +210,7 @@ enum MCPClientSessionFixtureSource {
             func client(
                 _ scenario: String, failBootstrap: Bool = false, observer: MCPClient.JobRequestObserver? = nil
             ) -> (MCPClient, FakeHTTP) {
-                let http = FakeHTTP(scenario)
+                let http = FakeHTTP(scenario, contractsRoot: URL(fileURLWithPath: CommandLine.arguments[2]))
                 return (MCPClient(config: config, clientVersion: "test", jobRequestObserver: observer,
                     bootstrapLoader: FakeBootstrap(connection: connection, fail: failBootstrap),
                     transportFactory: { _ in http }), http)
@@ -257,6 +272,31 @@ enum MCPClientSessionFixtureSource {
             checks["generation_unknown_localized_without_details"] =
                 unknownFailure.code == "engine_unavailable" && unknownFailure.message.contains("結果が不明")
                 && unknownFailure.message.contains("自動再送しません") && !unknownFailure.message.contains(fixtureSecret)
+            let (historyMCP, historyWire) = client("processing_history")
+            let history = NarumiClient(mcp: historyMCP)
+            let listed = try await history.listProcessingRuns(
+                meetingID: "20260827T030500Z-a1b2c3d4", scope: "cloudnative", limit: 37,
+                cursor: "opaque_page_2", connectionGeneration: 91)
+            let detailed = try await history.getProcessingRun(
+                meetingID: "20260827T030500Z-a1b2c3d4", scope: "cloudnative",
+                runID: "run-33333333333333333333333333333333", connectionGeneration: 91)
+            let artifact = try await history.getProcessingArtifact(
+                meetingID: "20260827T030500Z-a1b2c3d4", scope: "cloudnative",
+                runID: "run-33333333333333333333333333333333",
+                artifactID: "artifact-88888888888888888888888888888888", connectionGeneration: 91)
+            let listArguments = historyWire.arguments(ToolCatalog.listProcessingRuns).last
+            let runArguments = historyWire.arguments(ToolCatalog.getProcessingRun).last
+            let artifactArguments = historyWire.arguments(ToolCatalog.getProcessingArtifact).last
+            checks["processing_history_public_tools"] = listed.runs.first?.runID == detailed.run.runID
+                && artifact.requestedRunID == detailed.run.runID
+                && listArguments?["scope"]?.stringValue == "cloudnative"
+                && listArguments?["limit"] == .number(37)
+                && listArguments?["cursor"]?.stringValue == "opaque_page_2"
+                && runArguments?["run_id"]?.stringValue == detailed.run.runID
+                && artifactArguments?["artifact_id"]?.stringValue == artifact.artifact.artifactID
+                && historyWire.count(ToolCatalog.listProcessingRuns) == 1
+                && historyWire.count(ToolCatalog.getProcessingRun) == 1
+                && historyWire.count(ToolCatalog.getProcessingArtifact) == 1
             let selections: [(prefix: String, provider: String, scenario: String, effort: String?, maxTokens: Int?)] = [
                 ("v4_codex", "codex-app-server", "minutes_requests", "high", nil),
                 ("v4_openai", "openai-api", "minutes_requests", "high", 8192),

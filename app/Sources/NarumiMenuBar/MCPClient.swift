@@ -93,7 +93,9 @@ actor MCPClient {
                     name, arguments: arguments, confidential: confidential,
                     expectedSessionGeneration: expectedSessionGeneration)
             }
-            return try await performJobTrackedToolCall(name, arguments: arguments, confidential: confidential)
+            return try await performJobTrackedToolCall(
+                name, arguments: arguments, confidential: confidential,
+                expectedSessionGeneration: expectedSessionGeneration)
         } catch {
             guard confidential else { throw error }
             // Servers and URLSession errors may reflect the write-only input. Keep only a

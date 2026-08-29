@@ -9,6 +9,7 @@ struct MinutesTabView: View {
     @State private var regenerateForce = false
     @State private var regenerateReason = ""
     @State private var showRegeneratePopover = false
+    @State private var showRunHistory = false
     @State private var confirmedConfig: MeetingConfig?
     @State private var confirmedMeetingID: String?
 
@@ -17,6 +18,12 @@ struct MinutesTabView: View {
             controls
             Divider()
             content
+        }
+        .sheet(isPresented: $showRunHistory) {
+            ProcessingRunHistoryView(model: model)
+        }
+        .onChange(of: model.supportsProcessingRunHistory) {
+            if !model.supportsProcessingRunHistory { showRunHistory = false }
         }
     }
 
@@ -45,6 +52,16 @@ struct MinutesTabView: View {
                 regeneratePopover
             }
             .disabled(model.detail?.meeting.meetingID != model.selectedMeetingID)
+
+            if model.supportsProcessingRunHistory {
+                Button {
+                    showRunHistory = true
+                } label: {
+                    Label("生成履歴", systemImage: "clock.arrow.circlepath")
+                }
+                .disabled(model.detail?.meeting.meetingID != model.selectedMeetingID)
+                .help("複数案生成のrun・部分案・最終統合成果をローカルから確認")
+            }
 
             Menu {
                 if model.exportDestinations.isEmpty {

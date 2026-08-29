@@ -5,12 +5,15 @@ extension MCPClient {
     /// Only job-producing tools participate. Their original arguments remain in RAM until
     /// the server confirms the outcome; credentials and other tools never enter this ledger.
     func performJobTrackedToolCall(
-        _ name: String, arguments: [String: JSONNode], confidential: Bool
+        _ name: String, arguments: [String: JSONNode], confidential: Bool,
+        expectedSessionGeneration: UInt64? = nil
     ) async throws -> ToolCallResult {
         guard Self.createsJob(name, arguments),
             let requestID = arguments["request_id"]?.stringValue
         else {
-            return try await performToolCall(name, arguments: arguments, confidential: confidential)
+            return try await performToolCall(
+                name, arguments: arguments, confidential: confidential,
+                expectedSessionGeneration: expectedSessionGeneration)
         }
         let request = DesktopJobRequestState.Request(
             requestID: requestID, tool: name, arguments: try JSONNode.object(arguments).serialized())
@@ -18,11 +21,15 @@ extension MCPClient {
             guard !jobRequests.hasTranscriptionRequest(requestID: requestID) else {
                 throw MCPClientError.tool(message: Self.uncertainMessage(tool: ToolCatalog.regenerate), payload: nil)
             }
-            return try await performToolCall(name, arguments: arguments, confidential: confidential)
+            return try await performToolCall(
+                name, arguments: arguments, confidential: confidential,
+                expectedSessionGeneration: expectedSessionGeneration)
         }
         await publishJobRequestState()
         do {
-            let result = try await performToolCall(name, arguments: arguments, confidential: confidential)
+            let result = try await performToolCall(
+                name, arguments: arguments, confidential: confidential,
+                expectedSessionGeneration: expectedSessionGeneration)
             if jobRequests.hasTranscriptionRequest(requestID: requestID),
                 !Self.validTranscriptionReceipt(result, meetingID: arguments["meeting_id"]?.stringValue) {
                 throw MCPClientError.protocolError("音声再送の受付応答が元の会議と一致しません。")
