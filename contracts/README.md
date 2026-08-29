@@ -246,7 +246,7 @@ created_atの降順とrun_idで安定した順序を保ち、すべてのペー�
 evidenceは時刻、話者、Unicode codepointの半開文字区間、元segmentのhashを保持する。
 claimは1〜8件のevidence参照を必要とし、action以外のowner/dueはnull、actionはnullまたは空白以外を含む120文字以下とする。
 conflict questionは2〜4案、missing_contextは1〜4案を持ち、各案は1〜8件の参照を必要とする。
-claim・question・alternativeのtextと、nonnullの話者label/nameは空白のみを拒否する。
+claim・question・alternativeのtextとactionのnonnull owner/dueは空白のみを拒否する。話者label/nameは原文の観測値としてnullまたは0〜512文字を保持し、空文字・空白とnullを区別する。
 有限数・区間順・出現番号・参照解決・ID一意性は保存前に型とserverでも検査する。
 `body_sha256` は公開payload全体の整合hashで、provider requestや下流projectionのhashとは別物。
 
@@ -278,6 +278,7 @@ lineageは最初のunknown origin、最大64件のattempt/outcome鎖、最後の
 統合runがpreparedとして永続化された後はrunning・failed・cancelledでもそのIDを維持する。
 作成前、旧処理、export、provider setup等はnullにする。成功jobのresultにも同じrequired nullable fieldを返し、
 top-levelとresultの両方がnonnullなら同じrun IDでなければならない。
+`result.stages`に`minutes_ensemble`を含む成功regenerateはresultのrun IDをnonnullとし、legacy・単独生成はnullを許可する。
 
 この契約ゲートの成功だけで、server・CLI・Swift を含む製品全体の実装完了とは扱わない。
 
