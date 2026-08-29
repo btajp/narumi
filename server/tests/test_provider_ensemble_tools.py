@@ -141,3 +141,19 @@ def test_ensemble_selection_uses_one_provider_snapshot(codex_context, monkeypatc
     )["profile"]
     assert saved["config"]["minutes_ensemble"] is not None
     assert len(entries) == 3 and len(set(entries)) == 1 and backend.calls == []
+
+
+@pytest.mark.parametrize(
+    ("extra", "code"),
+    [({}, "configuration_conflict"), ({"force": True}, "invalid_argument")],
+)
+def test_ensemble_regeneration_requires_snapshot_and_disallows_force(codex_context, extra, code):
+    ctx, backend, base = codex_context
+    config = ensemble_config(base)
+    bundle = selected_bundle(ctx, config)
+    args = {"meeting_id": bundle.meeting_id, "request_id": str(uuid4()), **extra}
+    if extra:
+        args["expected_config"] = config.model_dump(mode="json")
+    rejected = dispatch(ctx, "regenerate", args)
+    assert rejected.is_error and rejected.payload["error"]["code"] == code
+    assert not ctx.jobs.has_active(bundle.meeting_id) and backend.calls == []
