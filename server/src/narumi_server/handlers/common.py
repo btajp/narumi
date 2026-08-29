@@ -207,15 +207,9 @@ def validated_config(ctx: ServerContext, config: MeetingConfig) -> Iterator[None
         if config.minutes_model is not None:
             minutes.validate_in_transaction(config, document)
         if config.minutes_ensemble is not None:
-            for generator in config.minutes_ensemble.generators:
-                minutes.validate_selection_in_transaction(
-                    generator.selection, config.external_send_policy, document
-                )
-            minutes.validate_selection_in_transaction(
-                config.minutes_ensemble.synthesizer,
-                config.external_send_policy,
-                document,
-            )
+            from narumi.providers.ensemble import EnsembleResolver
+
+            EnsembleResolver(ctx.providers).validate_in_transaction(config, document)
         if config.transcription_model is not None:
             TranscriptionResolver(ctx.providers).validate_in_transaction(config, document)
         yield
