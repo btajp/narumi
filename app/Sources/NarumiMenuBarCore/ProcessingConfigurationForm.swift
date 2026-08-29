@@ -9,7 +9,9 @@ public struct ProcessingConfigurationForm: Equatable, Sendable {
     public var language: String
     public var selfName: String
     public var vocabHintsText: String
+    private var ensembleMode: Bool
     public var minutesModel: MinutesModelForm
+    public var minutesEnsemble: MinutesEnsembleForm
     public var transcriptionModel: TranscriptionModelForm
     public let originalConfig: MeetingConfig
     private let originalPolicy: String
@@ -23,7 +25,9 @@ public struct ProcessingConfigurationForm: Equatable, Sendable {
         language = config.language ?? ""
         selfName = config.selfName ?? ""
         vocabHintsText = (config.vocabHints ?? []).joined(separator: "\n")
+        ensembleMode = config.minutesEnsemble != nil
         minutesModel = MinutesModelForm(selection: config.minutesModel)
+        minutesEnsemble = MinutesEnsembleForm(selection: config.minutesEnsemble)
         transcriptionModel = TranscriptionModelForm(selection: config.transcriptionModel)
         originalConfig = config
         originalPolicy = config.externalSendPolicy ?? "local_only"
@@ -41,16 +45,44 @@ public struct ProcessingConfigurationForm: Equatable, Sendable {
             .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     }
 
+    public var minutesGenerationMode: MinutesGenerationMode {
+        ensembleMode ? .ensemble : (minutesModel.mode == .selected ? .single : .legacy)
+    }
+
+    public mutating func selectMinutesGenerationMode(_ mode: MinutesGenerationMode) {
+        ensembleMode = mode == .ensemble
+        if mode == .legacy { minutesModel.mode = .legacy }
+        if mode == .single { minutesModel.mode = .selected }
+    }
+
     public func makeUpdate(
         supportsMinutesModel: Bool = true, supportedProviders: [String] = MinutesModelSelection.providers,
+        supportsMinutesEnsembleWire: Bool = false, canExecuteMinutesEnsemble: Bool? = nil,
         supportsTranscriptionModel: Bool = true,
         supportedTranscriptionProviders: [String] = TranscriptionModelSelection.providers
     ) throws -> ProcessingConfigurationUpdate {
-        guard supportsMinutesModel || minutesModel.mode == .legacy else {
+        guard supportsMinutesModel || minutesGenerationMode != .single else {
             throw ConfigurationFormFailure(message: "このサーバーは議事録モデル選択に対応していません。アプリを更新してください。")
         }
-        guard minutesModel.mode != .selected || (minutesModel.selection != nil && supportedProviders.contains(minutesModel.provider)) else {
+        guard minutesGenerationMode != .single
+            || (minutesModel.selection != nil && supportedProviders.contains(minutesModel.provider)) else {
             throw ConfigurationFormFailure(message: "対応するプロバイダの接続・モデルと、利用できるパラメータを選んでください。")
+        }
+        let ensembleReady = canExecuteMinutesEnsemble ?? supportsMinutesEnsembleWire
+        guard ensembleReady || minutesGenerationMode != .ensemble else {
+            throw ConfigurationFormFailure(message: "このサーバーは複数案の生成と統合に対応していません。アプリを更新してください。")
+        }
+        if minutesGenerationMode == .ensemble {
+            guard let ensemble = minutesEnsemble.selection,
+                ensemble.generators.allSatisfy({ supportedProviders.contains($0.selection.provider) }),
+                supportedProviders.contains(ensemble.synthesizer.provider) else {
+                throw ConfigurationFormFailure(message: minutesEnsemble.structuralValidationMessage
+                    ?? "対応する生成担当と統合担当を選んでください。")
+            }
+            let participants = ensemble.generators.map(\.selection) + [ensemble.synthesizer]
+            guard Self.policyAllows(participants: participants, policy: effectiveExternalSendPolicy) else {
+                throw ConfigurationFormFailure(message: "複数案の全担当に必要な外部送信ポリシーを明示してください。API 接続には api_ok が必要です。")
+            }
         }
         guard supportsTranscriptionModel || transcriptionModel.mode == .local else {
             throw ConfigurationFormFailure(message: "このサーバーは API 音声認識の設定に対応していません。アプリを更新してください。")
@@ -75,19 +107,34 @@ public struct ProcessingConfigurationForm: Equatable, Sendable {
             externalSendPolicy: externalSendPolicy.isEmpty ? nil : externalSendPolicy,
             language: language.isEmpty ? nil : language,
             selfName: trimmedName.isEmpty ? nil : trimmedName, vocabHints: vocabHints,
-            minutesModel: minutesModel.mode == .selected ? minutesModel.selection : nil,
+            minutesModel: minutesGenerationMode == .single ? minutesModel.selection : nil,
+            minutesEnsemble: minutesGenerationMode == .ensemble ? minutesEnsemble.selection : nil,
             transcriptionModel: transcriptionModel.mode == .selected ? transcriptionModel.selection : nil),
-            includesMinutesModel: supportsMinutesModel, includesTranscriptionModel: supportsTranscriptionModel)
+            includesMinutesModel: supportsMinutesModel, includesMinutesEnsemble: supportsMinutesEnsembleWire,
+            includesTranscriptionModel: supportsTranscriptionModel)
+    }
+
+    private static func policyAllows(participants: [MinutesModelSelection], policy: String) -> Bool {
+        participants.allSatisfy { selection in
+            switch selection.provider {
+            case "openai-api", "anthropic-api": return policy == "api_ok"
+            case "codex-app-server": return policy == "subscription_ok" || policy == "api_ok"
+            case "ollama": return ["local_only", "subscription_ok", "api_ok"].contains(policy)
+            default: return false
+            }
+        }
     }
 }
 
 public struct ProcessingConfigurationUpdate: Encodable, Equatable, Sendable {
     public let config: MeetingConfig
     let includesMinutesModel: Bool
+    let includesMinutesEnsemble: Bool
     let includesTranscriptionModel: Bool
     enum ExplicitKeys: String, CodingKey {
         case selfName = "self_name"
         case minutesModel = "minutes_model"
+        case minutesEnsemble = "minutes_ensemble"
         case transcriptionModel = "transcription_model"
     }
 
@@ -97,6 +144,7 @@ public struct ProcessingConfigurationUpdate: Encodable, Equatable, Sendable {
         try container.encode(config.selfName, forKey: .selfName)
         // Omission would retain a previous override instead of switching back to legacy.
         if includesMinutesModel { try container.encode(config.minutesModel, forKey: .minutesModel) }
+        if includesMinutesEnsemble { try container.encode(config.minutesEnsemble, forKey: .minutesEnsemble) }
         if includesTranscriptionModel { try container.encode(config.transcriptionModel, forKey: .transcriptionModel) }
     }
 
@@ -111,6 +159,7 @@ public struct ProcessingConfigurationUpdate: Encodable, Equatable, Sendable {
         result.selfName = config.selfName
         result.vocabHints = config.vocabHints
         if includesMinutesModel { result.minutesModel = config.minutesModel }
+        if includesMinutesEnsemble { result.minutesEnsemble = config.minutesEnsemble }
         if includesTranscriptionModel { result.transcriptionModel = config.transcriptionModel }
         return result
     }

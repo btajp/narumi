@@ -145,7 +145,10 @@ final class RuntimeSyncOrphanTests: XCTestCase {
             + [
                 "RuntimeSyncOwnership.swift", "RuntimeGuards.swift", "RuntimeInstallation.swift", "RuntimeSyncPlan.swift", "RuntimeManifest.swift",
                 "ServerCommand.swift", "ServerConfig.swift", "ServerReadiness.swift", "ServerState.swift", "OwnedServerRecovery.swift",
-                "ContractModels.swift", "MinutesModelSelection.swift", "TranscriptionModelSelection.swift",
+                "ContractModels.swift", "ContractVersionedModels.swift", "MinutesModelSelection.swift", "TranscriptionModelSelection.swift",
+                "ContractKeyValidation.swift", "MinutesEnsembleSelection.swift", "MinutesEnsembleCapabilities.swift",
+                "MinutesModelCapabilities.swift",
+                "ProcessingRunModels.swift", "ProcessingRunValidation.swift", "ProcessingArtifactModels.swift", "MinutesRetry.swift",
                 "TranscriptionRetry.swift", "ToolErrorInfo.swift", "RecordingPermissionModels.swift", "ToolCatalog.swift",
                 "MCPServerEndpoint.swift", "ProviderWorkflowCapabilities.swift", "KeychainHelperLocation.swift",
             ]

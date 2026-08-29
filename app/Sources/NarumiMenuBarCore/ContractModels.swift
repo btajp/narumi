@@ -22,7 +22,7 @@ public struct MeetingSummary: Codable, Equatable, Sendable, Identifiable {
 
     public var id: String { meetingID }
 
-    enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey, CaseIterable {
         case meetingID = "meeting_id"
         case meetingName = "meeting_name"
         case engagement
@@ -157,17 +157,19 @@ public struct MeetingConfig: Codable, Equatable, Sendable {
     public var diarizationEngine: String?
     public var llmProvider: String?
     public var minutesModel: MinutesModelSelection?
+    public var minutesEnsemble: MinutesEnsembleSelection?
     public var transcriptionModel: TranscriptionModelSelection?
     public var externalSendPolicy: String?
     public var language: String?
     public var selfName: String?
     public var vocabHints: [String]?
 
-    enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey, CaseIterable {
         case transcriptionEngine = "transcription_engine"
         case diarizationEngine = "diarization_engine"
         case llmProvider = "llm_provider"
         case minutesModel = "minutes_model"
+        case minutesEnsemble = "minutes_ensemble"
         case transcriptionModel = "transcription_model"
         case externalSendPolicy = "external_send_policy"
         case language
@@ -179,12 +181,14 @@ public struct MeetingConfig: Codable, Equatable, Sendable {
         transcriptionEngine: String? = nil, diarizationEngine: String? = nil,
         llmProvider: String? = nil, externalSendPolicy: String? = nil, language: String? = nil,
         selfName: String? = nil, vocabHints: [String]? = nil,
-        minutesModel: MinutesModelSelection? = nil, transcriptionModel: TranscriptionModelSelection? = nil
+        minutesModel: MinutesModelSelection? = nil, minutesEnsemble: MinutesEnsembleSelection? = nil,
+        transcriptionModel: TranscriptionModelSelection? = nil
     ) {
         self.transcriptionEngine = transcriptionEngine
         self.diarizationEngine = diarizationEngine
         self.llmProvider = llmProvider
         self.minutesModel = minutesModel
+        self.minutesEnsemble = minutesEnsemble
         self.transcriptionModel = transcriptionModel
         self.externalSendPolicy = externalSendPolicy
         self.language = language
@@ -198,7 +202,7 @@ public struct MeetingConfig: Codable, Equatable, Sendable {
         externalSendPolicy: "local_only", language: "ja", vocabHints: [])
 
     public var requiresGenerationConfirmation: Bool {
-        minutesModel != nil || transcriptionModel != nil
+        minutesModel != nil || minutesEnsemble != nil || transcriptionModel != nil
     }
 }
 
@@ -322,8 +326,10 @@ public struct Minutes: Codable, Equatable, Sendable {
     public var provider: String
     public var unresolvedSpeakers: [String]
     public var availableVersions: [Int]
+    public var provenance: PublishedMinutesEnsembleProvenance?
+    public internal(set) var provenanceWasPresent: Bool
 
-    enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey, CaseIterable {
         case meetingID = "meeting_id"
         case version
         case markdown
@@ -331,6 +337,7 @@ public struct Minutes: Codable, Equatable, Sendable {
         case provider
         case unresolvedSpeakers = "unresolved_speakers"
         case availableVersions = "available_versions"
+        case provenance
     }
 }
 
@@ -376,55 +383,6 @@ public struct Transcript: Codable, Equatable, Sendable {
         case speakerMap = "speaker_map"
         case availableSources = "available_sources"
     }
-}
-
-// MARK: - Jobs
-
-/// Known keys of a succeeded job's `result` (free-form object in the contract).
-public struct JobResultSummary: Codable, Equatable, Sendable {
-    public var meetingID: String?
-    public var minutesVersion: Int?
-    public var destination: String?
-    public var ref: String?
-
-    enum CodingKeys: String, CodingKey {
-        case meetingID = "meeting_id"
-        case minutesVersion = "minutes_version"
-        case destination
-        case ref
-    }
-}
-
-/// `defs/common.json#/$defs/job`.
-public struct Job: Codable, Equatable, Sendable, Identifiable {
-    public var jobID: String
-    public var meetingID: String?
-    public var kind: String
-    public var status: String
-    public var progress: JobProgress?
-    public var result: JobResultSummary?
-    public var error: ToolErrorInfo?
-    public var createdAt: String
-    public var updatedAt: String
-
-    public var id: String { jobID }
-    public var isActive: Bool { status == "queued" || status == "running" }
-
-    enum CodingKeys: String, CodingKey {
-        case jobID = "job_id"
-        case meetingID = "meeting_id"
-        case kind
-        case status
-        case progress
-        case result
-        case error
-        case createdAt = "created_at"
-        case updatedAt = "updated_at"
-    }
-}
-
-public struct JobStatusResponse: Codable, Equatable, Sendable {
-    public var job: Job
 }
 
 public struct RegenerateResponse: Codable, Equatable, Sendable {
@@ -614,6 +572,7 @@ public struct ServerCapabilities: Codable, Equatable, Sendable {
     public var llmProviders: [String]
     public var minutesModelProviders: [String]?
     public var transcriptionModelProviders: [String]?
+    public var minutesEnsembleLimits: MinutesEnsembleLimits?
     public var exportDestinations: [String]
     public var permissionSetupInProgress: Bool
     public var workflow: ProviderWorkflowCapabilities?
@@ -627,6 +586,7 @@ public struct ServerCapabilities: Codable, Equatable, Sendable {
         case llmProviders = "llm_providers"
         case minutesModelProviders = "minutes_model_providers"
         case transcriptionModelProviders = "transcription_model_providers"
+        case minutesEnsembleLimits = "minutes_ensemble_limits"
         case exportDestinations = "export_destinations"
         case permissionSetupInProgress = "permission_setup_in_progress"
         case workflow
@@ -637,7 +597,7 @@ public struct ServerCapabilities: Codable, Equatable, Sendable {
         transcriptionEngines: [String], diarizationEngines: [String], llmProviders: [String],
         exportDestinations: [String], permissionSetupInProgress: Bool = false,
         workflow: ProviderWorkflowCapabilities? = nil, minutesModelProviders: [String]? = nil,
-        transcriptionModelProviders: [String]? = nil
+        transcriptionModelProviders: [String]? = nil, minutesEnsembleLimits: MinutesEnsembleLimits? = nil
     ) {
         self.recording = recording
         self.permissions = permissions
@@ -647,6 +607,7 @@ public struct ServerCapabilities: Codable, Equatable, Sendable {
         self.llmProviders = llmProviders
         self.minutesModelProviders = minutesModelProviders
         self.transcriptionModelProviders = transcriptionModelProviders
+        self.minutesEnsembleLimits = minutesEnsembleLimits
         self.exportDestinations = exportDestinations
         self.permissionSetupInProgress = permissionSetupInProgress
         self.workflow = workflow
@@ -664,6 +625,8 @@ public struct ServerCapabilities: Codable, Equatable, Sendable {
             ? try container.decode([String].self, forKey: .minutesModelProviders) : nil
         transcriptionModelProviders = container.contains(.transcriptionModelProviders)
             ? try container.decode([String].self, forKey: .transcriptionModelProviders) : nil
+        minutesEnsembleLimits = container.contains(.minutesEnsembleLimits)
+            ? try container.decode(MinutesEnsembleLimits.self, forKey: .minutesEnsembleLimits) : nil
         exportDestinations = try container.decode([String].self, forKey: .exportDestinations)
         workflow = try container.decodeIfPresent(ProviderWorkflowCapabilities.self, forKey: .workflow)
         if container.contains(.permissionSetupInProgress) {

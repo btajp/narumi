@@ -93,7 +93,8 @@ private struct RecoveryConfiguration: Decodable {
 
     init(from decoder: Decoder) throws {
         try requireRecoveryKeys(decoder, allowed: [
-            "transcription_engine", "diarization_engine", "llm_provider", "minutes_model", "transcription_model",
+            "transcription_engine", "diarization_engine", "llm_provider", "minutes_model", "minutes_ensemble",
+            "transcription_model",
             "external_send_policy", "language", "self_name", "vocab_hints",
         ])
         let container = try decoder.container(keyedBy: MeetingConfig.CodingKeys.self)
@@ -108,10 +109,13 @@ private struct RecoveryConfiguration: Decodable {
             selfName: container.decodeIfPresent(String.self, forKey: .selfName),
             vocabHints: container.decode([String].self, forKey: .vocabHints),
             minutesModel: container.decodeIfPresent(MinutesModelSelection.self, forKey: .minutesModel),
+            minutesEnsemble: container.decodeIfPresent(MinutesEnsembleSelection.self, forKey: .minutesEnsemble),
             transcriptionModel: container.decode(TranscriptionModelSelection.self, forKey: .transcriptionModel))
         guard value.externalSendPolicy == "api_ok",
             value.language.map(TranscriptionModelForm.isSupportedLanguage) == true,
-            value.minutesModel.map({ $0.isWellFormed && $0.modelID.unicodeScalars.count <= 256 }) ?? true else {
+            value.minutesModel.map({ $0.isWellFormed && $0.modelID.unicodeScalars.count <= 256 }) ?? true,
+            value.minutesEnsemble.map(\.isWellFormed) ?? true,
+            value.minutesModel == nil || value.minutesEnsemble == nil else {
             throw TranscriptionRequestRecoveryError.invalidRequest
         }
     }

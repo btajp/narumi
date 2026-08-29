@@ -23,6 +23,14 @@ public struct ProviderWorkflowCapabilities: Codable, Equatable, Sendable {
         self.stageModelSelection = stageModelSelection
         self.ensembleGeneration = ensembleGeneration
     }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        providerConnections = try container.decode(Bool.self, forKey: .providerConnections)
+        providerModels = try container.decode(Bool.self, forKey: .providerModels)
+        stageModelSelection = try container.decode(Bool.self, forKey: .stageModelSelection)
+        ensembleGeneration = try container.decodeIfPresent(Bool.self, forKey: .ensembleGeneration) ?? false
+    }
 }
 
 /// Informational transport requirements; these fields do not establish server trust.

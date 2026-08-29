@@ -31,6 +31,11 @@ public enum ToolCatalog {
     public static let getJobStatus = "get_job_status"
     public static let cancelJob = "cancel_job"
 
+    // Durable minutes ensemble reads (contract 6; local read only).
+    public static let listProcessingRuns = "list_processing_runs"
+    public static let getProcessingRun = "get_processing_run"
+    public static let getProcessingArtifact = "get_processing_artifact"
+
     // Destructive
     public static let discardTracks = "discard_tracks"
     public static let deleteMeeting = "delete_meeting"
@@ -82,6 +87,9 @@ public enum ToolCatalog {
         listExportDestinations,
         getJobStatus,
         cancelJob,
+        listProcessingRuns,
+        getProcessingRun,
+        getProcessingArtifact,
         discardTracks,
         deleteMeeting,
         importRecording,

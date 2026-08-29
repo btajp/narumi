@@ -183,9 +183,12 @@ final class ContractModelsTests: XCTestCase {
         let responses = try decodeAll(JobStatusResponse.self, tool: "get_job_status")
         XCTAssertEqual(responses[0].job.status, "running")
         XCTAssertTrue(responses[0].job.isActive)
-        XCTAssertEqual(responses[1].job.status, "failed")
-        XCTAssertFalse(responses[1].job.isActive)
-        XCTAssertEqual(responses[1].job.error?.code, "policy_violation")
+        let failed = try XCTUnwrap(responses.first(where: { $0.job.error?.code == "policy_violation" }))
+        XCTAssertEqual(failed.job.status, "failed")
+        XCTAssertFalse(failed.job.isActive)
+        let minutesUnknown = try XCTUnwrap(responses.first(where: { $0.job.error?.minutesOutcome != nil }))
+        XCTAssertEqual(minutesUnknown.job.error?.minutesOutcome?.reason, "minutes_outcome_unknown")
+        XCTAssertTrue(minutesUnknown.job.error?.message.contains("確認付き再送") == true)
     }
 
     func testCancelJob() throws {
@@ -338,9 +341,10 @@ final class ContractModelsTests: XCTestCase {
 
     func testASRCapabilityIsExplicitAndRestrictedToContractFiveHTTP() throws {
         var info = try XCTUnwrap(try decodeAll(ServerInfo.self, tool: "get_server_info").first)
-        for version in ["2.0.0", "3.0.0", "4.0.0", "5.0.0-rc.1", "6.0.0"] {
+        for version in ["2.0.0", "3.0.0", "4.0.0", "5.0.0-rc.1", "6.0.0-rc.1", "7.0.0"] {
             XCTAssertTrue(info.capabilities.supportedTranscriptionModelProviders(contractVersion: version).isEmpty, version)
         }
+        XCTAssertEqual(info.capabilities.supportedTranscriptionModelProviders(contractVersion: "6.0.0"), ["openai-api"])
         XCTAssertEqual(info.capabilities.supportedTranscriptionModelProviders(contractVersion: "5.0.0"), ["openai-api"])
         info.capabilities.transcriptionModelProviders = ["openai-api", "codex-app-server", "unknown"]
         XCTAssertEqual(info.capabilities.supportedTranscriptionModelProviders(contractVersion: "5.0.0"), ["openai-api"])

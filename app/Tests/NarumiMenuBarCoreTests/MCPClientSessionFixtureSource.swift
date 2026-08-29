@@ -38,9 +38,11 @@ enum MCPClientSessionFixtureSource {
         private var contractVersion: String {
             switch scenario {
             case "v1": return "1.1.0"
-            case "future_contract": return "6.0.0"
+            case "future_contract": return "7.0.0"
             case "codex_minutes_requests": return "3.0.0"
             case "minutes_requests", "minutes_retry_response_lost": return "4.0.0"
+            case "ensemble_wire5": return "5.0.0"
+            case "ensemble_wire6": return "6.0.0"
             default: return scenario.hasPrefix("transcription_") ? "5.0.0" : "2.0.0"
             }
         }
@@ -93,12 +95,12 @@ enum MCPClientSessionFixtureSource {
             if let transcription = try transcriptionResponse(request, id: id, name: name) {
                 return transcription
             }
-            if ["minutes_requests", "codex_minutes_requests", "legacy_minutes_requests"].contains(scenario) {
+            if ["minutes_requests", "codex_minutes_requests", "legacy_minutes_requests", "ensemble_wire5", "ensemble_wire6"].contains(scenario) {
                 let input = arguments(name).last ?? [:]
                 if name == ToolCatalog.setMeetingConfig {
                     let configurationKeys: Set<String> = [
                         "transcription_engine", "diarization_engine", "llm_provider", "external_send_policy",
-                        "language", "self_name", "vocab_hints", "minutes_model",
+                        "language", "self_name", "vocab_hints", "minutes_model", "minutes_ensemble",
                     ]
                     let updates = input.filter { configurationKeys.contains($0.key) }
                     let config = lock.withLock {
@@ -297,6 +299,46 @@ enum MCPClientSessionFixtureSource {
             checks["legacy_generation_omits_new_config_field"] = legacyGeneration["expected_config"] == nil
                 && legacyGeneration["force"] == .bool(true)
                 && legacyWire.arguments(ToolCatalog.registerContext).last?["expected_config"] == nil
+            func verifyEnsembleWire(_ scenario: String, includesField: Bool) async throws -> Bool {
+                let selection = MinutesModelSelection(
+                    provider: "openai-api", connectionID: "conn-111122223333", connectionRevision: 1,
+                    modelID: "fixture-openai-api-text-model", reasoningEffort: "high", maxTokens: 4096)
+                let ensemble = MinutesEnsembleSelection(generators: [
+                    MinutesEnsembleGenerator(id: "gen-11111111111111111111111111111111", label: "案1", selection: selection),
+                    MinutesEnsembleGenerator(id: "gen-22222222222222222222222222222222", label: "案2", selection: selection),
+                ], synthesizer: selection)
+                let config = MeetingConfig(
+                    llmProvider: "none", externalSendPolicy: "api_ok", minutesEnsemble: ensemble)
+                let (mcp, wire) = client(scenario)
+                let typed = NarumiClient(mcp: mcp)
+                let ensembleNode = JSONNode.object(try NarumiClient.arguments(ensemble))
+                _ = try await typed.setMeetingConfig(
+                    meetingID: "20260829T000000Z-a1b2c3d4", scope: nil,
+                    updates: ["minutes_ensemble": ensembleNode], expectedConfig: config)
+                _ = try await typed.setProfile(
+                    name: "fixture-ensemble", updates: ["config": .object(try NarumiClient.arguments(config))],
+                    expectedConfig: config)
+                _ = try await typed.regenerate(
+                    meetingID: "20260829T000000Z-a1b2c3d4", scope: nil, force: false,
+                    reason: "fixture", expectedConfig: config)
+                _ = try await typed.registerContext(
+                    meetingID: "20260829T000000Z-a1b2c3d4", scope: nil, sourceType: "text",
+                    payload: .content("fixture text"), label: nil, autoRegenerate: true, expectedConfig: config)
+                let meeting = wire.arguments(ToolCatalog.setMeetingConfig).last
+                let profile = wire.arguments(ToolCatalog.setProfile).last
+                let regenerate = wire.arguments(ToolCatalog.regenerate).last
+                let context = wire.arguments(ToolCatalog.registerContext).last
+                let presences = [
+                    meeting?["minutes_ensemble"] != nil, meeting?["expected_config"]?["minutes_ensemble"] != nil,
+                    profile?["config"]?["minutes_ensemble"] != nil, profile?["expected_config"]?["minutes_ensemble"] != nil,
+                    regenerate?["expected_config"]?["minutes_ensemble"] != nil,
+                    context?["expected_config"]?["minutes_ensemble"] != nil,
+                ]
+                return presences.allSatisfy { $0 == includesField }
+                    && wire.count(ToolCatalog.getServerInfo) == 1
+            }
+            checks["v5_ensemble_field_fully_omitted"] = try await verifyEnsembleWire("ensemble_wire5", includesField: false)
+            checks["v6_ensemble_field_preserved"] = try await verifyEnsembleWire("ensemble_wire6", includesField: true)
             for (prefix, modelID) in [("v5_whisper", "whisper-1"), ("v5_diarize", "gpt-4o-transcribe-diarize")] {
                 let (transcriptionMCP, transcriptionWire) = client("transcription_requests")
                 let results = try await checkTranscriptionSelection(

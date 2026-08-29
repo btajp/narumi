@@ -9,18 +9,24 @@ struct ToolFailure: Error, Equatable, CustomStringConvertible {
     var code: String
     var message: String
     var transcriptionOutcome: TranscriptionOutcomeUnknownDetails?
+    var minutesOutcome: MinutesOutcomeUnknownDetails?
 
     var isBusy: Bool { code == "busy" }
     var description: String { "\(code): \(message)" }
 
-    init(code: String, message: String, transcriptionOutcome: TranscriptionOutcomeUnknownDetails? = nil) {
+    init(
+        code: String, message: String, transcriptionOutcome: TranscriptionOutcomeUnknownDetails? = nil,
+        minutesOutcome: MinutesOutcomeUnknownDetails? = nil
+    ) {
         self.code = code
         self.message = message
         self.transcriptionOutcome = transcriptionOutcome
+        self.minutesOutcome = minutesOutcome
     }
 
     init(from error: MCPClientError) {
         transcriptionOutcome = nil
+        minutesOutcome = nil
         switch error {
         case .tool(let message, let payload):
             if let inner = payload?["error"], let code = inner["code"]?.stringValue {
@@ -33,6 +39,7 @@ struct ToolFailure: Error, Equatable, CustomStringConvertible {
                 if let data = try? inner.serialized(),
                     let decoded = try? JSONDecoder().decode(ToolErrorInfo.self, from: data) {
                     self.transcriptionOutcome = decoded.transcriptionOutcome
+                    self.minutesOutcome = decoded.minutesOutcome
                 }
             } else {
                 self.code = "error"
@@ -101,6 +108,33 @@ struct NarumiClient: Sendable {
             throw ToolFailure(code: "protocol", message: "ツールの入力が JSON オブジェクトではありません")
         }
         return arguments
+    }
+
+    private func configurationArguments(_ config: MeetingConfig) async throws -> [String: JSONNode] {
+        var arguments = try Self.arguments(config)
+        let version = try await mcp.contractVersionForEncoding()
+        if version?.split(separator: ".").first == "6" {
+            if let ensemble = config.minutesEnsemble {
+                arguments["minutes_ensemble"] = .object(try Self.arguments(ensemble))
+            } else {
+                arguments["minutes_ensemble"] = .null
+            }
+        } else {
+            arguments.removeValue(forKey: "minutes_ensemble")
+        }
+        return arguments
+    }
+
+    private func projectConfigurationUpdate(_ updates: [String: JSONNode]) async throws -> [String: JSONNode] {
+        let version = try await mcp.contractVersionForEncoding()
+        guard version?.split(separator: ".").first != "6" else { return updates }
+        var projected = updates
+        projected.removeValue(forKey: "minutes_ensemble")
+        if case .object(var config)? = projected["config"] {
+            config.removeValue(forKey: "minutes_ensemble")
+            projected["config"] = .object(config)
+        }
+        return projected
     }
 
     /// Scope selector: empty = omit (unscoped only), one name = string, 2+ = explicit array.
@@ -174,7 +208,12 @@ struct NarumiClient: Sendable {
         if let scope {
             args["scope"] = .string(scope)
         }
-        return try await call(ToolCatalog.getMinutes, args)
+        let minutes: Minutes = try await call(ToolCatalog.getMinutes, args)
+        let contractVersion = await mcp.negotiatedContractVersion
+        guard minutes.validatesProvenance(contractVersion: contractVersion) else {
+            throw ToolFailure(code: "protocol", message: "議事録の生成来歴が契約と一致しません。")
+        }
+        return minutes
     }
 
     func transcript(meetingID: String, source: String? = nil, scope: String?) async throws -> Transcript {
@@ -218,7 +257,7 @@ struct NarumiClient: Sendable {
         // Older servers have no ASR selection. Explicit model processing always carries the
         // exact configuration shown in the confirmation; no retry token is inferred from an epoch.
         if let expectedConfig, expectedConfig.requiresGenerationConfirmation {
-            args["expected_config"] = .object(try Self.arguments(expectedConfig))
+            args["expected_config"] = .object(try await configurationArguments(expectedConfig))
         }
         if let transcriptionRetry { args["transcription_retry"] = .object(try Self.arguments(transcriptionRetry)) }
         return try await call(ToolCatalog.regenerate, args)
@@ -255,7 +294,7 @@ struct NarumiClient: Sendable {
         if autoRegenerate {
             args["auto_regenerate"] = .bool(true)
             if let expectedConfig, expectedConfig.requiresGenerationConfirmation {
-                args["expected_config"] = .object(try Self.arguments(expectedConfig))
+                args["expected_config"] = .object(try await configurationArguments(expectedConfig))
             }
         }
         return try await call(ToolCatalog.registerContext, args)
@@ -269,13 +308,13 @@ struct NarumiClient: Sendable {
         meetingID: String, scope: String?, updates: [String: JSONNode],
         expectedConfig: MeetingConfig? = nil, requestID: String? = nil
     ) async throws -> SetMeetingConfigResponse {
-        var args = updates
+        var args = try await projectConfigurationUpdate(updates)
         args["meeting_id"] = .string(meetingID)
         args["request_id"] = requestID.map { .string($0) } ?? Self.requestID()
         if let scope {
             args["scope"] = .string(scope)
         }
-        if let expectedConfig { args["expected_config"] = .object(try Self.arguments(expectedConfig)) }
+        if let expectedConfig { args["expected_config"] = .object(try await configurationArguments(expectedConfig)) }
         return try await call(ToolCatalog.setMeetingConfig, args)
     }
 
@@ -311,12 +350,20 @@ struct NarumiClient: Sendable {
 
     func jobStatus(jobID: String) async throws -> Job {
         let response: JobStatusResponse = try await call(ToolCatalog.getJobStatus, ["job_id": .string(jobID)])
+        let version = await mcp.negotiatedContractVersion
+        guard response.job.validatesProcessingRunCorrelation(contractVersion: version) else {
+            throw ToolFailure(code: "protocol", message: "ジョブと議事録処理runの対応が契約と一致しません。")
+        }
         return response.job
     }
 
     func cancelJob(jobID: String) async throws -> Job {
         let response: JobStatusResponse = try await call(
             ToolCatalog.cancelJob, ["job_id": .string(jobID), "request_id": Self.requestID()])
+        let version = await mcp.negotiatedContractVersion
+        guard response.job.validatesProcessingRunCorrelation(contractVersion: version) else {
+            throw ToolFailure(code: "protocol", message: "取消応答と議事録処理runの対応が契約と一致しません。")
+        }
         return response.job
     }
 
@@ -403,10 +450,10 @@ struct NarumiClient: Sendable {
     /// `updates` carries the set_profile keys to change (config / scope / engagement /
     /// export_destinations / make_default).
     func setProfile(name: String, updates: [String: JSONNode], expectedConfig: MeetingConfig? = nil) async throws -> Profile {
-        var args = updates
+        var args = try await projectConfigurationUpdate(updates)
         args["name"] = .string(name)
         args["request_id"] = Self.requestID()
-        if let expectedConfig { args["expected_config"] = .object(try Self.arguments(expectedConfig)) }
+        if let expectedConfig { args["expected_config"] = .object(try await configurationArguments(expectedConfig)) }
         let response: ProfileResponse = try await call(ToolCatalog.setProfile, args)
         return response.profile
     }

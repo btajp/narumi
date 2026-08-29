@@ -67,6 +67,10 @@ public struct DesktopJobState: Equatable, Sendable {
         guard activeToken == token else { return false }
         activeToken = nil
         let requestedIDs = Set(token.ids)
+        for job in jobs where requestedIDs.contains(job.jobID) {
+            guard job.validatesProcessingRunCorrelation(contractVersion: nil),
+                snapshots[job.jobID].map(job.canFollow) ?? true else { return false }
+        }
         var returnedIDs: Set<String> = []
         for job in jobs where requestedIDs.contains(job.jobID) {
             snapshots[job.jobID] = job

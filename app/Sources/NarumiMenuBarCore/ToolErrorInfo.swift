@@ -5,6 +5,7 @@ public struct ToolErrorInfo: Codable, Equatable, Sendable {
     public var code: String
     public var message: String
     public var transcriptionOutcome: TranscriptionOutcomeUnknownDetails?
+    public var minutesOutcome: MinutesOutcomeUnknownDetails?
 
     enum CodingKeys: String, CodingKey { case code, message }
     private enum DetailKeys: String, CodingKey { case details }
@@ -18,10 +19,14 @@ public struct ToolErrorInfo: Codable, Equatable, Sendable {
         }
     }
 
-    public init(code: String, message: String, transcriptionOutcome: TranscriptionOutcomeUnknownDetails? = nil) {
+    public init(
+        code: String, message: String, transcriptionOutcome: TranscriptionOutcomeUnknownDetails? = nil,
+        minutesOutcome: MinutesOutcomeUnknownDetails? = nil
+    ) {
         self.code = code
         self.message = message
         self.transcriptionOutcome = transcriptionOutcome
+        self.minutesOutcome = minutesOutcome
     }
 
     public init(from decoder: Decoder) throws {
@@ -31,6 +36,7 @@ public struct ToolErrorInfo: Codable, Equatable, Sendable {
         let extra = try decoder.container(keyedBy: DetailKeys.self)
         let details = try? extra.decode(OutcomeDetails.self, forKey: .details)
         transcriptionOutcome = try? extra.decode(TranscriptionOutcomeUnknownDetails.self, forKey: .details)
+        minutesOutcome = try? extra.decode(MinutesOutcomeUnknownDetails.self, forKey: .details)
         message = Self.generationOutcomeMessage(
             reason: details?.reason, unknown: details?.outcomeUnknown == true, stage: details?.stage) ?? original
     }
@@ -42,6 +48,9 @@ public struct ToolErrorInfo: Codable, Equatable, Sendable {
         if let transcriptionOutcome {
             var extra = encoder.container(keyedBy: DetailKeys.self)
             try extra.encode(transcriptionOutcome, forKey: .details)
+        } else if let minutesOutcome {
+            var extra = encoder.container(keyedBy: DetailKeys.self)
+            try extra.encode(minutesOutcome, forKey: .details)
         }
     }
 
@@ -52,6 +61,9 @@ public struct ToolErrorInfo: Codable, Equatable, Sendable {
         }
         if reason == "transcription_outcome_unknown" || (unknown && stage == "transcribe") {
             return "音声認識の送信結果が不明なため、自動再送しません。文字起こしタブで対象区間を確認して「不明区間を再送」を選んでください。再送では API 利用料が重複する場合があります。試行番号の変更だけでは再送しません。"
+        }
+        if reason == "minutes_outcome_unknown" {
+            return "複数案の議事録生成結果が不明なため、自動再送しません。処理runの対象担当と接続・モデルを確認し、確認付き再送を選んでください。再送では課金・利用枠を重複して消費する可能性があります。"
         }
         guard unknown || ["provider_generation_outcome_unknown", "codex_generation_outcome_unknown"].contains(reason ?? "") else {
             return nil

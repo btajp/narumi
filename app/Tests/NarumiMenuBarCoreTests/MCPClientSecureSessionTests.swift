@@ -55,6 +55,7 @@ final class MCPClientSecureSessionTests: XCTestCase {
             "asr_retry_preflight_configuration_conflict", "asr_retry_preflight_authentication_required",
             "asr_retry_preflight_model_unavailable", "ordinary_asr_response_loss_recovers", "minutes_response_loss_recovers",
             "asr_manual_success_stale_record_rejected",
+            "v5_ensemble_field_fully_omitted", "v6_ensemble_field_preserved",
         ]
         for prefix in ["v4_codex", "v4_openai", "v4_anthropic", "v4_ollama", "v3_codex"] {
             for suffix in [

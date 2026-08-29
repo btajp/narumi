@@ -38,7 +38,7 @@ final class ServerReadinessTests: XCTestCase {
     }
 
     func testSupportedContractsStillRequireExactBundledVersion() throws {
-        let supportedVersions = ["2.0.0", "3.0.0", "4.0.0", "4.0.1", "5.0.0", "5.0.1"]
+        let supportedVersions = ["2.0.0", "3.0.0", "4.0.0", "4.0.1", "5.0.0", "5.0.1", "6.0.0", "6.0.1"]
         for expectedVersion in supportedVersions {
             var expected = identity
             expected.contractVersion = expectedVersion
@@ -77,7 +77,8 @@ final class ServerReadinessTests: XCTestCase {
     }
 
     func testUnsupportedContractCannotBeAdoptedEvenWhenBundleVersionMatches() throws {
-        for version in ["1.0.0", "1.1.0", "2.0.0-rc.1", "3.0.0-rc.1", "4.0.0-rc.1", "5.0.0-rc.1", "6.0.0", "malformed"] {
+        for version in ["1.0.0", "1.1.0", "2.0.0-rc.1", "3.0.0-rc.1", "4.0.0-rc.1", "5.0.0-rc.1",
+                        "6.0.0-rc.1", "7.0.0", "malformed"] {
             var info = try response()
             info.contractVersion = version
             var expected = identity

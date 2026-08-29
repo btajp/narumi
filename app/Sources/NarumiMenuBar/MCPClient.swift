@@ -53,6 +53,14 @@ actor MCPClient {
     var jobRequestPublication: UInt64 = 0
     var unpublishedJobIDs: [String: UInt64] = [:]
     var operationSessionGeneration: UInt64 { permissionSession.generation }
+    var negotiatedContractVersion: String? { permissionSession.contractVersion }
+
+    func contractVersionForEncoding() async throws -> String? {
+        if permissionSession.contractVersion == nil {
+            _ = try await performToolCall(ToolCatalog.getServerInfo, arguments: [:], confidential: false)
+        }
+        return permissionSession.contractVersion
+    }
 
     init(
         config: ServerConfig, clientVersion: String, jobRequestObserver: JobRequestObserver? = nil,

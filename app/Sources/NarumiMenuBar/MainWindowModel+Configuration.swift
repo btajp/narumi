@@ -29,6 +29,8 @@ extension MainWindowModel {
             let update = try form.processing.makeUpdate(
                 supportsMinutesModel: supportsMinutesModels,
                 supportedProviders: minutesModelCatalog.supportedProviders,
+                supportsMinutesEnsembleWire: supportsMinutesEnsembleWire,
+                canExecuteMinutesEnsemble: canExecuteMinutesEnsemble,
                 supportsTranscriptionModel: supportsTranscriptionModels,
                 supportedTranscriptionProviders: transcriptionModelCatalog.supportedProviders)
             var updates = try NarumiClient.arguments(update)
@@ -38,7 +40,7 @@ extension MainWindowModel {
             }
             let response = try await client.setMeetingConfig(
                 meetingID: meetingID, scope: form.originalScope, updates: updates,
-                expectedConfig: supportsTranscriptionModels ? form.processing.originalConfig : nil)
+                expectedConfig: supportsConfigurationCAS ? form.processing.originalConfig : nil)
             guard !Task.isCancelled, saveGeneration == configurationSaveGeneration,
                 sessionGeneration == desktopSession.connectionGeneration, selectedMeetingID == meetingID else { return false }
             guard response.meetingID == meetingID, response.scope == (newScope.isEmpty ? nil : newScope),
@@ -90,6 +92,8 @@ extension MainWindowModel {
             let update = try form.processing.makeUpdate(
                 supportsMinutesModel: supportsMinutesModels,
                 supportedProviders: minutesModelCatalog.supportedProviders,
+                supportsMinutesEnsembleWire: supportsMinutesEnsembleWire,
+                canExecuteMinutesEnsemble: canExecuteMinutesEnsemble,
                 supportsTranscriptionModel: supportsTranscriptionModels,
                 supportedTranscriptionProviders: transcriptionModelCatalog.supportedProviders)
             let config = try NarumiClient.arguments(update)
@@ -101,7 +105,7 @@ extension MainWindowModel {
             updates["export_destinations"] = .array(form.exportDestinations.sorted().map(JSONNode.string))
             if form.makeDefault { updates["make_default"] = .bool(true) }
             let response = try await client.setProfile(
-                name: name, updates: updates, expectedConfig: supportsTranscriptionModels ? form.expectedConfig : nil)
+                name: name, updates: updates, expectedConfig: supportsConfigurationCAS ? form.expectedConfig : nil)
             guard !Task.isCancelled, saveGeneration == configurationSaveGeneration,
                 sessionGeneration == desktopSession.connectionGeneration else { return false }
             guard response.name == name, response.config == update.applying(to: form.expectedConfig),
@@ -129,7 +133,7 @@ extension MainWindowModel {
     }
 
     private func validateProcessingSelection(_ form: ProcessingConfigurationForm, title: String) async -> Bool {
-        if form.minutesModel.mode == .selected {
+        if form.minutesGenerationMode == .single {
             await minutesModelCatalog.loadCachedCatalog(
                 connectionID: form.minutesModel.connectionID, selectedModelID: form.minutesModel.modelID)
         }
@@ -149,16 +153,31 @@ extension MainWindowModel {
     private var supportsMinutesModels: Bool {
         // Legacy operations remain available against an authenticated contract 2 server.
         guard let version = serverInfo?.contractVersion, RecordingPermissionContract.supportsSetup(version) else { return false }
-        return ["3", "4", "5"].contains(String(version.split(separator: ".").first ?? ""))
+        return ["3", "4", "5", "6"].contains(String(version.split(separator: ".").first ?? ""))
     }
 
     var supportsTranscriptionModels: Bool {
         guard let version = serverInfo?.contractVersion, RecordingPermissionContract.supportsSetup(version) else { return false }
-        return version.split(separator: ".").first == "5"
+        return ["5", "6"].contains(String(version.split(separator: ".").first ?? ""))
+    }
+
+    private var supportsMinutesEnsembleWire: Bool {
+        guard let info = serverInfo else { return false }
+        return info.capabilities.supportsMinutesEnsembleWire(contractVersion: info.contractVersion)
+    }
+
+    private var canExecuteMinutesEnsemble: Bool {
+        guard let info = serverInfo else { return false }
+        return info.capabilities.canExecuteMinutesEnsemble(contractVersion: info.contractVersion)
+    }
+
+    private var supportsConfigurationCAS: Bool {
+        guard let version = serverInfo?.contractVersion, RecordingPermissionContract.supportsSetup(version) else { return false }
+        return ["5", "6"].contains(String(version.split(separator: ".").first ?? ""))
     }
 
     func configurationValidationMessage(for form: ProcessingConfigurationForm) -> String? {
-        if form.minutesModel.mode == .selected {
+        if form.minutesGenerationMode == .single {
             if minutesModelCatalog.isLoading { return "議事録モデルの情報を確認しています。" }
             if let message = minutesModelCatalog.validationMessage(for: form) { return message }
         }

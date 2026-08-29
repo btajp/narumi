@@ -7,7 +7,7 @@ extension ServerCapabilities {
             workflow?.stageModelSelection == true else { return [] }
         switch contractVersion.split(separator: ".").first {
         case "3": return ["codex-app-server"]
-        case "4", "5":
+        case "4", "5", "6":
             let advertised = Set(minutesModelProviders ?? [])
             return MinutesModelSelection.providers.filter { advertised.contains($0) }
         default: return []

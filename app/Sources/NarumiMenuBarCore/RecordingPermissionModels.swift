@@ -53,7 +53,7 @@ public struct ConfigureRecordingPermissionResponse: Codable, Equatable, Sendable
     }
 }
 
-/// Authenticated contracts v2 through v4 keep permission setup but refuse v1 downgrade.
+/// Authenticated released contracts v2 through v6 keep permission setup and refuse future majors.
 public enum RecordingPermissionContract {
     public static func isValidServerInstanceID(_ serverInstanceID: String?) -> Bool {
         guard let serverInstanceID else { return false }
@@ -77,7 +77,7 @@ public enum RecordingPermissionContract {
         let components = core.split(separator: ".", omittingEmptySubsequences: false)
         guard components.count == 3,
             components.allSatisfy(isVersionNumber),
-            let major = Int(components[0]), (2...5).contains(major),
+            let major = Int(components[0]), (2...6).contains(major),
             let minor = Int(components[1]),
             let patch = Int(components[2])
         else { return false }
