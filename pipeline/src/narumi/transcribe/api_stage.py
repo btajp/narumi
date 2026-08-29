@@ -52,6 +52,31 @@ def run_api_transcribe(
     progress: Callable[[str, float], None] | None = None,
 ) -> list[StageResult]:
     """Resolve and verify the whole plan before any audio leaves this meeting."""
+    # The manifest fence is outermost: a stale Bundle must fail before resolving a
+    # provider, and no concurrent writer may change config or artifacts while the
+    # checkpointed upload and transcript publication are in progress. Server jobs
+    # may already hold this lease; the lock is scoped-reentrant for that exact task.
+    with bundle.writer_lock(timeout=None):
+        return _run_api_transcribe_locked(
+            bundle,
+            force=force,
+            transcription_resolver=transcription_resolver,
+            transcription_retry=transcription_retry,
+            should_cancel=should_cancel,
+            progress=progress,
+        )
+
+
+def _run_api_transcribe_locked(
+    bundle: Bundle,
+    *,
+    force: bool,
+    transcription_resolver: TranscriptionResolver | None,
+    transcription_retry: TranscriptionRetry | None,
+    should_cancel: Callable[[], bool] | None,
+    progress: Callable[[str, float], None] | None,
+) -> list[StageResult]:
+    """Run API ASR after the Bundle's current manifest generation is fenced."""
     config = bundle.manifest.config.model_copy(deep=True)
     selection = config.transcription_model
     if selection is None:

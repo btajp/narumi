@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -587,6 +589,147 @@ def test_api_guards_precede_audio_and_success_reuse(api_bundle: Bundle):
     with pytest.raises(PolicyViolationError):
         run_transcribe(api_bundle, transcription_resolver=resolver)
     assert resolver.resolve_calls == resolver.calls == []
+
+
+def test_api_manifest_lock_is_outermost_through_provider_and_publication(
+    api_bundle: Bundle, monkeypatch
+):
+    from narumi.transcribe import api_stage
+
+    trace = []
+    resolver = FakeTranscriptionResolver()
+    resolver.after_reply = lambda index: trace.append(("provider-reply", index))
+    writer_lock = Bundle.writer_lock
+    execution_lock = api_stage.transcription_execution_lock
+
+    @contextmanager
+    def traced_writer(bundle, *, timeout=10.0):
+        trace.append(("writer-enter", timeout))
+        with writer_lock(bundle, timeout=timeout):
+            yield
+        trace.append(("writer-exit", timeout))
+
+    @contextmanager
+    def traced_execution(bundle):
+        trace.append(("execution-enter", None))
+        with execution_lock(bundle):
+            yield
+        trace.append(("execution-exit", None))
+
+    monkeypatch.setattr(Bundle, "writer_lock", traced_writer)
+    monkeypatch.setattr(api_stage, "transcription_execution_lock", traced_execution)
+    run_transcribe(api_bundle, transcription_resolver=resolver)
+
+    assert trace[0] == ("writer-enter", None) and trace[-1] == ("writer-exit", None)
+    execution_enter = trace.index(("execution-enter", None))
+    execution_exit = trace.index(("execution-exit", None))
+    provider_replies = [index for index, entry in enumerate(trace) if entry[0] == "provider-reply"]
+    nested_writers = [
+        index
+        for index, entry in enumerate(trace)
+        if entry[0] == "writer-enter" and entry[1] is not None
+    ]
+    assert provider_replies and nested_writers
+    assert all(execution_enter < index < execution_exit for index in provider_replies)
+    assert all(execution_enter < index < execution_exit for index in nested_writers)
+
+
+def test_api_stale_bundle_rejects_before_provider_resolution_or_send(api_bundle: Bundle):
+    stale = Bundle.open(api_bundle.path)
+    api_bundle.manifest.config.language = "en"
+    api_bundle.save()
+    resolver = FakeTranscriptionResolver()
+
+    with pytest.raises(ConfigurationConflictError):
+        run_transcribe(stale, transcription_resolver=resolver)
+
+    assert resolver.resolve_calls == resolver.calls == []
+    assert stale.artifact("transcripts/own-mic") is None
+
+
+def test_api_publish_reenters_manifest_lock_held_by_server_job(api_bundle: Bundle):
+    resolver = FakeTranscriptionResolver()
+
+    with api_bundle.writer_lock(timeout=None):
+        results = run_transcribe(api_bundle, transcription_resolver=resolver)
+
+    assert [result.key for result in results] == [
+        "transcripts/own-mic",
+        "transcripts/own-system",
+    ]
+    assert len(resolver.calls) == 4
+
+
+def test_api_waits_for_existing_manifest_writer_before_resolving(api_bundle: Bundle):
+    resolver = FakeTranscriptionResolver()
+    started = threading.Event()
+    failures = []
+
+    def transcribe() -> None:
+        started.set()
+        try:
+            run_transcribe(api_bundle, transcription_resolver=resolver)
+        except BaseException as error:
+            failures.append(error)
+
+    with api_bundle.writer_lock(timeout=None):
+        thread = threading.Thread(target=transcribe)
+        thread.start()
+        assert started.wait(1)
+        thread.join(timeout=0.1)
+        assert thread.is_alive() and resolver.resolve_calls == resolver.calls == []
+    thread.join(timeout=5)
+
+    assert not thread.is_alive() and failures == []
+    assert len(resolver.calls) == 4
+
+
+def test_other_manifest_writer_waits_until_api_publication_finishes(api_bundle: Bundle):
+    resolver = FakeTranscriptionResolver()
+    provider_entered = threading.Event()
+    release_provider = threading.Event()
+    writer_started = threading.Event()
+    writer_acquired = threading.Event()
+    failures = []
+    transcribe_chunk = resolver.transcribe_chunk
+
+    def blocking_transcribe(audio, duration_sec):
+        if not provider_entered.is_set():
+            provider_entered.set()
+            assert release_provider.wait(2)
+        return transcribe_chunk(audio, duration_sec)
+
+    def transcribe() -> None:
+        try:
+            run_transcribe(api_bundle, transcription_resolver=resolver)
+        except BaseException as error:
+            failures.append(error)
+
+    def write_manifest() -> None:
+        writer_started.set()
+        try:
+            with api_bundle.writer_lock(timeout=None):
+                assert api_bundle.artifact("transcripts/own-system") is not None
+                writer_acquired.set()
+        except BaseException as error:
+            failures.append(error)
+
+    resolver.transcribe_chunk = blocking_transcribe
+    transcribe_thread = threading.Thread(target=transcribe)
+    writer_thread = threading.Thread(target=write_manifest)
+    transcribe_thread.start()
+    assert provider_entered.wait(2)
+    writer_thread.start()
+    assert writer_started.wait(1)
+    try:
+        assert not writer_acquired.wait(0.1)
+    finally:
+        release_provider.set()
+    transcribe_thread.join(timeout=5)
+    writer_thread.join(timeout=5)
+
+    assert not transcribe_thread.is_alive() and not writer_thread.is_alive()
+    assert writer_acquired.is_set() and failures == [] and len(resolver.calls) == 4
 
 
 # ----------------------------------------------------------------------------- real engines
