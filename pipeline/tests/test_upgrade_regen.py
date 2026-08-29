@@ -194,3 +194,50 @@ def test_cache_survives_corruption(tmp_path: Path):
     assert len(IntegrateCache.load(path)) == 0
     path.write_text(json.dumps({"version": 1, "entries": {"x": [{"bad": 1}]}}), encoding="utf-8")
     assert len(IntegrateCache.load(path)) == 0
+
+
+def test_asr_speaker_only_change_recomputes_only_overlapping_interval(tmp_path: Path, monkeypatch):
+    shared = FakeProvider()
+    integrate_module = importlib.import_module("narumi.generate.integrate")
+    monkeypatch.setattr(integrate_module, "get_provider", lambda name: shared)
+    ts = own_transcripts()
+    system = ts["own-system"]
+    system.engine = EngineInfo(
+        name="openai-api", version="1", params={"model": "gpt-4o-transcribe-diarize"}
+    )
+    for index, segment in enumerate(system.segments):
+        segment.speaker = f"asr:system:0:{index}"
+    ts["ext-system"] = make_transcript("ext-system", None, [(6.1, 9.9, "確認の発話")])
+    bundle = Bundle.create(tmp_path, meeting_name="定例", config=MeetingConfig(llm_provider="fake"))
+    for sid, transcript in ts.items():
+        record_json(bundle, f"transcripts/{sid}", f"transcripts/{sid}.json", transcript)
+    record_json(bundle, "diarization/layer1", "diarization/layer1-tracks.json", layer1())
+    run_align(bundle)
+    first = run_integrate(bundle)
+    original = MergedTranscript.model_validate_json(first.path.read_text(encoding="utf-8"))
+    assert len(shared.calls) == 2 and original.params["recomputed"] == 5
+    assert run_integrate(bundle).skipped
+    alignment_hash = bundle.artifact_hash("merged/alignment")
+
+    # The text, timing, and explicit diarization stay byte-identical; only ASR's label changes.
+    system.segments[0].speaker = "asr:system:0:changed"
+    record_json(bundle, "transcripts/own-system", "transcripts/own-system.json", system)
+    run_align(bundle)
+    assert bundle.artifact_hash("merged/alignment") == alignment_hash
+    updated = run_integrate(bundle)
+    assert not updated.skipped and len(shared.calls) == 3
+    merged = MergedTranscript.model_validate_json(updated.path.read_text(encoding="utf-8"))
+    assert merged.params["reused"] == 4 and merged.params["recomputed"] == 1
+    changed = next(s for s in merged.segments if "own-system:0" in s.sources)
+    assert changed.speaker_label == "asr:system:0:changed"
+    before = {tuple(s.sources): s.model_dump() for s in original.segments}
+    for segment in merged.segments:
+        if segment is not changed:
+            assert segment.model_dump() == before[tuple(segment.sources)]
+    entry = merged.speaker_map.speakers["asr:system:0:changed"]
+    assert entry.name is None and entry.confidence == 0
+    assert "label=asr:system:0:changed" in entry.evidence[0].detail
+    assert "asr:system:0:0" not in merged.speaker_map.speakers
+    assert {key for key in bundle.manifest.artifacts if key.startswith("diarization/")} == {
+        "diarization/layer1"
+    }

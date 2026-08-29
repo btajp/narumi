@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from narumi.align import build_alignment, build_intervals, run_align
 from narumi.bundle import Bundle
+from narumi.diarize.layer3 import NameSuggestion
 from narumi.errors import NotFoundError, PolicyViolationError
 from narumi.generate import (
     INTEGRATE_KEY,
@@ -12,11 +13,13 @@ from narumi.generate import (
     MINUTES_PROMPT_VERSION,
     PLAIN_PLACEHOLDER,
     SPEAKER_MAP_PATH,
+    IntegrateCache,
     generate_minutes,
     integrate,
     run_generate,
     run_integrate,
 )
+from narumi.generate.asr_speakers import build_asr_turns
 from narumi.generate.minutes import chunk_lines, format_jst, split_sections
 from narumi.llm import FakeProvider, NoneProvider
 from narumi.models import (
@@ -57,6 +60,20 @@ def make_transcript(source_id: str, track: str | None, spans, *, time_offset: fl
             Segment(id=f"{source_id}:{i}", start=s, end=e, text=t)
             for i, (s, e, t) in enumerate(spans)
         ],
+    )
+
+
+def with_asr_speakers(transcript: Transcript, labels: list[str | None]) -> Transcript:
+    return transcript.model_copy(
+        update={
+            "engine": EngineInfo(
+                name="openai-api", version="1", params={"model": "gpt-4o-transcribe-diarize"}
+            ),
+            "segments": [
+                segment.model_copy(update={"speaker": label})
+                for segment, label in zip(transcript.segments, labels, strict=True)
+            ],
+        }
     )
 
 
@@ -281,6 +298,155 @@ def test_integrate_layer2_refines_other_labels():
     assert speakers["SPEAKER_01"].evidence[0].layer == 2
     assert "fake-diarizer" in speakers["SPEAKER_01"].evidence[0].detail
     assert merged.params["diarization_layers"] == [1, 2]
+
+
+def test_asr_labels_are_anonymous_and_scoped_to_track_and_chunk():
+    mic = with_asr_speakers(
+        make_transcript("own-mic", "mic", [(0, 4, "本人の発話")]), ["asr:mic:0:A"]
+    )
+    system = with_asr_speakers(
+        make_transcript("own-system", "system", [(0, 4, "相手の発話"), (600, 604, "次の区間")]),
+        ["asr:system:0:A", "asr:system:1:A"],
+    )
+    ts = {t.source_id: t for t in (mic, system)}
+    merged = integrate(
+        build_alignment(list(ts.values())), ts, [], MeetingConfig(self_name="本人"), None
+    )
+    labels = {tuple(s.sources): s.speaker_label for s in merged.segments}
+    assert labels == {
+        ("own-mic:0",): "me",
+        ("own-system:0",): "asr:system:0:A",
+        ("own-system:1",): "asr:system:1:A",
+    }
+    speakers = merged.speaker_map.speakers
+    assert speakers["me"].name == "本人" and speakers["me"].confidence == 1
+    for label in ("asr:system:0:A", "asr:system:1:A"):
+        entry = speakers[label]
+        assert entry.name is None and entry.confidence == 0
+        assert [e.layer for e in entry.evidence] == [2]
+        assert "source=own-system" in entry.evidence[0].detail
+        assert f"namespace={label.rsplit(':', 1)[0]}" in entry.evidence[0].detail
+    assert "label=asr:mic:0:A" in speakers["me"].evidence[-1].detail
+    assert "own-system" not in speakers["me"].evidence[-1].detail
+    assert merged.params["diarization_layers"] == [] and merged.params["layer4_sources"] == []
+
+
+def test_asr_preserves_explicit_diarization_and_real_name_priorities():
+    ts = transcripts()
+    ts["own-mic"] = with_asr_speakers(ts["own-mic"], ["asr:mic:0:A"] * 3)
+    ts["own-system"] = with_asr_speakers(ts["own-system"], ["asr:system:0:A"] * 3)
+    ts["ext-names"] = ext_named("ext-names", [(6.1, 9.9, "田中", "確認事項")])
+    suggestion = NameSuggestion(name="鈴木", confidence=0.7, evidence="screen highlight")
+    merged = integrate(
+        build_alignment(list(ts.values())),
+        ts,
+        [layer1(), layer2()],
+        MeetingConfig(self_name="本人"),
+        None,
+        layer3_names={"SPEAKER_00": suggestion, "SPEAKER_01": suggestion},
+    )
+    speakers = merged.speaker_map.speakers
+    assert speakers["me"].name == "本人" and speakers["me"].confidence == 1
+    assert speakers["SPEAKER_00"].name == "田中"
+    assert speakers["SPEAKER_01"].name == "鈴木"
+    assert [e.layer for e in speakers["SPEAKER_00"].evidence] == [2, 2, 4]
+    assert [e.layer for e in speakers["SPEAKER_01"].evidence] == [2, 2, 3]
+    assert "fake-diarizer" in speakers["SPEAKER_00"].evidence[0].detail
+    assert "ASR anonymous" in speakers["SPEAKER_00"].evidence[1].detail
+    fallback = speakers["asr:system:0:A"]
+    assert fallback.name is None and fallback.confidence == 0
+    assert all("fake-diarizer" not in e.detail for e in fallback.evidence)
+
+
+def test_asr_retains_screen_name_for_other():
+    system = with_asr_speakers(
+        make_transcript("own-system", "system", [(0, 4, "発話")]), ["asr:system:0:A"]
+    )
+    alignment = build_alignment([system])
+    cache = IntegrateCache()
+    integrate(alignment, {system.source_id: system}, [], MeetingConfig(), None, cache=cache)
+    merged = integrate(
+        alignment,
+        {system.source_id: system},
+        [],
+        MeetingConfig(),
+        None,
+        cache=cache,
+        layer3_names={"other": NameSuggestion(name="田中", confidence=0.7, evidence="screen")},
+    )
+    assert merged.params["reused"] == 1 and merged.params["recomputed"] == 0
+    assert merged.segments[0].speaker_name == "田中"
+    entry = merged.speaker_map.speakers["asr:system:0:A"]
+    assert entry.confidence == 0.7 and [e.layer for e in entry.evidence] == [2, 3]
+
+
+@pytest.mark.parametrize("second", ["asr:system:0:A", "asr:system:0:B", "asr:system:1:A"])
+def test_asr_overlapping_candidates_do_not_use_majority_vote(second):
+    system = with_asr_speakers(
+        make_transcript("own-system", "system", [(0, 10, "長い発話"), (8, 9, "短い発話")]),
+        ["asr:system:0:A", second],
+    )
+    ext = make_transcript("ext-bridge", None, [(0, 10, "同じ区間の文字起こし")])
+    ts = {t.source_id: t for t in (system, ext)}
+    merged = integrate(build_alignment(list(ts.values())), ts, [], MeetingConfig(), None)
+    assert len(merged.segments) == 1
+    expected = "asr:system:0:A" if second == "asr:system:0:A" else "other"
+    assert merged.segments[0].speaker_label == expected
+    entry = merged.speaker_map.speakers[expected]
+    assert entry.name is None and entry.confidence == 0
+    details = [e.detail for e in entry.evidence if e.layer == 2]
+    assert len(details) == len({"asr:system:0:A", second})
+    assert all(
+        any(f"label={label}" in detail for detail in details)
+        for label in {"asr:system:0:A", second}
+    )
+
+
+@pytest.mark.parametrize("offset, expected", [(-9.0, (6.0, 8.0)), (-16.0, (0.0, 1.0))])
+def test_asr_applies_transcript_and_alignment_offsets_once(offset, expected):
+    system = with_asr_speakers(
+        make_transcript("own-system", "system", [(10, 12, "発話")], time_offset=5),
+        ["asr:system:0:A"],
+    )
+    ts, offsets = {system.source_id: system}, {system.source_id: offset}
+    alignment = build_alignment([system]).model_copy(
+        update={"offsets": offsets, "intervals": build_intervals([system], offsets)}
+    )
+    turns = build_asr_turns(ts, offsets)
+    assert [(turn.start, turn.end) for turn in turns] == [expected]
+    assert turns[0].source_id == "own-system" and turns[0].layer == 2
+    merged = integrate(alignment, ts, [], MeetingConfig(), None)
+    segment = merged.segments[0]
+    assert (segment.start, segment.end) == expected
+    assert segment.speaker_label == "asr:system:0:A"
+    assert (system.segments[0].start, system.segments[0].end) == (10, 12)
+
+
+@pytest.mark.parametrize(
+    "engine, model, label",
+    [
+        ("fake", "gpt-4o-transcribe-diarize", "asr:system:0:A"),
+        ("openai-api", "whisper-1", "asr:system:0:A"),
+        ("openai-api", None, "asr:system:0:A"),
+        ("openai-api", "gpt-4o-transcribe-diarize", None),
+    ],
+)
+def test_only_api_diarize_speakers_supply_asr_evidence(engine, model, label):
+    system = with_asr_speakers(make_transcript("own-system", "system", [(0, 4, "発話")]), [label])
+    system.engine = EngineInfo(name=engine, version="1", params={"model": model})
+    merged = integrate(
+        build_alignment([system]), {system.source_id: system}, [], MeetingConfig(), None
+    )
+    assert merged.segments[0].speaker_label == "other"
+    assert [e.layer for e in merged.speaker_map.speakers["other"].evidence] == [1]
+
+
+@pytest.mark.parametrize("kind, track", [("external", None), ("own", None)])
+def test_asr_turns_require_an_own_track(kind, track):
+    transcript = with_asr_speakers(
+        make_transcript("own-system", "system", [(0, 4, "発話")]), ["asr:system:0:A"]
+    ).model_copy(update={"kind": kind, "track": track})
+    assert build_asr_turns({transcript.source_id: transcript}, {}) == []
 
 
 # ------------------------------------------------------------------ minutes

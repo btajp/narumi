@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
 import pytest
-from narumi.bundle import Bundle
+from narumi.bundle import Bundle, sha256_file
 from narumi.errors import (
+    CancelledError,
+    ConfigurationConflictError,
     EngineUnavailableError,
     ErrorCode,
     InvalidArgumentError,
@@ -14,15 +17,19 @@ from narumi.errors import (
 )
 from narumi.models import ExternalSendPolicy, MeetingConfig, Segment, Transcript
 from narumi.preprocess import run_preprocess
+from narumi.providers.audio_response import AudioSegment, AudioTranscriptionResult, AudioWord
 from narumi.transcribe import (
     ENGINE_FACTORIES,
     EngineProfile,
     FakeEngine,
     FasterWhisperEngine,
     MlxWhisperEngine,
+    api_transcript,
     available_engines,
     build_initial_prompt,
     check_send_policy,
+    checkpoints,
+    chunks,
     engine_profile,
     faster_whisper_engine,
     get_engine,
@@ -31,8 +38,10 @@ from narumi.transcribe import (
     run_transcribe,
     sidecar_path,
 )
+from narumi.transcription_selection import TranscriptionRetry
 
 from .media_fixtures import make_bundle_with_tracks, make_sine_wav, write_sidecar
+from .provider_fakes import FakeTranscriptionResolver, api_transcription_config
 
 REAL_TESTS = os.environ.get("NARUMI_REAL_TESTS") == "1"
 needs_real = pytest.mark.skipif(
@@ -262,6 +271,322 @@ def test_run_transcribe_rejects_bad_segment_ids(tmp_path: Path, monkeypatch):
         run_transcribe(bundle)
     assert excinfo.value.code == ErrorCode.INTERNAL
     assert bundle.artifact("transcripts/own-mic") is None
+
+
+# ----------------------------------------------------------------------------- API coordinator
+@pytest.fixture
+def api_bundle(tmp_path: Path, monkeypatch):
+    # The same sample-exact chunker runs with short fixture windows, without huge audio files.
+    monkeypatch.setattr(chunks, "CHUNK_SAMPLES", 16_000)
+    bundle = make_bundle_with_tracks(tmp_path, seconds=1.5, config=api_transcription_config())
+    run_preprocess(bundle)
+    return bundle
+
+
+def _transcript(bundle: Bundle, track: str) -> Transcript:
+    return Transcript.model_validate_json(
+        bundle.artifact_path(f"transcripts/own-{track}").read_text()
+    )
+
+
+def _retry_proof(error: EngineUnavailableError) -> TranscriptionRetry:
+    return TranscriptionRetry(
+        **{
+            key: error.details[key]
+            for key in ("input_fingerprint", "chunk_fingerprint", "blocked_epoch")
+        }
+    )
+
+
+@pytest.mark.parametrize("model_id", ["whisper-1", "gpt-4o-transcribe-diarize"])
+def test_api_transcribe_native_timing_and_epoch_reuse(
+    api_bundle: Bundle, model_id: str, monkeypatch
+):
+    bundle = api_bundle
+    bundle.manifest.config.transcription_model.model_id = model_id
+    bundle.manifest.config.vocab_hints = ["非送信の語彙"]
+    resolver = FakeTranscriptionResolver()
+
+    def local_engine_must_not_run(*args):
+        pytest.fail("API selection must not resolve the legacy local engine")
+
+    monkeypatch.setattr("narumi.transcribe.stage.get_engine", local_engine_must_not_run)
+    progress = []
+    results = run_transcribe(
+        bundle,
+        transcription_resolver=resolver,
+        vocab_hints=["ブリーフの語彙も非送信"],
+        progress=lambda stage, fraction: progress.append((stage, fraction)),
+    )
+    assert len(resolver.calls) == 4
+    assert [call[1] for call in resolver.calls] == [1.0, 0.5, 1.0, 0.5]
+    assert [stage.key for stage in results] == ["transcripts/own-mic", "transcripts/own-system"]
+    assert [fraction for _, fraction in progress] == sorted(f for _, f in progress)
+    assert progress[-1][1] == 1.0
+    previous = {}
+    for track in ("mic", "system"):
+        transcript = _transcript(bundle, track)
+        assert transcript.engine.name == "openai-api"
+        assert transcript.engine.params["model"] == model_id
+        assert transcript.time_offset == 0.0
+        assert [segment.id for segment in transcript.segments] == [
+            f"own-{track}:0",
+            f"own-{track}:1",
+        ]
+        assert [(s.start, s.end) for s in transcript.segments] == [(0.0, 0.25), (1.0, 1.25)]
+        if model_id == "whisper-1":
+            assert all(s.speaker is None for s in transcript.segments)
+            assert [(w.start, w.end) for s in transcript.segments for w in s.words] == [
+                (0.0, 0.25),
+                (1.0, 1.25),
+            ]
+        else:
+            assert [s.speaker for s in transcript.segments] == [
+                f"asr:{track}:0:A",
+                f"asr:{track}:1:A",
+            ]
+            assert all(s.words is None for s in transcript.segments)
+        path = bundle.artifact_path(f"transcripts/own-{track}")
+        previous[track] = (path, path.read_bytes())
+        assert path.parent.name == f"own-{track}" and len(path.stem) == 64
+        assert "cache_epoch" not in path.read_text() and "非送信" not in path.read_text()
+
+    bundle.manifest.config.transcription_model.cache_epoch = 1
+    bundle.manifest.config.vocab_hints = ["語彙変更もAPI入力に影響しない"]
+    bundle.save()
+    bundle = Bundle.open(bundle.path)
+    assert all(r.skipped for r in run_transcribe(bundle, transcription_resolver=resolver))
+    assert len(resolver.calls) == 4
+    for track, (path, payload) in previous.items():
+        assert bundle.artifact_path(f"transcripts/own-{track}") == path
+        assert path.read_bytes() == payload
+
+
+@pytest.mark.parametrize("failed_call", [1, 2])
+def test_api_unknown_requires_exact_proof_and_reuses_success(api_bundle: Bundle, failed_call: int):
+    bundle = api_bundle
+    resolver = FakeTranscriptionResolver()
+    resolver.failures[failed_call] = EngineUnavailableError(
+        "Synthetic ambiguous response", details={"outcome_unknown": True}
+    )
+    with pytest.raises(EngineUnavailableError) as failure:
+        run_transcribe(bundle, transcription_resolver=resolver)
+    details = failure.value.details
+    assert details["reason"] == "transcription_outcome_unknown"
+    assert details["chunk_index"] == failed_call and details["completed_chunks"] == failed_call
+    assert details["chunk_count"] == 4 and details["blocked_epoch"] == 0
+    assert (bundle.artifact("transcripts/own-mic") is not None) is (failed_call == 2)
+    assert bundle.artifact("transcripts/own-system") is None
+    proof = _retry_proof(failure.value)
+
+    for epoch in (0, 1):
+        bundle.manifest.config.transcription_model.cache_epoch = epoch
+        bundle.save()
+        bundle = Bundle.open(bundle.path)
+        with pytest.raises(EngineUnavailableError) as again:
+            run_transcribe(bundle, transcription_resolver=resolver)
+        assert _retry_proof(again.value) == proof
+        assert len(resolver.calls) == failed_call + 1
+    for bad_proof in (
+        proof.model_copy(update={"input_fingerprint": "c" * 64}),
+        proof.model_copy(update={"chunk_fingerprint": "d" * 64}),
+        proof.model_copy(update={"blocked_epoch": 1}),
+    ):
+        with pytest.raises(ConfigurationConflictError):
+            run_transcribe(bundle, transcription_resolver=resolver, transcription_retry=bad_proof)
+        assert len(resolver.calls) == failed_call + 1
+
+    completed = run_transcribe(bundle, transcription_resolver=resolver, transcription_retry=proof)
+    assert len(resolver.calls) == 5  # four successful chunks plus exactly one failed attempt
+    assert resolver.calls[failed_call][0] == resolver.calls[failed_call + 1][0]
+    assert [r.key for r in completed] == ["transcripts/own-mic", "transcripts/own-system"]
+    assert _transcript(bundle, "mic").segments[0].text == "合成発話0"
+    with pytest.raises(ConfigurationConflictError):
+        run_transcribe(bundle, transcription_resolver=resolver, transcription_retry=proof)
+    assert len(resolver.calls) == 5
+
+
+def test_api_cancellation_after_reply_preserves_success(api_bundle: Bundle):
+    resolver = FakeTranscriptionResolver()
+    cancelled = False
+
+    def cancel_after_reply(index):
+        nonlocal cancelled
+        cancelled = True
+
+    resolver.after_reply = cancel_after_reply
+    with pytest.raises(CancelledError):
+        run_transcribe(api_bundle, transcription_resolver=resolver, should_cancel=lambda: cancelled)
+    assert len(resolver.calls) == 1 and api_bundle.artifact("transcripts/own-mic") is None
+    resolver.after_reply = None
+    run_transcribe(Bundle.open(api_bundle.path), transcription_resolver=resolver)
+    assert len(resolver.calls) == 4
+
+
+def test_api_configuration_change_after_reply_does_not_publish_old_selection(api_bundle: Bundle):
+    resolver = FakeTranscriptionResolver()
+
+    def change_after_reply(index):
+        if index == 1:
+            api_bundle.manifest.config.language = "en"
+
+    resolver.after_reply = change_after_reply
+    with pytest.raises(ConfigurationConflictError):
+        run_transcribe(api_bundle, transcription_resolver=resolver)
+    assert len(resolver.calls) == 2 and api_bundle.artifact("transcripts/own-mic") is None
+    resolver.after_reply = None
+    api_bundle.manifest.config.language = "ja"
+    run_transcribe(api_bundle, transcription_resolver=resolver)
+    assert len(resolver.calls) == 4
+
+
+def test_api_success_committed_before_fsync_error_is_not_failed_again(
+    api_bundle: Bundle, monkeypatch
+):
+    resolver = FakeTranscriptionResolver()
+    original = checkpoints.write_bytes
+    injected = False
+
+    def fail_after_success(directory, name, data, **kwargs):
+        nonlocal injected
+        original(directory, name, data, **kwargs)
+        if name == "ledger.json" and not injected:
+            document = json.loads(data)
+            if any(entry["state"] == "succeeded" for entry in document["entries"].values()):
+                injected = True
+                raise OSError("synthetic directory fsync failure after replace")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(checkpoints, "write_bytes", fail_after_success)
+        with pytest.raises(EngineUnavailableError) as failure:
+            run_transcribe(api_bundle, transcription_resolver=resolver)
+        assert failure.value.details["reason"] == "transcription_outcome_unknown"
+    assert injected and len(resolver.calls) == 1
+    run_transcribe(Bundle.open(api_bundle.path), transcription_resolver=resolver)
+    assert len(resolver.calls) == 4
+
+
+def test_api_known_failure_resumes_same_epoch(api_bundle: Bundle):
+    resolver = FakeTranscriptionResolver()
+    resolver.failures[1] = EngineUnavailableError("Synthetic rejection before transcription")
+    with pytest.raises(EngineUnavailableError, match="Synthetic rejection"):
+        run_transcribe(api_bundle, transcription_resolver=resolver)
+    run_transcribe(Bundle.open(api_bundle.path), transcription_resolver=resolver)
+    assert len(resolver.calls) == 5
+    assert resolver.calls[0][0] != resolver.calls[2][0]  # successful first window was not resent
+
+
+def test_api_malformed_fresh_reply_is_unknown(api_bundle: Bundle):
+    resolver = FakeTranscriptionResolver()
+    resolver.reply_factory = lambda index, duration: AudioTranscriptionResult(
+        text="invalid", duration=duration, segments=(AudioSegment(0, 0.0, duration + 1, "invalid"),)
+    )
+    for _ in range(2):
+        with pytest.raises(EngineUnavailableError) as failure:
+            run_transcribe(api_bundle, transcription_resolver=resolver)
+        assert failure.value.details["reason"] == "transcription_outcome_unknown"
+    assert len(resolver.calls) == 1
+    assert api_bundle.artifact("transcripts/own-mic") is None
+
+
+def test_api_word_attachment_uses_native_segment_and_word_bounds(api_bundle: Bundle):
+    resolver = FakeTranscriptionResolver()
+    resolver.reply_factory = lambda index, duration: AudioTranscriptionResult(
+        text="one two",
+        duration=duration,
+        segments=(AudioSegment(0, 0.0, 0.2, "one"), AudioSegment(1, 0.2, 0.5, "two")),
+        words=(AudioWord(0.0, 0.15, "one"), AudioWord(0.15, 0.4, "two")),
+        language="ja",
+    )
+    run_transcribe(api_bundle, transcription_resolver=resolver)
+    segments = _transcript(api_bundle, "mic").segments
+    assert [(w.start, w.end) for s in segments for w in s.words] == [
+        (0.0, 0.15),
+        (0.15, 0.4),
+        (1.0, 1.15),
+        (1.15, 1.4),
+    ]
+    assert [w.text for w in segments[1].words] == ["two"]
+
+
+def test_api_publication_failure_keeps_prior_source_and_cached_success(
+    api_bundle: Bundle, monkeypatch
+):
+    selection = api_bundle.manifest.config.transcription_model
+    api_bundle.manifest.config.transcription_model = None
+    run_transcribe(api_bundle)
+    prior = api_bundle.artifact_path("transcripts/own-mic")
+    old_bytes = prior.read_bytes()
+    api_bundle.manifest.config.transcription_model = selection
+    api_bundle.save()
+    resolver = FakeTranscriptionResolver()
+
+    def fail_write(*args, **kwargs):
+        raise OSError("synthetic artifact persistence failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(api_transcript, "write_bytes", fail_write)
+        with pytest.raises(EngineUnavailableError) as failure:
+            run_transcribe(api_bundle, transcription_resolver=resolver)
+        assert failure.value.details["reason"] == "transcription_artifact_unavailable"
+    assert len(resolver.calls) == 2
+    assert api_bundle.artifact_path("transcripts/own-mic") == prior
+    assert prior.read_bytes() == old_bytes
+    api_bundle = Bundle.open(api_bundle.path)
+    run_transcribe(api_bundle, transcription_resolver=resolver)
+    assert len(resolver.calls) == 4
+    assert api_bundle.artifact_path("transcripts/own-mic") != prior
+    assert prior.read_bytes() == old_bytes
+
+
+def test_api_mic_extension_keeps_system_speaker_namespace_and_source(api_bundle: Bundle):
+    api_bundle.manifest.config.transcription_model.model_id = "gpt-4o-transcribe-diarize"
+    resolver = FakeTranscriptionResolver()
+    run_transcribe(api_bundle, transcription_resolver=resolver)
+    original = api_bundle.artifact("transcripts/own-system").model_dump()
+    original_bytes = api_bundle.artifact_path("transcripts/own-system").read_bytes()
+    record = api_bundle.manifest.recording.tracks["mic"]
+    path = make_sine_wav(api_bundle.abspath(record.path), seconds=2.5)
+    record.sha256, record.bytes, record.duration_sec = sha256_file(path), path.stat().st_size, 2.5
+    api_bundle.manifest.recording.duration_sec = 2.5
+    api_bundle.save()
+    run_preprocess(api_bundle)
+    results = run_transcribe(api_bundle, transcription_resolver=resolver)
+    assert len(resolver.calls) == 7  # three changed mic windows, both system windows reused
+    assert not results[0].skipped and results[1].skipped
+    assert api_bundle.artifact("transcripts/own-system").model_dump() == original
+    assert api_bundle.artifact_path("transcripts/own-system").read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize("change", ["model", "connection"])
+def test_api_changed_selection_is_separate_input(api_bundle: Bundle, change: str):
+    resolver = FakeTranscriptionResolver()
+    run_transcribe(api_bundle, transcription_resolver=resolver)
+    previous = api_bundle.artifact_path("transcripts/own-mic")
+    if change == "model":
+        api_bundle.manifest.config.transcription_model.model_id = "gpt-4o-transcribe-diarize"
+    else:
+        api_bundle.manifest.config.transcription_model.connection_revision = 2
+    run_transcribe(api_bundle, transcription_resolver=resolver)
+    assert len(resolver.calls) == 8
+    assert api_bundle.artifact_path("transcripts/own-mic") != previous and previous.is_file()
+    api_bundle.manifest.config.transcription_model = None
+    run_transcribe(api_bundle)
+    assert _transcript(api_bundle, "mic").engine.name == "fake"
+
+
+def test_api_guards_precede_audio_and_success_reuse(api_bundle: Bundle):
+    resolver = FakeTranscriptionResolver()
+    with pytest.raises(InvalidArgumentError):
+        run_transcribe(api_bundle, force=True, transcription_resolver=resolver)
+    with pytest.raises(CancelledError):
+        run_transcribe(api_bundle, transcription_resolver=resolver, should_cancel=lambda: True)
+    with pytest.raises(EngineUnavailableError):
+        run_transcribe(api_bundle)
+    api_bundle.manifest.config.external_send_policy = ExternalSendPolicy.LOCAL_ONLY
+    with pytest.raises(PolicyViolationError):
+        run_transcribe(api_bundle, transcription_resolver=resolver)
+    assert resolver.resolve_calls == resolver.calls == []
 
 
 # ----------------------------------------------------------------------------- real engines

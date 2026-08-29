@@ -6,7 +6,9 @@ context parsers of a later step and share the same ``Transcript`` model.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from narumi.bundle import Bundle, StageResult
 from narumi.errors import ErrorCode, InvalidArgumentError, NarumiError
@@ -15,6 +17,10 @@ from narumi.preprocess.stage import AUDIO_TRACKS, audio_artifact_key
 from narumi.transcribe.base import TranscriptionEngine, segment_id
 from narumi.transcribe.policy import check_send_policy
 from narumi.transcribe.registry import get_engine
+
+if TYPE_CHECKING:
+    from narumi.providers.transcription import TranscriptionResolver
+    from narumi.transcription_selection import TranscriptionRetry
 
 
 def own_source_id(track: str) -> str:
@@ -74,7 +80,14 @@ def transcribe_track(
 
 
 def run_transcribe(
-    bundle: Bundle, *, force: bool = False, vocab_hints: list[str] | None = None
+    bundle: Bundle,
+    *,
+    force: bool = False,
+    vocab_hints: list[str] | None = None,
+    transcription_resolver: TranscriptionResolver | None = None,
+    transcription_retry: TranscriptionRetry | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    progress: Callable[[str, float], None] | None = None,
 ) -> list[StageResult]:
     """Transcribe every ``preprocess/audio/<track>`` artifact with the configured engine.
 
@@ -87,6 +100,21 @@ def run_transcribe(
     hints. The effective hints are part of the stage params, so changed hints re-transcribe.
     """
     config = bundle.manifest.config
+    if config.transcription_model is not None:
+        from narumi.transcribe.api_stage import run_api_transcribe
+
+        return run_api_transcribe(
+            bundle,
+            force=force,
+            transcription_resolver=transcription_resolver,
+            transcription_retry=transcription_retry,
+            should_cancel=should_cancel,
+            progress=progress,
+        )
+    if transcription_retry is not None:
+        raise InvalidArgumentError(
+            "Transcription retry requires a selected API transcription model"
+        )
     hints = list(config.vocab_hints) if vocab_hints is None else list(vocab_hints)
     engine = get_engine(config.transcription_engine)
     check_send_policy(

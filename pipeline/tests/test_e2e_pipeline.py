@@ -14,9 +14,15 @@ from click.testing import CliRunner
 from narumi.bundle import Bundle
 from narumi.catalog import Catalog
 from narumi.cli import cli
-from narumi.errors import NotFoundError, PolicyViolationError
+from narumi.errors import (
+    CancelledError,
+    EngineUnavailableError,
+    InvalidArgumentError,
+    NotFoundError,
+    PolicyViolationError,
+)
 from narumi.generate import PLAIN_PLACEHOLDER
-from narumi.models import ExternalSendPolicy, MinutesMeta
+from narumi.models import ExternalSendPolicy, MinutesMeta, Transcript
 from narumi.pipeline import (
     STAGE_ORDER,
     export_meeting,
@@ -24,9 +30,11 @@ from narumi.pipeline import (
     refresh_meeting,
     regenerate_meeting,
 )
-from narumi.transcribe import sidecar_path
+from narumi.transcribe import chunks, sidecar_path
+from narumi.transcription_selection import TranscriptionRetry
 
-from .media_fixtures import make_sine_wav, write_sidecar
+from .media_fixtures import make_bundle_with_tracks, make_sine_wav, write_sidecar
+from .provider_fakes import FakeTranscriptionResolver, api_transcription_config
 
 MIC_SCRIPT = [
     {"start": 0.0, "end": 1.0, "text": "おはようございます、岡村です。"},
@@ -413,3 +421,117 @@ def test_connected_model_change_regenerates_only_minutes(
         ]
     finally:
         service.close()
+
+
+@pytest.fixture
+def api_meeting(home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Bundle:
+    monkeypatch.setattr(chunks, "CHUNK_SAMPLES", 16_000)
+    return make_bundle_with_tracks(
+        tmp_path,
+        seconds=1.5,
+        config=api_transcription_config(
+            "gpt-4o-transcribe-diarize",
+            diarization_engine="none",
+            llm_provider="none",
+            self_name="テスト利用者",
+        ),
+    )
+
+
+def test_api_pipeline_epoch_alone_keeps_sources_and_minutes(api_meeting: Bundle) -> None:
+    resolver = FakeTranscriptionResolver()
+    progress = []
+    first = process_meeting(
+        api_meeting,
+        transcription_resolver=resolver,
+        gaia_client_factory=lambda: None,
+        progress=lambda stage, fraction: progress.append((stage, fraction)),
+    )
+    assert first.minutes_version == 1 and len(resolver.calls) == 4
+    assert first.unresolved_speakers == ["asr:system:0:A", "asr:system:1:A"]
+    assert [fraction for _, fraction in progress] == sorted(f for _, f in progress)
+    assert progress[-1] == ("generate", 1.0)
+    bundle = reopen(api_meeting)
+    assert bundle.manifest.status == "ready"
+    upstream = {key: value.model_dump() for key, value in bundle.manifest.artifacts.items()}
+    old_minutes = minutes_text(bundle, 1)
+    bundle.manifest.config.transcription_model.cache_epoch = 1
+    bundle.save()
+    same = refresh_meeting(
+        reopen(bundle), transcription_resolver=resolver, gaia_client_factory=lambda: None
+    )
+    assert same.stages == [] and same.minutes_version == 1
+    assert len(resolver.calls) == 4
+    bundle = reopen(bundle)
+    assert {key: value.model_dump() for key, value in bundle.manifest.artifacts.items()} == upstream
+    assert minutes_text(bundle, 1) == old_minutes
+    for entrypoint in (process_meeting, refresh_meeting, regenerate_meeting):
+        with pytest.raises(InvalidArgumentError):
+            entrypoint(bundle, force=True)
+    assert len(resolver.calls) == 4
+
+
+def test_api_failed_pipeline_resumes_only_with_matching_retry(api_meeting: Bundle) -> None:
+    resolver = FakeTranscriptionResolver()
+    resolver.failures[1] = EngineUnavailableError(
+        "synthetic lost response", details={"outcome_unknown": True}
+    )
+    with pytest.raises(EngineUnavailableError) as failure:
+        process_meeting(
+            api_meeting, transcription_resolver=resolver, gaia_client_factory=lambda: None
+        )
+    bundle = reopen(api_meeting)
+    assert bundle.manifest.status == "failed" and bundle.manifest.latest_minutes_version is None
+    assert bundle.artifact("transcripts/own-mic") is None
+    proof = TranscriptionRetry(
+        **{
+            key: failure.value.details[key]
+            for key in ("input_fingerprint", "chunk_fingerprint", "blocked_epoch")
+        }
+    )
+    with pytest.raises(EngineUnavailableError):
+        process_meeting(bundle, transcription_resolver=resolver, gaia_client_factory=lambda: None)
+    assert len(resolver.calls) == 2
+    bundle.manifest.config.transcription_model.cache_epoch = 1
+    bundle.save()
+    recovered = refresh_meeting(
+        reopen(bundle),
+        transcription_resolver=resolver,
+        transcription_retry=proof,
+        gaia_client_factory=lambda: None,
+    )
+    assert recovered.minutes_version == 1 and len(resolver.calls) == 5
+    bundle = reopen(bundle)
+    assert bundle.manifest.status == "ready"
+    transcript = Transcript.model_validate_json(
+        bundle.artifact_path("transcripts/own-mic").read_text()
+    )
+    assert [segment.text for segment in transcript.segments] == ["合成発話0", "合成発話2"]
+
+
+def test_api_cancelled_pipeline_keeps_completed_reply_and_recorded_state(
+    api_meeting: Bundle,
+) -> None:
+    resolver = FakeTranscriptionResolver()
+    cancelled = False
+
+    def cancel_after_reply(index):
+        nonlocal cancelled
+        cancelled = True
+
+    resolver.after_reply = cancel_after_reply
+    with pytest.raises(CancelledError):
+        process_meeting(
+            api_meeting,
+            transcription_resolver=resolver,
+            should_cancel=lambda: cancelled,
+            gaia_client_factory=lambda: None,
+        )
+    bundle = reopen(api_meeting)
+    assert bundle.manifest.status == "recorded"
+    assert bundle.artifact("transcripts/own-mic") is None and len(resolver.calls) == 1
+    resolver.after_reply = None
+    result = process_meeting(
+        bundle, transcription_resolver=resolver, gaia_client_factory=lambda: None
+    )
+    assert result.minutes_version == 1 and len(resolver.calls) == 4

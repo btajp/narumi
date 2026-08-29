@@ -49,6 +49,8 @@ from narumi.transcribe import run_transcribe
 
 if TYPE_CHECKING:
     from narumi.providers.generation import MinutesResolver
+    from narumi.providers.transcription import TranscriptionResolver
+    from narumi.transcription_selection import TranscriptionRetry
 
 ProgressFn = Callable[[str, float], None]
 StepFn = Callable[[Bundle, bool], StageResult | Sequence[StageResult]]
@@ -77,11 +79,29 @@ def _step_brief(
     return run_brief(bundle, factory(), force=force)
 
 
-def _step_transcribe(bundle: Bundle, force: bool) -> Sequence[StageResult]:
-    """Transcribe with the brief's merged vocab hints (config + gaia glossary)."""
-    brief = load_brief(bundle)
+def _step_transcribe(
+    bundle: Bundle,
+    force: bool,
+    *,
+    transcription_resolver: TranscriptionResolver | None = None,
+    transcription_retry: TranscriptionRetry | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    progress: ProgressFn | None = None,
+) -> Sequence[StageResult]:
+    """Only local engines consume the brief's vocabulary; API ASR sends no prompt."""
+    brief = load_brief(bundle) if bundle.manifest.config.transcription_model is None else None
     hints = None if brief is None else list(brief.vocab_hints)
-    return run_transcribe(bundle, force=force, vocab_hints=hints)
+    if transcription_resolver is None and transcription_retry is None and should_cancel is None:
+        return run_transcribe(bundle, force=force, vocab_hints=hints)
+    return run_transcribe(
+        bundle,
+        force=force,
+        vocab_hints=hints,
+        transcription_resolver=transcription_resolver,
+        transcription_retry=transcription_retry,
+        should_cancel=should_cancel,
+        progress=progress,
+    )
 
 
 def _step_diarize(bundle: Bundle, force: bool) -> Sequence[StageResult]:
@@ -133,20 +153,64 @@ def _process_steps(
     client_factory: GaiaClientFactory | None,
     minutes_resolver: MinutesResolver | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    transcription_resolver: TranscriptionResolver | None = None,
+    transcription_retry: TranscriptionRetry | None = None,
+    progress: ProgressFn | None = None,
 ) -> Sequence[tuple[str, StepFn]]:
     """Bind the caller's connection settings without changing the shared stage registry."""
-    if client_factory is None:
-        return _minutes_steps(PROCESS_STEPS, minutes_resolver, should_cancel)
-    steps = tuple(
+    steps = PROCESS_STEPS
+    if client_factory is not None:
+        steps = tuple(
+            (
+                name,
+                (lambda bundle, force: _step_brief(bundle, force, client_factory=client_factory))
+                if name == STAGE_BRIEF
+                else step,
+            )
+            for name, step in steps
+        )
+    return _transcription_steps(
+        _minutes_steps(steps, minutes_resolver, should_cancel),
+        transcription_resolver,
+        transcription_retry,
+        should_cancel,
+        progress,
+    )
+
+
+def _transcription_steps(
+    steps: Sequence[tuple[str, StepFn]],
+    resolver: TranscriptionResolver | None,
+    retry: TranscriptionRetry | None,
+    should_cancel: Callable[[], bool] | None,
+    progress: ProgressFn | None,
+) -> Sequence[tuple[str, StepFn]]:
+    if resolver is None and retry is None and should_cancel is None:
+        return steps
+
+    def report(stage: str, fraction: float) -> None:
+        if progress is not None:
+            position = STAGE_ORDER.index(STAGE_TRANSCRIBE)
+            progress(stage, (position + fraction) / len(STAGE_ORDER))
+
+    return tuple(
         (
             name,
-            (lambda bundle, force: _step_brief(bundle, force, client_factory=client_factory))
-            if name == STAGE_BRIEF and client_factory is not None
+            (
+                lambda bundle, force: _step_transcribe(
+                    bundle,
+                    force,
+                    transcription_resolver=resolver,
+                    transcription_retry=retry,
+                    should_cancel=should_cancel,
+                    progress=report,
+                )
+            )
+            if name == STAGE_TRANSCRIBE
             else step,
         )
-        for name, step in PROCESS_STEPS
+        for name, step in steps
     )
-    return _minutes_steps(steps, minutes_resolver, should_cancel)
 
 
 def _minutes_steps(
@@ -199,6 +263,8 @@ def process_meeting(
     gaia_client_factory: GaiaClientFactory | None = None,
     minutes_resolver: MinutesResolver | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    transcription_resolver: TranscriptionResolver | None = None,
+    transcription_retry: TranscriptionRetry | None = None,
 ) -> ProcessResult:
     """Full run: preprocess → brief → transcribe → diarize → slides → align → layer3 →
     integrate → generate.
@@ -206,10 +272,17 @@ def process_meeting(
     Sets ``manifest.status`` to ``processing`` first, ``ready`` on success and ``failed`` when
     any stage raises (the exception is re-raised unchanged; nothing is swallowed).
     """
-    _check_minutes_force(bundle, force)
+    _check_selected_force(bundle, force)
     return _run_steps(
         bundle,
-        _process_steps(gaia_client_factory, minutes_resolver, should_cancel),
+        _process_steps(
+            gaia_client_factory,
+            minutes_resolver,
+            should_cancel,
+            transcription_resolver,
+            transcription_retry,
+            progress,
+        ),
         force=force,
         progress=progress,
     )
@@ -230,7 +303,7 @@ def regenerate_meeting(
     A :class:`RegenerationRecord` is appended to ``manifest.regenerations`` on success, even when
     every stage was skipped (the record then points at the unchanged latest version).
     """
-    _check_minutes_force(bundle, force)
+    _check_selected_force(bundle, force)
     if not transcript_artifact_keys(bundle):
         raise NotFoundError(
             "no transcripts to regenerate from; run process_meeting first",
@@ -256,6 +329,8 @@ def refresh_meeting(
     gaia_client_factory: GaiaClientFactory | None = None,
     minutes_resolver: MinutesResolver | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    transcription_resolver: TranscriptionResolver | None = None,
+    transcription_retry: TranscriptionRetry | None = None,
 ) -> ProcessResult:
     """Bring the minutes up to date with the bundle and its config (the MCP ``regenerate`` tool).
 
@@ -269,11 +344,18 @@ def refresh_meeting(
     forced when ``force`` is true. A :class:`RegenerationRecord` is appended like in
     :func:`regenerate_meeting`.
     """
-    _check_minutes_force(bundle, force)
+    _check_selected_force(bundle, force)
     forced = {name for name, _ in REGENERATE_STEPS} if force else set()
     result = _run_steps(
         bundle,
-        _process_steps(gaia_client_factory, minutes_resolver, should_cancel),
+        _process_steps(
+            gaia_client_factory,
+            minutes_resolver,
+            should_cancel,
+            transcription_resolver,
+            transcription_retry,
+            progress,
+        ),
         force=forced,
         progress=progress,
     )
@@ -281,10 +363,13 @@ def refresh_meeting(
     return result
 
 
-def _check_minutes_force(bundle: Bundle, force: bool) -> None:
-    if force and bundle.manifest.config.minutes_model is not None:
+def _check_selected_force(bundle: Bundle, force: bool) -> None:
+    if not force:
+        return
+    config = bundle.manifest.config
+    if config.minutes_model is not None or config.transcription_model is not None:
         raise InvalidArgumentError(
-            "Connected minutes cannot use force; start a new cache epoch instead"
+            "Selected models cannot use force; confirm a new attempt instead"
         )
 
 
