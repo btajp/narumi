@@ -574,11 +574,13 @@ def test_server_metadata_requires_workflow_and_transport_disclosure(
         contracts.validate_output("get_server_info", payload)
 
 
-def test_server_metadata_declares_explicit_minutes_providers(contracts: ContractSet) -> None:
+def test_server_metadata_requires_exact_resident_minutes_providers(contracts: ContractSet) -> None:
     payload = deepcopy(contracts["get_server_info"].output_examples[0])
     contracts.validate_output("get_server_info", payload)
     payload["capabilities"]["minutes_model_providers"] = []
-    contracts.validate_output("get_server_info", payload)
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("get_server_info", payload)
+    payload = deepcopy(contracts["get_server_info"].output_examples[0])
     del payload["capabilities"]["minutes_model_providers"]
     with pytest.raises(ContractMismatchError):
         contracts.validate_output("get_server_info", payload)

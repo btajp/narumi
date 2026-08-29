@@ -238,16 +238,36 @@ def test_api_transcription_config_snapshot_reaches_generation_entry_points(
             contracts.validate_input(tool, {**args, "force": True})
 
 
-@pytest.mark.parametrize("transports", [["streamable-http"], ["stdio"], []])
+def _set_server_transport_shape(payload: dict[str, Any], transports: list[str]) -> None:
+    resident = "streamable-http" in transports
+    caps = payload["capabilities"]
+    caps["transports"] = transports
+    caps["workflow"] = {
+        "provider_connections": resident,
+        "provider_models": resident,
+        "stage_model_selection": resident,
+        "ensemble_generation": False,
+    }
+    caps["minutes_model_providers"] = (
+        ["codex-app-server", "anthropic-api", "ollama", "openai-api"] if resident else []
+    )
+    caps["transcription_model_providers"] = ["openai-api"] if resident else []
+    payload["secure_transport"] = {
+        "mode": "pinned_tls" if resident else "stdio" if "stdio" in transports else "unavailable",
+        "tls_required": resident,
+        "client_auth_required": resident,
+    }
+
+
+@pytest.mark.parametrize(
+    "transports", [["streamable-http"], ["streamable-http", "stdio"], ["stdio"], []]
+)
 def test_transcription_capability_is_required_and_transport_specific(
     contracts: ContractSet, transports: list[str]
 ) -> None:
     payload = deepcopy(contracts["get_server_info"].output_examples[0])
+    _set_server_transport_shape(payload, transports)
     caps = payload["capabilities"]
-    caps["transports"] = transports
-    caps["transcription_model_providers"] = (
-        ["openai-api"] if "streamable-http" in transports else []
-    )
     contracts.validate_output("get_server_info", payload)
     caps["transcription_model_providers"] = (
         [] if "streamable-http" in transports else ["openai-api"]
@@ -255,6 +275,63 @@ def test_transcription_capability_is_required_and_transport_specific(
     with pytest.raises(ContractMismatchError):
         contracts.validate_output("get_server_info", payload)
     del caps["transcription_model_providers"]
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("get_server_info", payload)
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    [
+        ("workflow", "provider_connections", False),
+        ("workflow", "provider_models", False),
+        ("workflow", "stage_model_selection", False),
+        ("workflow", "ensemble_generation", True),
+        ("capabilities", "minutes_model_providers", []),
+        ("secure_transport", "mode", "stdio"),
+        ("secure_transport", "tls_required", False),
+        ("secure_transport", "client_auth_required", False),
+    ],
+)
+def test_resident_capability_shape_is_closed(
+    contracts: ContractSet, section: str, field: str, value: Any
+) -> None:
+    payload = deepcopy(contracts["get_server_info"].output_examples[0])
+    if section == "workflow":
+        target = payload["capabilities"]["workflow"]
+    elif section == "secure_transport":
+        target = payload[section]
+    else:
+        target = payload["capabilities"]
+    target[field] = value
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("get_server_info", payload)
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    [
+        ("workflow", "provider_connections", True),
+        ("workflow", "provider_models", True),
+        ("workflow", "stage_model_selection", True),
+        ("workflow", "ensemble_generation", True),
+        ("capabilities", "minutes_model_providers", ["openai-api"]),
+        ("capabilities", "transcription_model_providers", ["openai-api"]),
+        ("secure_transport", "mode", "pinned_tls"),
+        ("secure_transport", "tls_required", True),
+        ("secure_transport", "client_auth_required", True),
+    ],
+)
+def test_stdio_capability_shape_is_closed(
+    contracts: ContractSet, section: str, field: str, value: Any
+) -> None:
+    payload = deepcopy(contracts["get_server_info"].output_examples[1])
+    if section == "workflow":
+        target = payload["capabilities"]["workflow"]
+    elif section == "secure_transport":
+        target = payload[section]
+    else:
+        target = payload["capabilities"]
+    target[field] = value
     with pytest.raises(ContractMismatchError):
         contracts.validate_output("get_server_info", payload)
 

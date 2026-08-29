@@ -1,7 +1,7 @@
 {
   "name": "get_server_info",
   "title": "Get server info",
-  "description": "Return the narumi server identity, version, capabilities and diagnostics. `capabilities` reports whether recording can be attempted on this machine (narumi-recorder binary present and microphone permission not known to be denied; `permissions` gives the state from `narumi-recorder check`), permission_setup_in_progress, the active transports, and registry names of installed engines, providers and exporters. `recording` and `permissions` use the same permission snapshot. Set refresh_permissions=true to bypass the short permission cache after returning from macOS settings; while a permission action is in progress, the current cached report may be returned instead and permission_setup_in_progress remains true. This read-only tool never triggers a permission prompt. `diagnostics` reports resolved ffmpeg / ffprobe binaries, data and meetings roots, catalog path, recorder path and loaded contracts directory. Call with empty arguments first to detect the contract version. Contract major 5 adds explicit API transcription selection. The minutes_model_providers and transcription_model_providers capability arrays report implemented generation paths separately from connection readiness. transcription_model_providers is [openai-api] only for the resident streamable-http server and [] for other transports; ensemble generation remains unavailable. secure_transport describes required protection, never trusted bootstrap pins or tokens. On failure returns an error_envelope (isError=true) with code: internal.",
+  "description": "Return the narumi server identity, version, capabilities and diagnostics. `capabilities` reports whether recording can be attempted on this machine (narumi-recorder binary present and microphone permission not known to be denied; `permissions` gives the state from `narumi-recorder check`), permission_setup_in_progress, the active transports, and registry names of installed engines, providers and exporters. `recording` and `permissions` use the same permission snapshot. Set refresh_permissions=true to bypass the short permission cache after returning from macOS settings; while a permission action is in progress, the current cached report may be returned instead and permission_setup_in_progress remains true. This read-only tool never triggers a permission prompt. `diagnostics` reports resolved ffmpeg / ffprobe binaries, data and meetings roots, catalog path, recorder path and loaded contracts directory. Call with empty arguments first to detect the contract version. Contract major 5 adds explicit API transcription selection. Provider connection, model discovery, text-minutes stage selection and API transcription selection require their workflow capability flags and the resident streamable-http transport. The minutes_model_providers and transcription_model_providers capability arrays report implemented generation paths separately from connection readiness. transcription_model_providers is [openai-api] only for the resident streamable-http server and [] for other transports. Ensemble generation remains unavailable in this version. secure_transport describes required protection, never trusted bootstrap pins or tokens. On failure returns an error_envelope (isError=true) with code: internal.",
   "annotations": {
     "readOnlyHint": true,
     "destructiveHint": false,
@@ -140,39 +140,7 @@
             "description": "Implemented API transcription paths, independent of connection authentication and model readiness. The resident streamable-http server advertises [openai-api]; other execution modes advertise []. Clients must also check connection revision, API authentication, timestamp capability, expiry and api_ok."
           }
         },
-        "additionalProperties": false,
-        "allOf": [
-          {
-            "if": {
-              "properties": {
-                "transports": {
-                  "contains": {
-                    "const": "streamable-http"
-                  }
-                }
-              },
-              "required": [
-                "transports"
-              ]
-            },
-            "then": {
-              "properties": {
-                "transcription_model_providers": {
-                  "const": [
-                    "openai-api"
-                  ]
-                }
-              }
-            },
-            "else": {
-              "properties": {
-                "transcription_model_providers": {
-                  "const": []
-                }
-              }
-            }
-          }
-        ]
+        "additionalProperties": false
       },
       "diagnostics": {
         "type": "object",
@@ -270,6 +238,158 @@
         "additionalProperties": false
       }
     },
+    "allOf": [
+      {
+        "if": {
+          "properties": {
+            "capabilities": {
+              "properties": {
+                "transports": {
+                  "contains": {
+                    "const": "streamable-http"
+                  }
+                }
+              },
+              "required": [
+                "transports"
+              ]
+            }
+          },
+          "required": [
+            "capabilities"
+          ]
+        },
+        "then": {
+          "properties": {
+            "secure_transport": {
+              "const": {
+                "mode": "pinned_tls",
+                "tls_required": true,
+                "client_auth_required": true
+              }
+            },
+            "capabilities": {
+              "properties": {
+                "workflow": {
+                  "const": {
+                    "provider_connections": true,
+                    "provider_models": true,
+                    "stage_model_selection": true,
+                    "ensemble_generation": false
+                  }
+                },
+                "minutes_model_providers": {
+                  "const": [
+                    "codex-app-server",
+                    "anthropic-api",
+                    "ollama",
+                    "openai-api"
+                  ]
+                },
+                "transcription_model_providers": {
+                  "const": [
+                    "openai-api"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "capabilities": {
+              "properties": {
+                "workflow": {
+                  "const": {
+                    "provider_connections": false,
+                    "provider_models": false,
+                    "stage_model_selection": false,
+                    "ensemble_generation": false
+                  }
+                },
+                "minutes_model_providers": {
+                  "const": []
+                },
+                "transcription_model_providers": {
+                  "const": []
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "properties": {
+            "capabilities": {
+              "properties": {
+                "transports": {
+                  "not": {
+                    "contains": {
+                      "const": "streamable-http"
+                    }
+                  },
+                  "contains": {
+                    "const": "stdio"
+                  }
+                }
+              },
+              "required": [
+                "transports"
+              ]
+            }
+          },
+          "required": [
+            "capabilities"
+          ]
+        },
+        "then": {
+          "properties": {
+            "secure_transport": {
+              "const": {
+                "mode": "stdio",
+                "tls_required": false,
+                "client_auth_required": false
+              }
+            }
+          }
+        },
+        "else": {
+          "if": {
+            "properties": {
+              "capabilities": {
+                "properties": {
+                  "transports": {
+                    "not": {
+                      "contains": {
+                        "const": "streamable-http"
+                      }
+                    }
+                  }
+                },
+                "required": [
+                  "transports"
+                ]
+              }
+            },
+            "required": [
+              "capabilities"
+            ]
+          },
+          "then": {
+            "properties": {
+              "secure_transport": {
+                "const": {
+                  "mode": "unavailable",
+                  "tls_required": false,
+                  "client_auth_required": false
+                }
+              }
+            }
+          }
+        }
+      }
+    ],
     "additionalProperties": false
   },
   "examples": {
@@ -358,14 +478,14 @@
         "contract_version": "5.0.0",
         "secure_transport": {
           "mode": "stdio",
-          "tls_required": true,
-          "client_auth_required": true
+          "tls_required": false,
+          "client_auth_required": false
         },
         "capabilities": {
           "workflow": {
-            "provider_connections": true,
-            "provider_models": true,
-            "stage_model_selection": true,
+            "provider_connections": false,
+            "provider_models": false,
+            "stage_model_selection": false,
             "ensemble_generation": false
           },
           "recording": false,
@@ -389,12 +509,7 @@
             "markdown",
             "html"
           ],
-          "minutes_model_providers": [
-            "codex-app-server",
-            "anthropic-api",
-            "ollama",
-            "openai-api"
-          ],
+          "minutes_model_providers": [],
           "transcription_model_providers": []
         },
         "diagnostics": {
