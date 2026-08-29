@@ -11,6 +11,13 @@ from narumi.bundle.manifest import (
     RegenerationRecord,
     TrackRecord,
 )
+from narumi.bundle.manifest_writer import (
+    ManifestSnapshot,
+    assert_manifest_generation,
+    manifest_writer_lock,
+    read_manifest_snapshot,
+    sync_meetings_root,
+)
 from narumi.bundle.session import Bundle, StageResult, new_meeting_id, utc_now_iso
 
 __all__ = [
@@ -19,13 +26,18 @@ __all__ = [
     "ContextRecord",
     "ExportRecord",
     "Manifest",
+    "ManifestSnapshot",
     "MinutesVersionRecord",
     "RecordingInfo",
     "RegenerationRecord",
     "StageResult",
     "TrackRecord",
     "canonical_json",
+    "assert_manifest_generation",
+    "manifest_writer_lock",
     "new_meeting_id",
+    "read_manifest_snapshot",
+    "sync_meetings_root",
     "sha256_bytes",
     "sha256_file",
     "sha256_params",

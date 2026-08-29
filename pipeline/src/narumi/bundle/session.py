@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-import re
+import os
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,9 +16,21 @@ from pydantic import BaseModel
 
 from narumi.bundle.hashing import sha256_file, sha256_params
 from narumi.bundle.manifest import ArtifactRecord, Manifest, Producer
-from narumi.errors import InvalidArgumentError, NotFoundError
-
-MEETING_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
+from narumi.bundle.manifest_writer import (
+    LOCK_TIMEOUT_SECONDS,
+    MEETING_ID_RE,
+    assert_manifest_generation,
+    manifest_writer_lock,
+    read_manifest_snapshot,
+    replace_manifest_bytes,
+    sync_meetings_root,
+)
+from narumi.errors import (
+    ConfigurationConflictError,
+    InvalidArgumentError,
+    NarumiError,
+    NotFoundError,
+)
 
 SUBDIRS = (
     "tracks",
@@ -29,6 +42,25 @@ SUBDIRS = (
     "context",
     "logs",
 )
+
+
+def _cleanup_empty_bundle(path: Path) -> None:
+    """Remove only the empty directories created by a known-failed create attempt."""
+    try:
+        entries = list(path.iterdir())
+        if any(
+            entry.name not in SUBDIRS
+            or entry.is_symlink()
+            or not entry.is_dir()
+            or any(entry.iterdir())
+            for entry in entries
+        ):
+            return
+        for entry in entries:
+            entry.rmdir()
+        path.rmdir()
+    except OSError:
+        pass
 
 
 def utc_now_iso() -> str:
@@ -51,9 +83,13 @@ class StageResult:
 class Bundle:
     """One meeting's session bundle rooted at ``meetings/<meeting_id>/``."""
 
-    def __init__(self, path: Path, manifest: Manifest) -> None:
+    def __init__(
+        self, path: Path, manifest: Manifest, *, manifest_sha256: str | None = None
+    ) -> None:
         self.path = Path(path)
         self.manifest = manifest
+        self._manifest_sha256 = manifest_sha256
+        self._manifest_save_outcome_unknown = False
 
     # ------------------------------------------------------------------ construction
     @classmethod
@@ -69,42 +105,68 @@ class Bundle:
         config: Any | None = None,
     ) -> Bundle:
         meeting_id = meeting_id or new_meeting_id()
-        if not MEETING_ID_RE.match(meeting_id):
-            raise InvalidArgumentError(f"invalid meeting_id: {meeting_id}")
-        path = Path(meetings_root) / meeting_id
-        if path.exists():
-            raise InvalidArgumentError(f"bundle already exists: {path}")
-        now = utc_now_iso()
-        manifest = Manifest(
-            meeting_id=meeting_id,
-            meeting_name=meeting_name,
-            engagement=engagement,
-            scope=scope,
-            profile=profile,
-            created_at=now,
-            updated_at=now,
-        )
-        if config is not None:
-            manifest.config = config
-        bundle = cls(path, manifest)
-        for sub in SUBDIRS:
-            (path / sub).mkdir(parents=True, exist_ok=True)
-        bundle.save()
-        return bundle
+        if not isinstance(meeting_id, str) or not MEETING_ID_RE.fullmatch(meeting_id):
+            raise InvalidArgumentError("invalid meeting_id")
+        meetings_root = Path(meetings_root)
+        path = meetings_root / meeting_id
+        with manifest_writer_lock(meetings_root, meeting_id):
+            if os.path.lexists(path):
+                raise InvalidArgumentError("bundle already exists")
+            now = utc_now_iso()
+            manifest = Manifest(
+                meeting_id=meeting_id,
+                meeting_name=meeting_name,
+                engagement=engagement,
+                scope=scope,
+                profile=profile,
+                created_at=now,
+                updated_at=now,
+            )
+            if config is not None:
+                manifest.config = config
+            bundle = cls(path, manifest)
+            try:
+                for sub in SUBDIRS:
+                    (path / sub).mkdir(mode=0o700, parents=True, exist_ok=True)
+                bundle.save()
+            except BaseException as error:
+                if not (
+                    isinstance(error, ConfigurationConflictError)
+                    and error.details.get("outcome_unknown") is True
+                ):
+                    _cleanup_empty_bundle(path)
+                    try:
+                        sync_meetings_root(meetings_root)
+                    except NarumiError:
+                        pass
+                raise
+            try:
+                sync_meetings_root(meetings_root)
+            except NarumiError:
+                raise ConfigurationConflictError(
+                    "The meeting creation outcome is unknown; verify it before retrying",
+                    details={"reason": "bundle_create_outcome_unknown", "outcome_unknown": True},
+                ) from None
+            return bundle
 
     @classmethod
     def open(cls, path: Path) -> Bundle:
         path = Path(path)
         manifest_path = path / "manifest.json"
         if not manifest_path.exists():
-            raise NotFoundError(f"bundle not found: {path}", details={"path": str(path)})
-        manifest = Manifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
-        return cls(path, manifest)
+            raise NotFoundError("bundle not found")
+        snapshot = read_manifest_snapshot(path)
+        if snapshot is None:
+            raise NotFoundError("bundle not found")
+        manifest = Manifest.model_validate_json(snapshot.contents)
+        if manifest.meeting_id != path.name:
+            raise InvalidArgumentError("manifest meeting_id does not match its bundle")
+        return cls(path, manifest, manifest_sha256=snapshot.sha256)
 
     @classmethod
     def find(cls, meetings_root: Path, meeting_id: str) -> Bundle:
-        if not MEETING_ID_RE.match(meeting_id):
-            raise InvalidArgumentError(f"invalid meeting_id: {meeting_id}")
+        if not isinstance(meeting_id, str) or not MEETING_ID_RE.fullmatch(meeting_id):
+            raise InvalidArgumentError("invalid meeting_id")
         return cls.open(Path(meetings_root) / meeting_id)
 
     @classmethod
@@ -142,13 +204,41 @@ class Bundle:
         return self.path / rel
 
     # ------------------------------------------------------------------ persistence
+    def _require_known_save_outcome(self) -> None:
+        if self._manifest_save_outcome_unknown:
+            raise ConfigurationConflictError(
+                "The meeting save outcome is unknown; reload it before saving again",
+                details={"reason": "manifest_save_outcome_unknown", "outcome_unknown": True},
+            )
+
+    @contextmanager
+    def writer_lock(self, *, timeout: float | None = LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
+        """Hold this meeting's manifest fence after verifying this Bundle is current."""
+        self._require_known_save_outcome()
+        with manifest_writer_lock(self.path.parent, self.meeting_id, timeout=timeout):
+            assert_manifest_generation(self.path, self._manifest_sha256)
+            yield
+
     def save(self) -> None:
-        self.manifest.updated_at = utc_now_iso()
-        tmp = self.manifest_path.with_suffix(".json.tmp")
-        tmp.write_text(
-            self.manifest.model_dump_json(indent=2, exclude_none=False) + "\n", encoding="utf-8"
-        )
-        tmp.replace(self.manifest_path)
+        with self.writer_lock():
+            previous_updated_at = self.manifest.updated_at
+            self.manifest.updated_at = utc_now_iso()
+            try:
+                contents = (
+                    self.manifest.model_dump_json(indent=2, exclude_none=False) + "\n"
+                ).encode("utf-8")
+                generation = replace_manifest_bytes(
+                    self.path, contents, expected_sha256=self._manifest_sha256
+                )
+            except BaseException as error:
+                self.manifest.updated_at = previous_updated_at
+                if (
+                    isinstance(error, ConfigurationConflictError)
+                    and error.details.get("outcome_unknown") is True
+                ):
+                    self._manifest_save_outcome_unknown = True
+                raise
+            self._manifest_sha256 = generation
 
     def write_json(self, rel: str, model: BaseModel | dict[str, Any]) -> Path:
         target = self.abspath(rel)
@@ -209,37 +299,48 @@ class Bundle:
         ``inputs`` maps a label (usually an upstream artifact key) to its sha256; ``params`` are the
         stage parameters. The pair is what makes "same inputs → same version" hold.
         """
-        if isinstance(producer, tuple):
-            producer = Producer(name=producer[0], version=producer[1])
-        params_hash = sha256_params(params)
-        out_path = self.abspath(output)
-        existing = self.artifact(key)
-        if (
-            not force
-            and existing is not None
-            and existing.inputs == inputs
-            and existing.params_hash == params_hash
-            and existing.path == output
-            and out_path.exists()
-        ):
-            return StageResult(key=key, path=out_path, record=existing, skipped=True)
+        with self.writer_lock():
+            if isinstance(producer, tuple):
+                producer = Producer(name=producer[0], version=producer[1])
+            params_hash = sha256_params(params)
+            out_path = self.abspath(output)
+            existing = self.artifact(key)
+            if (
+                not force
+                and existing is not None
+                and existing.inputs == inputs
+                and existing.params_hash == params_hash
+                and existing.path == output
+                and out_path.exists()
+            ):
+                return StageResult(key=key, path=out_path, record=existing, skipped=True)
 
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        fn(out_path)
-        if not out_path.exists():
-            raise InvalidArgumentError(f"stage {key} produced no output at {output}")
-        record = ArtifactRecord(
-            path=output,
-            sha256=sha256_file(out_path),
-            inputs=dict(inputs),
-            params=dict(params),
-            params_hash=params_hash,
-            producer=producer,
-            created_at=utc_now_iso(),
-        )
-        self.manifest.artifacts[key] = record
-        self.save()
-        return StageResult(key=key, path=out_path, record=record, skipped=False)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            fn(out_path)
+            if not out_path.exists():
+                raise InvalidArgumentError(f"stage {key} produced no output at {output}")
+            record = ArtifactRecord(
+                path=output,
+                sha256=sha256_file(out_path),
+                inputs=dict(inputs),
+                params=dict(params),
+                params_hash=params_hash,
+                producer=producer,
+                created_at=utc_now_iso(),
+            )
+            had_previous = key in self.manifest.artifacts
+            previous = self.manifest.artifacts.get(key)
+            self.manifest.artifacts[key] = record
+            try:
+                self.save()
+            except BaseException:
+                if had_previous:
+                    assert previous is not None
+                    self.manifest.artifacts[key] = previous
+                else:
+                    self.manifest.artifacts.pop(key, None)
+                raise
+            return StageResult(key=key, path=out_path, record=record, skipped=False)
 
     # ------------------------------------------------------------------ minutes versions
     def next_minutes_version(self) -> int:
