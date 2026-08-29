@@ -4,7 +4,7 @@ import XCTest
 /// Executes the real app actor with injected bootstrap and HTTP implementations. The Core
 /// transport tests separately exercise real TLS; this fixture never launches the GUI or a provider.
 final class MCPClientSecureSessionTests: XCTestCase {
-    func testRealClientAuthenticatesBeforeToolsRejectsDowngradeAndNeverReplaysSecrets() throws {
+    func testRealClientAuthenticatesPreservesProviderSelectionsAndNeverReplaysSecrets() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("narumi-client-test-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -33,14 +33,25 @@ final class MCPClientSecureSessionTests: XCTestCase {
         let result = try run(fixture)
         XCTAssertEqual(fixture.terminationStatus, 0, result)
         let checks = try JSONDecoder().decode([String: Bool].self, from: Data(result.utf8))
-        XCTAssertEqual(Set(checks.keys), [
-            "bootstrap_before_http", "discovery_before_tools", "v1_rejected", "missing_tls_rejected",
+        var expectedChecks: Set<String> = [
+            "bootstrap_before_http", "discovery_before_tools", "v1_rejected", "future_contract_rejected", "missing_tls_rejected",
             "false_client_auth_rejected", "wrong_instance_rejected", "secret_not_replayed",
             "setup_reconciled_without_replay", "readonly_reconnect", "rpc_error_redacted",
             "malformed_response_redacted", "invalid_config_rejected",
-            "codex_expected_config_sent", "codex_force_rejected", "context_expected_config_sent",
-            "non_generating_context_omits_config", "legacy_generation_omits_new_config_field",
-        ])
+            "generation_unknown_localized_without_details",
+            "legacy_generation_omits_new_config_field", "legacy_meeting_config_omits_new_field",
+            "legacy_profile_omits_new_field", "legacy_save_does_not_regenerate",
+        ]
+        for prefix in ["v4_codex", "v4_openai", "v4_anthropic", "v4_ollama", "v3_codex"] {
+            for suffix in [
+                "meeting_config_round_trip", "profile_round_trip", "save_does_not_regenerate",
+                "expected_config_sent", "force_rejected", "context_expected_config_sent",
+                "non_generating_context_omits_config",
+            ] {
+                expectedChecks.insert(prefix + "_" + suffix)
+            }
+        }
+        XCTAssertEqual(Set(checks.keys), expectedChecks)
         for (name, passed) in checks { XCTAssertTrue(passed, name) }
     }
 

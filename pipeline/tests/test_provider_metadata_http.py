@@ -6,13 +6,20 @@ import http.client
 import io
 import json
 import ssl
+import traceback
 import urllib.error
 import urllib.request
 from types import SimpleNamespace
 
 import pytest
-from narumi.errors import AuthenticationRequiredError, EngineUnavailableError, InvalidArgumentError
+from narumi.errors import (
+    AuthenticationRequiredError,
+    CancelledError,
+    EngineUnavailableError,
+    InvalidArgumentError,
+)
 from narumi.providers.metadata import MetadataClient
+from narumi.providers.metadata.deadline import DeadlineHTTPSHandler
 from narumi.providers.metadata.http import MAX_RESPONSE_BYTES, JSONHTTPClient, RejectRedirects
 from narumi.providers.metadata.tls import tls_context
 
@@ -53,9 +60,9 @@ class Opener:
         return response
 
 
-def request_response(response, *, headers=None):
+def request_response(response, *, headers=None, **options):
     opener = Opener(response)
-    return JSONHTTPClient(opener=opener).request("GET", URL, headers=headers)
+    return JSONHTTPClient(opener=opener).request("GET", URL, headers=headers, **options)
 
 
 def test_metadata_http_has_no_proxy_or_redirect_handler_inheritance(monkeypatch):
@@ -146,6 +153,25 @@ def test_redirects_never_forward_credentials(status):
         )
     assert failure.value.details["reason"] == "redirect_rejected"
     assert KEY not in str(failure.value.to_payload())
+
+
+def test_redirect_cleanup_failure_never_exposes_upstream_exception():
+    class FailingClose:
+        attempted = False
+
+        def close(self):
+            self.attempted = True
+            raise RuntimeError(KEY)
+
+    response = FailingClose()
+    with pytest.raises(EngineUnavailableError) as failure:
+        RejectRedirects().redirect_request(
+            urllib.request.Request(URL), response, 307, KEY, {}, "https://external.invalid/"
+        )
+    assert response.attempted
+    assert failure.value.details == {"reason": "redirect_rejected"}
+    assert failure.value.__suppress_context__
+    assert KEY not in "".join(traceback.format_exception(failure.value))
 
 
 def test_secret_is_sent_only_in_explicit_header_and_not_error_or_model_result(monkeypatch):
@@ -305,3 +331,190 @@ def test_local_metadata_does_not_accept_an_api_key():
             "ollama", "http://127.0.0.1:11434", KEY
         )
     assert not opener.calls
+
+
+@pytest.mark.parametrize("status", [400, 401, 402, 403, 404, 409, 422, 429])
+@pytest.mark.parametrize("raised", [True, False])
+def test_generation_http_refusal_is_known_and_never_reads_error_body(status, raised):
+    class ForbiddenBody(Response):
+        def read(self, size=-1):
+            pytest.fail("HTTP error body was read")
+
+    body = ForbiddenBody(KEY.encode(), status=status)
+    response = urllib.error.HTTPError(URL, status, KEY, {}, body) if raised else body
+    error_type = AuthenticationRequiredError if status in {401, 403} else EngineUnavailableError
+    opener = Opener(response, Response())
+    with pytest.raises(error_type) as failure:
+        JSONHTTPClient(opener=opener).request("POST", URL, response_kind="generation")
+    assert failure.value.details == (
+        {"reason": "credential_rejected"}
+        if status in {401, 403}
+        else {"reason": "metadata_http_error", "status": status}
+    )
+    assert len(opener.calls) == 1 and len(opener.responses) == 1
+    assert body.closed
+    assert KEY not in "".join(traceback.format_exception(failure.value))
+    assert failure.value.__suppress_context__
+
+
+@pytest.mark.parametrize("status", [301, 302, 307, 308, 500, 502, 503])
+@pytest.mark.parametrize("raised", [True, False])
+def test_generation_http_uncertain_outcome_never_retries(status, raised):
+    response = (
+        urllib.error.HTTPError(URL, status, KEY, {}, io.BytesIO(KEY.encode()))
+        if raised
+        else Response(KEY.encode(), status=status)
+    )
+    opener = Opener(response, Response())
+    with pytest.raises(EngineUnavailableError) as failure:
+        JSONHTTPClient(opener=opener).request("POST", URL, response_kind="generation")
+    assert failure.value.details == {
+        "reason": "provider_generation_outcome_unknown",
+        "outcome_unknown": True,
+    }
+    assert len(opener.calls) == 1 and len(opener.responses) == 1
+    assert KEY not in "".join(traceback.format_exception(failure.value))
+
+
+@pytest.mark.parametrize(
+    "body,headers,response_url",
+    [
+        (b"not json", {}, URL),
+        (b"[]", {}, URL),
+        (b'{"value":NaN}', {}, URL),
+        (b'{"value":1,"value":2}', {}, URL),
+        (b"{}", {"Content-Type": "text/plain"}, URL),
+        (b"{}", {"Content-Encoding": "gzip"}, URL),
+        (b"{}", {"Content-Length": "invalid"}, URL),
+        (b"{}", {"Content-Length": "8388609"}, URL),
+        (b"{}", {}, "https://external.invalid/"),
+        (json.dumps({"unused": KEY}).encode(), {}, URL),
+        (json.dumps({"unused": [None] * 20_001}).encode(), {}, URL),
+    ],
+)
+def test_generation_invalid_response_is_unknown(body, headers, response_url):
+    response = Response(body, headers=headers, url=response_url)
+    opener = Opener(response, Response())
+    with pytest.raises(EngineUnavailableError) as failure:
+        JSONHTTPClient(opener=opener).request(
+            "POST", URL, headers={"Authorization": "Bearer " + KEY}, response_kind="generation"
+        )
+    assert failure.value.details == {
+        "reason": "provider_generation_outcome_unknown",
+        "outcome_unknown": True,
+    }
+    assert len(opener.calls) == 1 and len(opener.responses) == 1
+    assert response.closed and failure.value.__suppress_context__
+    assert KEY not in "".join(traceback.format_exception(failure.value))
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        TimeoutError(KEY),
+        urllib.error.URLError(KEY),
+        ConnectionError(KEY),
+        http.client.BadStatusLine(KEY),
+        http.client.IncompleteRead(KEY.encode()),
+        RuntimeError(KEY),
+        EngineUnavailableError(KEY, details={"reason": KEY}),
+    ],
+)
+def test_generation_injected_opener_failure_is_conservatively_unknown(error):
+    opener = Opener(error, Response())
+    with pytest.raises(EngineUnavailableError) as failure:
+        JSONHTTPClient(opener=opener).request("POST", URL, response_kind="generation")
+    assert failure.value.details == {
+        "reason": "provider_generation_outcome_unknown",
+        "outcome_unknown": True,
+    }
+    assert len(opener.calls) == 1 and len(opener.responses) == 1
+    assert KEY not in "".join(traceback.format_exception(failure.value))
+
+
+@pytest.mark.parametrize("started", [False, True])
+def test_explicit_opener_write_boundary_distinguishes_pre_send_failure(started):
+    class TrackedOpener:
+        handlers = [DeadlineHTTPSHandler(context=tls_context())]
+
+        def open(self, request, *, timeout):
+            if started:
+                request.narumi_deadline.mark_request_started()
+            raise TimeoutError(KEY)
+
+    with pytest.raises(EngineUnavailableError) as failure:
+        JSONHTTPClient(opener=TrackedOpener()).request("POST", URL, response_kind="generation")
+    assert failure.value.details == (
+        {"reason": "provider_generation_outcome_unknown", "outcome_unknown": True}
+        if started
+        else {"reason": "metadata_connection_failed"}
+    )
+    assert KEY not in "".join(traceback.format_exception(failure.value))
+
+
+@pytest.mark.parametrize("response_kind", ["metadata", "generation"])
+@pytest.mark.parametrize("authorization", ["Bearer ", "bearer ", "BEARER "])
+@pytest.mark.parametrize("full_header", [True, False])
+def test_bearer_key_reflection_is_rejected_without_requiring_the_scheme(
+    response_kind, authorization, full_header
+):
+    header = authorization + KEY
+    reflected = header if full_header else KEY
+    body = json.dumps({"unused": reflected}).replace("f", "\\u0066").encode()
+    with pytest.raises(EngineUnavailableError) as failure:
+        request_response(
+            Response(body), headers={"Authorization": header}, response_kind=response_kind
+        )
+    assert failure.value.details["reason"] == (
+        "unsafe_metadata" if response_kind == "metadata" else "provider_generation_outcome_unknown"
+    )
+    assert KEY not in "".join(traceback.format_exception(failure.value))
+
+
+def test_generation_cancelled_before_open_does_not_transmit():
+    opener = Opener()
+    with pytest.raises(CancelledError) as failure:
+        JSONHTTPClient(opener=opener).request(
+            "POST", URL, response_kind="generation", should_cancel=lambda: True
+        )
+    assert not opener.calls
+    assert failure.value.details == {"reason": "provider_generation_cancelled"}
+
+
+@pytest.mark.parametrize("response_kind", ["metadata", "generation"])
+def test_cancelled_after_open_records_unknown_only_for_generation(response_kind):
+    cancelled = False
+
+    class CancellingOpener(Opener):
+        def open(self, request, *, timeout):
+            nonlocal cancelled
+            response = super().open(request, timeout=timeout)
+            cancelled = True
+            return response
+
+    response = Response()
+    opener = CancellingOpener(response, Response())
+    with pytest.raises(CancelledError) as failure:
+        JSONHTTPClient(opener=opener).request(
+            "POST", URL, response_kind=response_kind, should_cancel=lambda: cancelled
+        )
+    assert failure.value.details == (
+        {"reason": "provider_generation_outcome_unknown", "outcome_unknown": True}
+        if response_kind == "generation"
+        else {"reason": "provider_generation_cancelled"}
+    )
+    assert len(opener.calls) == 1 and response.closed
+
+
+def test_cancel_callback_failure_stops_without_exposing_exception_or_transmitting():
+    def broken_callback():
+        raise RuntimeError(KEY)
+
+    opener = Opener()
+    with pytest.raises(CancelledError) as failure:
+        JSONHTTPClient(opener=opener).request(
+            "POST", URL, response_kind="generation", should_cancel=broken_callback
+        )
+    assert not opener.calls
+    assert failure.value.details == {"reason": "provider_generation_cancelled"}
+    assert KEY not in "".join(traceback.format_exception(failure.value))

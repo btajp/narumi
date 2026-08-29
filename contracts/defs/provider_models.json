@@ -3,6 +3,17 @@
   "$id": "narumi:defs/provider_models.json",
   "title": "narumi provider_models contract definitions",
   "$defs": {
+    "minutes_model_provider": {
+      "type": "string",
+      "enum": ["codex-app-server", "anthropic-api", "ollama", "openai-api"],
+      "description": "Adapters implemented for explicit text-only minutes generation. This list excludes Claude Agent SDK generation and does not imply any connection or model is ready."
+    },
+    "minutes_max_tokens": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 32768,
+      "description": "Narumi's per-request output-token limit, not a claim about model capability. The server also validates the selected parameter_schema and rejects values above a known model max_output_tokens. If omitted, the adapter uses min(4096, known model limit), or an application limit of 4096 when the model limit is unknown. Unknown model limits remain null in metadata."
+    },
     "minutes_model_parameters": {
       "type": "object",
       "properties": {
@@ -11,18 +22,41 @@
           "minLength": 1,
           "maxLength": 32,
           "pattern": "^[a-z][a-z0-9_-]{0,31}$",
-          "description": "Must be supported by the selected model's official runtime parameter_schema. Omission uses that model's default."
+          "description": "Must be supported by the selected model's verified parameter_schema. Omission uses that model's verified default."
         }
       },
       "additionalProperties": false,
       "default": {},
-      "description": "Closed, non-secret minutes generation options. Paths, endpoints, credentials, commands and arbitrary runtime overrides are not accepted."
+      "description": "Closed Codex minutes generation options. max_tokens, paths, endpoints, credentials, commands and arbitrary runtime overrides are not accepted."
+    },
+    "openai_minutes_model_parameters": {
+      "type": "object",
+      "properties": {
+        "reasoning_effort": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+          "description": "Must be advertised as supported by the selected model's verified parameter_schema. Omission uses a verified default only; unsupported effort is never silently substituted."
+        },
+        "max_tokens": { "$ref": "#/$defs/minutes_max_tokens" }
+      },
+      "additionalProperties": false,
+      "default": {},
+      "description": "Closed OpenAI API text minutes options. Keys unavailable on the selected model are rejected by the server; credentials and runtime overrides are never parameters."
+    },
+    "bounded_minutes_model_parameters": {
+      "type": "object",
+      "properties": { "max_tokens": { "$ref": "#/$defs/minutes_max_tokens" } },
+      "additionalProperties": false,
+      "default": {},
+      "description": "Closed Anthropic API and local Ollama text minutes options. reasoning_effort, credentials and runtime overrides are not supported."
     },
     "minutes_model_selection": {
       "type": "object",
       "required": ["provider", "connection_id", "connection_revision", "model_id"],
       "properties": {
-        "provider": { "const": "codex-app-server" },
+        "provider": { "$ref": "#/$defs/minutes_model_provider" },
         "connection_id": { "$ref": "#/$defs/provider_connection_id" },
         "connection_revision": { "$ref": "#/$defs/provider_connection_revision" },
         "model_id": {
@@ -31,7 +65,11 @@
           "maxLength": 256,
           "description": "Exact, explicitly selected ID from this connection's model catalog. The server validates availability and supported parameters; it never substitutes another model."
         },
-        "parameters": { "$ref": "#/$defs/minutes_model_parameters" },
+        "parameters": {
+          "type": "object",
+          "default": {},
+          "description": "Closed options selected by provider below. Omit to use verified model defaults and bounded adapter defaults; no values are copied from another provider."
+        },
         "cache_epoch": {
           "type": "integer",
           "minimum": 0,
@@ -40,7 +78,21 @@
         }
       },
       "additionalProperties": false,
-      "description": "Explicit text-only minutes selection. It does not change llm_provider, transcript integration, vision, transcription or other stages. Requires an enabled, matching-revision Codex connection with official ChatGPT authentication and subscription_ok or api_ok policy."
+      "description": "Explicit text-only minutes selection. It does not change llm_provider, transcript integration, vision, transcription or other stages. Requires an enabled, matching-revision connection with verified authentication and an available text model. Codex needs chatgpt authentication and subscription_ok or api_ok; Anthropic/OpenAI API need api_key and api_ok; Ollama needs numeric-loopback, a verified local model and no credentials, and may use local_only. Unknown models are display-only and cannot be selected. Claude Agent SDK generation is excluded.",
+      "allOf": [
+        {
+          "if": { "properties": { "provider": { "const": "codex-app-server" } }, "required": ["provider"] },
+          "then": { "properties": { "parameters": { "$ref": "#/$defs/minutes_model_parameters" } } }
+        },
+        {
+          "if": { "properties": { "provider": { "const": "openai-api" } }, "required": ["provider"] },
+          "then": { "properties": { "parameters": { "$ref": "#/$defs/openai_minutes_model_parameters" } } }
+        },
+        {
+          "if": { "properties": { "provider": { "enum": ["anthropic-api", "ollama"] } }, "required": ["provider"] },
+          "then": { "properties": { "parameters": { "$ref": "#/$defs/bounded_minutes_model_parameters" } } }
+        }
+      ]
     },
     "minutes_model": {
       "oneOf": [
@@ -295,13 +347,22 @@
             "integer",
             "null"
           ],
-          "minimum": 1
+          "minimum": 1,
+          "description": "Verified model capability, null when unknown. Never fill this field with Narumi's 4096-token default or 32768-token request limit. An adapter may still impose those application limits without claiming a model limit."
         },
         "parameter_schema": {
           "$ref": "#/$defs/provider_parameter_schema"
         },
         "availability": {
           "$ref": "#/$defs/provider_availability"
+        },
+        "availability_expires_on": {
+          "type": ["string", "null"],
+          "format": "date",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "Optional availability end date supplied by the provider API, preserved as YYYY-MM-DD without inventing a time or timezone. Omission or null means no confirmed end date was supplied, not unlimited availability. Never invent an end date or use zero as a placeholder. Preserve the confirmed date with cached metadata. When the current UTC date is on or after it, the server must reject selection and generation even if cached availability was available. This is Narumi's conservative application rule, not a claim about an official shutdown time. Current-date comparison is performed by the implementation, not this schema."
         },
         "reason": {
           "$ref": "#/$defs/provider_reason"

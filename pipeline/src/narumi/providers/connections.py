@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -19,6 +18,7 @@ from narumi.providers._common import (
 )
 from narumi.providers._requests import safe_secret_error
 from narumi.providers.metadata import validate_endpoint
+from narumi.providers.metadata.validation import check_public_payload
 
 if TYPE_CHECKING:
     from narumi.providers.service import ProviderService
@@ -31,14 +31,19 @@ class Connections:
     def set(self, args: dict[str, Any]) -> dict[str, Any]:
         service = self.service
         cancel_codex = None
-        self._validate_key(args.get("api_key"))
-        if isinstance(args.get("api_key"), str) and args["api_key"] in json.dumps(
-            {key: value for key, value in args.items() if key != "api_key"},
-            ensure_ascii=False,
-        ):
-            raise InvalidArgumentError(
-                "Provider credentials cannot also be used as public metadata"
-            )
+        credential = args.get("api_key")
+        self._validate_key(credential)
+        if isinstance(credential, str):
+            try:
+                check_public_payload(
+                    {key: value for key, value in args.items() if key != "api_key"},
+                    secrets=(credential,),
+                    reject_credentials=False,
+                )
+            except NarumiError:
+                raise InvalidArgumentError(
+                    "Provider credentials cannot also be used as public metadata"
+                ) from None
         with service.store.transaction() as document:
             saved = document["connections"].get(args.get("connection_id"))
             provider_id = saved["provider_id"] if saved is not None else args.get("provider_id")
@@ -166,6 +171,7 @@ class Connections:
         endpoint = args.get("endpoint") or {
             "ollama": "http://127.0.0.1:11434",
             "codex-app-server": "https://chatgpt.com",
+            "openai-api": "https://api.openai.com",
         }.get(provider_id, "https://api.anthropic.com")
         return {
             "connection_id": "conn-" + uuid.uuid4().hex,

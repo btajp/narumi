@@ -6,7 +6,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from narumi.bundle import Bundle
+from narumi.bundle import Bundle, MinutesVersionRecord
 from narumi.errors import (
     AuthenticationRequiredError,
     BusyError,
@@ -23,6 +23,7 @@ from narumi.pipeline import process_meeting, refresh_meeting, regenerate_meeting
 from narumi.providers.codex._models import fetch_models
 from narumi.providers.generation import OUTCOME_UNKNOWN, MinutesResolver
 from narumi.providers.service import ProviderService
+from pydantic import ValidationError
 
 from .provider_fakes import FakeCodexBackend, MemorySecretStore, prepared_codex_connection
 
@@ -461,4 +462,97 @@ def test_model_observation_change_between_chunks_is_rejected(generation):
         model["resolved_revision"] = "changed-revision"
     with pytest.raises(ConfigurationConflictError):
         provider.complete("fixture prompt")
+    assert completions(backend) == []
+
+
+@pytest.mark.parametrize(
+    ("provider", "parameters"),
+    [
+        ("codex-app-server", {"max_tokens": 1}),
+        ("anthropic-api", {"reasoning_effort": "high"}),
+        ("ollama", {"reasoning_effort": "low"}),
+        ("openai-api", {"max_tokens": True}),
+        ("openai-api", {"max_tokens": 1.0}),
+        ("openai-api", {"max_tokens": "512"}),
+        ("openai-api", {"max_tokens": "high"}),
+        ("openai-api", {"reasoning_effort": 1}),
+        ("openai-api", {"max_tokens": 0}),
+        ("openai-api", {"max_tokens": 32769}),
+        ("openai-api", {"endpoint": "fixture"}),
+        ("claude-agent-sdk", {}),
+    ],
+)
+def test_model_selection_closes_parameters_by_provider(provider, parameters):
+    with pytest.raises(ValidationError):
+        ModelSelection(
+            provider=provider,
+            connection_id="conn-0123456789ab",
+            connection_revision=1,
+            model_id="fixture-model",
+            parameters=parameters,
+        )
+
+
+@pytest.mark.parametrize("field", ["connection_revision", "cache_epoch"])
+@pytest.mark.parametrize("value", [True, 1.0, "1"])
+def test_model_selection_revisions_use_strict_integers(field, value):
+    selection = {
+        "provider": "openai-api",
+        "connection_id": "conn-0123456789ab",
+        "connection_revision": 1,
+        "model_id": "gpt-4.1",
+        field: value,
+    }
+    with pytest.raises(ValidationError):
+        ModelSelection.model_validate(selection)
+
+
+def test_codex_v030_provenance_is_reused_without_an_adapter_migration_send(tmp_path, generation):
+    service, backend, config = generation
+    bundle = generation_bundle(tmp_path, config)
+    runtime = service.store.read()["runtimes"]["codex-app-server"]
+    # Independently spell the shipping v0.3 fingerprint. An extra HTTP-only field or
+    # adapter-version bump must not invalidate a completed Codex generation.
+    original_params = {
+        "provider": "codex-app-server",
+        "prompt_version": "minutes-v2",
+        "language": "ja",
+        "minutes_model": config.minutes_model.model_dump(mode="json"),
+        "model_id": config.minutes_model.model_id,
+        "resolved_revision": None,
+        "effective_parameters": {"reasoning_effort": "high"},
+        "runtime_version": "1.0.0",
+        "runtime_sha256": "a" * 64,
+        "runtime_catalog_revision": runtime["catalog_revision"],
+        "adapter_version": "1",
+        "context_window": None,
+        "max_output_tokens": None,
+        "data_destination": "openai",
+        "cost_class": "subscription",
+        "generation_limits": {
+            "bounded_prompt_version": "minutes-reduce-v1",
+            "input_chars": 12000,
+            "max_requests": 64,
+            "max_reductions": 6,
+        },
+    }
+    original = bundle.run_stage(
+        "minutes/v1",
+        inputs={"merged/merged": bundle.artifact_hash("merged/merged")},
+        params=original_params,
+        producer=("generate", "1"),
+        output="minutes/v1/minutes.md",
+        fn=lambda path: path.write_text("# Existing Codex minutes\n"),
+    )
+    bundle.manifest.minutes_versions.append(
+        MinutesVersionRecord(
+            version=1,
+            path="minutes/v1/minutes.md",
+            generated_at=original.record.created_at,
+            provider="codex-app-server",
+        )
+    )
+    bundle.save()
+    result = run_generate(Bundle.open(bundle.path), minutes_resolver=MinutesResolver(service))
+    assert result.skipped and result.path.read_text() == "# Existing Codex minutes\n"
     assert completions(backend) == []

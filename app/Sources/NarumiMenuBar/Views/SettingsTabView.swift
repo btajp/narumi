@@ -61,7 +61,7 @@ struct SettingsTabView: View {
                     saving = false
                 }
             }
-            .disabled(saving || (form.processing.minutesModel.mode == .codex
+            .disabled(saving || (form.processing.minutesModel.mode == .selected
                 && (model.minutesModelCatalog.isLoading
                     || model.minutesModelCatalog.validationMessage(for: form.processing) != nil)))
         }

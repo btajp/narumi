@@ -18,12 +18,13 @@ contracts/
 - `manifest.json` の `tools` はツール名の配列。`tools/<name>.json` と **過不足なく一致** させる（一致しなければローダーが起動時に `contract_mismatch` を投げる）
 - `manifest.json` の `defs` は共通定義ファイルの相対パス配列。定義名は全ファイルを通して一意
 
-## v3 ツール一覧（37）
+## v4 ツール一覧（37）
 
-契約 3.0.0 は Codex App Server の公式 ChatGPT 認証と、テキスト議事録のモデル選択を追加する。
-既存の `llm_provider` は維持し、文字起こし・発話統合・画像処理へ Codex を暗黙に適用しない。
-実装済みの範囲は `get_server_info.capabilities.workflow` と各モデルの能力で判定する。
-複数プロバイダの生成・統合はこの契約では未対応。プロバイダ名の存在だけでは生成可能と判断しない。
+契約 4.0.0 は OpenAI API 接続と、4 系統のテキスト議事録モデル選択を扱う。
+既存の `llm_provider` は維持し、文字起こし・発話統合・画像処理へ選択を暗黙に適用しない。
+`get_server_info.capabilities.minutes_model_providers` は議事録生成を実装した adapter の一覧。
+この一覧とは別に、接続の認証・準備状態と各モデルの能力を確認する。
+全工程のモデル選択、外部 API の文字起こし、複数生成・統合、Claude Agent SDK による明示的な議事録モデル選択は今回の対象外。
 
 | 分類 | ツール |
 |---|---|
@@ -50,9 +51,10 @@ contracts/
 
 `defs/common.json` の主な共通型: `meeting_id` `request_id` `job_id` `context_id` `scope_name` `scope` `timestamp` `external_send_policy` `job_status` `job_kind` `job` `error_code`（`cancelled` を含む）`error` `error_envelope` `meeting_config` `track_status` `meeting_summary`（任意の `active_job` 付き）`segment` `context_source_type` `export_destination` `profile`。
 
-プロバイダ型は別の defs に分ける。接続対象は Anthropic API / Claude Agent SDK / Codex App Server / Ollama。
-Claude SDK は API キー認証のみ。Codex は公式 ChatGPT 認証のみで、接続先は `https://chatgpt.com` に固定する。
-Claude のサブスク認証と OpenAI API 接続は未対応。
+プロバイダ型は別の defs に分ける。接続対象は Anthropic API / Claude Agent SDK / Codex App Server / Ollama / OpenAI API。
+Claude SDK と OpenAI API は API キー認証のみ。OpenAI API の接続先は `https://api.openai.com` に固定する。
+Codex は公式 ChatGPT 認証のみで、接続先は `https://chatgpt.com` に固定し、OpenAI API キーを流用しない。
+Claude のサブスク認証と `minutes_model` による Claude SDK 生成は未対応。
 モデル一覧の取得成功と生成可能性は区別し、不明な能力・上限・単価を推測で補わない。
 
 ### 接続・秘密・状態の扱い
@@ -74,27 +76,47 @@ Claude のサブスク認証と OpenAI API 接続は未対応。
 プロファイルの config、新しい会議の config、会議・プロファイルの応答にも同じ型を使う。
 既存保存データにこの項目がない場合は null と同じ扱いで、従来の `llm_provider` の動作を維持する。
 
-選択には `provider: "codex-app-server"`、`connection_id`、1 以上の `connection_revision`、
-モデル一覧から明示的に選んだ `model_id` を指定する。
-`parameters` は省略時 `{}` で、指定できるキーは `reasoning_effort` だけ。
-その値は選択モデルの公式一覧が返した能力と照合する。
+選択には対象の `provider`、`connection_id`、1 以上の `connection_revision`、
+検証済みモデル一覧から明示的に選んだ `model_id` を指定する。
+`parameters` は省略時 `{}`。プロバイダごとに次のキーだけを受け付ける。
+
+| provider | 許可する parameters | 必要な外部送信ポリシー |
+|---|---|---|
+| `codex-app-server` | `reasoning_effort` | `subscription_ok` または `api_ok` |
+| `openai-api` | `reasoning_effort`, `max_tokens` | `api_ok` |
+| `anthropic-api` | `max_tokens` | `api_ok` |
+| `ollama` | `max_tokens` | `local_only` 可。数値 loopback と検証済みローカルモデルのみ |
+
+`reasoning_effort` は選択モデルの検証済み `parameter_schema` と照合する。
+`max_tokens` は 1〜32768 の整数で、narumi が 1 要求の出力量を制限する値。
+モデルの出力上限が既知の場合は、その上限を超える指定も拒否する。
+省略時は adapter が既知のモデル上限と 4096 の小さい方を使い、モデル上限が不明ならアプリ側の制限として 4096 を使う。
+このアプリ側制限をモデルの能力とは扱わず、未知の `descriptor.max_output_tokens` は null のままにする。
+モデル能力を確認できない候補は表示できるが、`unverified` 等として選択を禁止する。
+モデル自体が検証済みで出力上限だけが不明な場合は、アプリ側の要求制限を適用できる。
+`availability_expires_on` は API が提供した終了日を `YYYY-MM-DD` のまま保持する任意項目。
+未提供・不明の場合は省略または null とし、仮の期限・時刻・タイムゾーンを補わない。
+終了日はモデルのキャッシュにも保持する。現在の UTC 日付が当日以降なら、取得時の状態が `available` でも選択・生成を拒否する。
+これはアプリ側の保守的なルールであり、公式な終了時刻を示すものではない。
+日付の形式と実在性は契約で検証し、現在日付との比較は実装側で行う。
+
 `cache_epoch` は省略時 0、指定時は 0 以上の整数。
 接続先・コマンド・認証情報・パスを生成パラメータに入れることはできない。
 
 選択した接続の有効状態・版・認証・モデル能力と、更新後の外部送信ポリシーを保存時・実行時に検証する。
-`local_only` では拒否し、別プロバイダや別モデルへのフォールバックはしない。
+API 送信は `api_ok`、Codex 送信は `subscription_ok` または `api_ok` が必須。別プロバイダや別モデルへフォールバックしない。
 同じ入力と選択では既存の議事録を再利用する。選択や `cache_epoch` だけを変更した場合は、
 文字起こしや発話統合をやり直さず議事録生成だけを更新する。
 
 `regenerate.force=true` は `minutes_model` が null の従来処理だけで使う。
-Codex を選択した会議では `invalid_argument` で拒否する。
-同じ内容を Codex へ改めて送る場合は、再送をユーザーが確認した後、
+明示的な `minutes_model` を選択した会議では `invalid_argument` で拒否する。
+同じ内容で明示的に新しい生成試行を始める場合は、実行と送信先をユーザーが確認した後、
 `set_meeting_config` で `minutes_model.cache_epoch` を明示的に増やして保存する。
 その保存結果を `expected_config` に渡し、新しい `request_id` と `force=false` で `regenerate` を呼ぶ。
 送信や結果の成否が不明な試行は自動再送しない。同じ選択のまま通常の再生成を呼んでも、
 結果不明の記録を迂回して再送することはできない。
 
-Codex の選択がある会議の `regenerate` と、`auto_regenerate=true` の `register_context` は、
+明示的なモデル選択がある会議の `regenerate` と、`auto_regenerate=true` の `register_context` は、
 送信確認時に取得した設定全体を `expected_config` として渡す。
 サーバーは会議のロック内で現設定と照合し、確認後に変更されていれば `configuration_conflict` で拒否する。
 旧来の生成と、生成しないコンテキスト登録では省略できる。指定した場合はどちらでも照合する。
@@ -162,6 +184,8 @@ semver。`get_server_info` が返す `contract_version` でクライアントが
 | `description` / `title` / `examples` のみ | patch |
 
 v3 では旧クライアントが受け付けない provider / auth enum 値と、認可 URL の文字列応答を追加したため major を上げる。
+v4 は OpenAI API の provider 値、議事録の選択対象・パラメータ、必須の対応 provider 一覧を追加する。
+旧 v3 Swift 型は Codex 以外の議事録選択を拒否するため major を上げ、v3 の保存済み Codex 設定と省略時の動作は維持する。
 
 手順: `contracts/` を編集 → `manifest.json` の `contract_version` を更新 → `uv run pytest pipeline/tests/contracts` → 実装 → サーバーテスト。エラーコードを増やすときは `defs/common.json#/$defs/error_code` と `narumi.errors.ErrorCode` を同時に更新する（テストが一致を検査する）。
 

@@ -127,6 +127,37 @@
               "active_setup": null,
               "last_setup": null
             }
+          },
+          {
+            "provider_id": "openai-api",
+            "display_name": "OpenAI API",
+            "roles": [
+              "llm"
+            ],
+            "auth_methods": [
+              "api_key"
+            ],
+            "availability": "not_prepared",
+            "reason": "runtime_preparation_required",
+            "runtime": {
+              "state": "not_prepared",
+              "version": null,
+              "catalog_revision": null,
+              "resources": [
+                {
+                  "resource_id": "openai-client",
+                  "display_name": "narumi OpenAI HTTP adapter inspection",
+                  "kind": "runtime",
+                  "version": null,
+                  "source": "installed",
+                  "download_host": null,
+                  "sha256": null,
+                  "license": "Installed package license metadata unavailable"
+                }
+              ],
+              "active_setup": null,
+              "last_setup": null
+            }
           }
         ]
       }

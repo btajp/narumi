@@ -36,6 +36,7 @@ class CheckResult:
     models: list[dict[str, Any]] | None
     reason: str | None
     authentication_failed: bool = False
+    runtime_catalog_revision: str | None = None
 
 
 class ModelCatalog:
@@ -104,14 +105,17 @@ class ModelCatalog:
                 return CheckResult(None, "credential_required", True)
         try:
             endpoint = validate_endpoint(snapshot["provider_id"], snapshot["endpoint"])
+            runtime = service.runtime._current(snapshot["provider_id"], service.store.read())
             if snapshot["provider_id"] == "codex-app-server":
-                runtime = service.runtime._current(snapshot["provider_id"], service.store.read())
                 if runtime["state"] != "ready":
                     return CheckResult(None, "runtime_preparation_required")
                 models = service.codex_backend.list_models(snapshot["connection_id"])
-                check_public_payload(models)
             else:
                 models = service.metadata.fetch(snapshot["provider_id"], endpoint, credential)
+            try:
+                check_public_payload(models, secrets=(credential,) if credential else ())
+            except NarumiError:
+                return CheckResult(None, "metadata_response_rejected")
             payload = {
                 "connection_id": snapshot["connection_id"],
                 "connection_revision": snapshot["revision"],
@@ -121,13 +125,20 @@ class ModelCatalog:
                 "fetched_at": timestamp(),
             }
             service.contracts.validate_output("list_provider_models", payload)
-            # Metadata is untrusted even when structurally valid. A provider echoing the
-            # credential must not turn it into cached display text or an exception value.
-            if credential and credential in json.dumps(models, ensure_ascii=False):
-                return CheckResult(None, "metadata_response_rejected")
             if len({model["model_id"] for model in models}) != len(models):
                 return CheckResult(None, "metadata_response_rejected")
-            return CheckResult(copy.deepcopy(models), None)
+            reason = (
+                "model_list_verified_generation_unchecked"
+                if snapshot["provider_id"] == "openai-api"
+                else None
+            )
+            return CheckResult(
+                copy.deepcopy(models),
+                reason,
+                runtime_catalog_revision=(
+                    runtime["catalog_revision"] if runtime["state"] == "ready" else None
+                ),
+            )
         except NarumiError as error:
             if error.code == ErrorCode.AUTHENTICATION_REQUIRED:
                 return CheckResult(None, "credential_rejected", True)
@@ -150,11 +161,8 @@ class ModelCatalog:
                 "fetched_at": checked_at,
                 "connection_revision": record["revision"],
                 "catalog_id": uuid.uuid4().hex,
+                "runtime_catalog_revision": result.runtime_catalog_revision,
             }
-            if record["provider_id"] == "codex-app-server":
-                document["catalogs"][record["connection_id"]]["runtime_catalog_revision"] = (
-                    document["runtimes"][record["provider_id"]]["catalog_revision"]
-                )
             return
         record["auth_state"] = "failed" if result.authentication_failed else "unverified"
         if result.authentication_failed:
@@ -191,6 +199,7 @@ class ModelCatalog:
         document = self.service.store.read()
         record = connection(document, args["connection_id"])
         cached = document["catalogs"].get(record["connection_id"], {})
+        catalog_state = self._catalog_state(document, record, cached)
         role = args.get("role", "llm")
         identity = [record["connection_id"], record["revision"], role, cached.get("catalog_id")]
         offset = self._cursor_offset(args.get("cursor"), identity)
@@ -201,7 +210,7 @@ class ModelCatalog:
         ]
         if offset > len(models):
             raise InvalidArgumentError("Model pagination cursor is invalid")
-        if record["catalog_state"] != "ready":
+        if catalog_state != "ready":
             for model in models:
                 if model["availability"] == "available":
                     model.update(availability="unverified", reason="model_catalog_stale")
@@ -218,9 +227,26 @@ class ModelCatalog:
             "connection_revision": record["revision"],
             "models": models[offset : offset + PAGE_SIZE],
             "next_cursor": next_cursor,
-            "catalog_state": record["catalog_state"],
+            "catalog_state": catalog_state,
             "fetched_at": cached.get("fetched_at"),
         }
+
+    def _catalog_state(
+        self, document: dict[str, Any], record: dict[str, Any], cached: dict[str, Any]
+    ) -> str:
+        """Cache-only reads must not present observations from an outdated adapter as ready."""
+        state = record["catalog_state"]
+        if state != "ready":
+            return state
+        runtime = self.service.runtime._current(record["provider_id"], document)
+        if (
+            not record["enabled"]
+            or runtime["state"] != "ready"
+            or cached.get("runtime_catalog_revision") != runtime["catalog_revision"]
+            or cached.get("connection_revision") != record["revision"]
+        ):
+            return "stale"
+        return state
 
     @staticmethod
     def _cursor_offset(cursor: str | None, identity: list[Any]) -> int:

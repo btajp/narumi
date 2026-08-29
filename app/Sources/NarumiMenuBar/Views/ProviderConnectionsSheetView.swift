@@ -14,7 +14,7 @@ struct ProviderConnectionsSheetView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("AI プロバイダの接続").font(.title3.bold())
-                Text("接続・認証・実行環境とモデル候補を確認します。Codex のモデルは会議の「設定」またはプロファイルの「議事録の生成方法」で選択して保存します。")
+                Text("接続・認証・実行環境とモデル候補を確認します。議事録のモデルは会議の「設定」またはプロファイルの「議事録の生成方法」で選択して保存します。")
                     .font(.callout).foregroundStyle(.secondary)
             }
             .padding(14)
@@ -99,7 +99,7 @@ struct ProviderConnectionsSheetView: View {
                     }
                 }
             }
-            Text("OpenAI API の接続は、この版では未対応です。Codex App Server は ChatGPT ログインで利用します。")
+            Text("Codex App Server は ChatGPT ログイン、OpenAI API は API キーで利用します。")
                 .font(.caption).foregroundStyle(.secondary)
             Button("一覧を再読み込み") { navigate(.reload) }
                 .disabled(store.isBusy)

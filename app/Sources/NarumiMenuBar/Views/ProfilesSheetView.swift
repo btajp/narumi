@@ -168,7 +168,7 @@ struct ProfilesSheetView: View {
                     }
                 }
                 .disabled(saving || loadingProfile || binding.wrappedValue.name.trimmingCharacters(in: .whitespaces).isEmpty
-                    || (binding.wrappedValue.processing.minutesModel.mode == .codex
+                    || (binding.wrappedValue.processing.minutesModel.mode == .selected
                         && (model.minutesModelCatalog.isLoading
                             || model.minutesModelCatalog.validationMessage(for: binding.wrappedValue.processing) != nil)))
                 .keyboardShortcut(.defaultAction)

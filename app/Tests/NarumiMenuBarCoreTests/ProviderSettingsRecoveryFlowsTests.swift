@@ -129,6 +129,29 @@ final class ProviderSettingsRecoveryFlowsTests: XCTestCase {
         XCTAssertNil(store.setupJobs[.anthropicAPI])
     }
 
+    func testOpenAICannotExposeACodexDeviceChallenge() async throws {
+        let url = try XCTUnwrap(ProviderAuthorizationURL(ProviderSettingsFixtures.authorizationURL()))
+        let client = FakeProviderSettingsClient(
+            connections: [ProviderSettingsFixtures.connection(providerID: .openaiAPI)],
+            providers: [ProviderSettingsFixtures.provider(providerID: .openaiAPI)],
+            scenario: .init(authLookupState: .pending, authorizationURL: url))
+        let store = ProviderSettingsStore(client: client)
+        await store.load()
+        await store.startAuthentication()
+        XCTAssertNil(store.deviceAuthorization)
+        XCTAssertNil(store.pendingAuthentication?.userCode)
+        XCTAssertNil(store.pendingAuthentication?.authorizationURL)
+        var copies: [String] = []
+        store.copyAuthorizationUserCode { code in
+            copies.append(code)
+            return true
+        }
+        XCTAssertTrue(copies.isEmpty)
+        XCTAssertFalse(store.errorMessage?.contains(ProviderSettingsFixtures.userCode) ?? true)
+        let requests = await client.authRequests
+        XCTAssertEqual(requests.count, 1)
+    }
+
     func testLostCodexLoginResponseRecoversBrowserURLWithoutStartingAgain() async throws {
         let url = try XCTUnwrap(ProviderAuthorizationURL(ProviderSettingsFixtures.authorizationURL()))
         let client = FakeProviderSettingsClient(

@@ -1,7 +1,7 @@
 {
   "name": "set_meeting_config",
   "title": "Set meeting config",
-  "description": "Update the processing configuration of a meeting (manifest.config) and optionally its scope. Only the keys you pass change; omitted keys keep their current value. `self_name`, `new_scope` and `minutes_model` accept null to clear them. minutes_model overrides text minutes generation only, replacing the whole selection object; it never changes llm_provider or applies Codex to transcript integration or vision. The connection must be enabled, authenticated with official ChatGPT login and at the selected revision. The model and reasoning_effort must appear as usable in its official runtime catalog. `scope` is the scope selector (default deny: a scoped meeting needs its current scope in the request), `new_scope` is the value to store — changing a meeting's scope therefore requires covering its current scope first, and every scope change is audit-logged with the old and new value. Engine and provider names must be registry names reported by get_server_info. The selected minutes_model / llm_provider / engines are checked against the resulting external_send_policy (local_only → only engines and providers that keep data on this machine; subscription_ok → approved subscription authentication only; api_ok → metered APIs including Claude SDK API-key use) and a conflicting combination is rejected with policy_violation instead of silently falling back. Changing the config does not regenerate anything — call regenerate afterwards (it re-runs exactly the stages whose parameters changed). `request_id` is the client-generated idempotency key. Returns the full effective config and scope. On failure returns an error_envelope (isError=true) with code: not_found (unknown meeting), scope_denied (the request does not cover the meeting's scope), busy (a job is queued / running for the meeting; its manifest cannot be changed underneath it), policy_violation, configuration_conflict (connection revision changed), authentication_required, model_unavailable, engine_unavailable (name not registered or runtime unavailable), invalid_argument, internal.",
+  "description": "Update the processing configuration of a meeting (manifest.config) and optionally its scope. Only the keys you pass change; omitted keys keep their current value. `self_name`, `new_scope` and `minutes_model` accept null to clear them. minutes_model overrides text minutes generation only, replacing the whole selection object; it never changes llm_provider or applies the selected model to transcript integration, vision or ASR. Supported minutes adapters are listed in get_server_info.capabilities.minutes_model_providers: Codex App Server, Anthropic API, local Ollama and OpenAI API. The connection must be enabled, at the selected revision, and verified for its declared authentication. The model must be available for text generation in the verified catalog; unknown models and Claude Agent SDK generation are rejected. Parameters are closed per provider and validated against the selected descriptor. max_tokens is a Narumi request limit of 1..32768, never an inferred model capability; known model limits are also enforced. If omitted on token-limited adapters, the effective request limit is min(4096, known model limit), or 4096 as an application limit when unknown. API providers require api_ok, Codex requires subscription_ok or api_ok, and numeric-loopback Ollama may use local_only only with a verified local model. `scope` is the scope selector (default deny: a scoped meeting needs its current scope in the request), `new_scope` is the value to store — changing a meeting's scope therefore requires covering its current scope first, and every scope change is audit-logged with the old and new value. Engine and provider names must be registry names reported by get_server_info. The selected minutes_model / llm_provider / engines are checked against the resulting external_send_policy (local_only → only engines and providers that keep data on this machine; subscription_ok → approved subscription authentication only; api_ok → metered APIs including Claude SDK API-key use) and a conflicting combination is rejected with policy_violation instead of silently falling back. Changing the config does not regenerate anything — call regenerate afterwards (it re-runs exactly the stages whose parameters changed). `request_id` is the client-generated idempotency key. Returns the full effective config and scope. On failure returns an error_envelope (isError=true) with code: not_found (unknown meeting), scope_denied (the request does not cover the meeting's scope), busy (a job is queued / running for the meeting; its manifest cannot be changed underneath it), policy_violation, configuration_conflict (connection revision changed), authentication_required, model_unavailable, engine_unavailable (name not registered or runtime unavailable), invalid_argument, internal.",
   "annotations": {
     "readOnlyHint": false,
     "destructiveHint": false,
@@ -118,6 +118,52 @@
         "meeting_id": "20260827T030500Z-a1b2c3d4",
         "request_id": "minutes-codex-request-20260829-002",
         "minutes_model": null
+      },
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "request_id": "minutes-openai-api-request-20260829-001",
+        "external_send_policy": "api_ok",
+        "minutes_model": {
+          "provider": "openai-api",
+          "connection_id": "conn-111122223333",
+          "connection_revision": 1,
+          "model_id": "fixture-openai-api-text-model",
+          "parameters": {
+            "reasoning_effort": "low",
+            "max_tokens": 4096
+          },
+          "cache_epoch": 0
+        }
+      },
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "request_id": "minutes-anthropic-api-request-20260829-001",
+        "external_send_policy": "api_ok",
+        "minutes_model": {
+          "provider": "anthropic-api",
+          "connection_id": "conn-111122223333",
+          "connection_revision": 1,
+          "model_id": "fixture-anthropic-api-text-model",
+          "parameters": {
+            "max_tokens": 2048
+          },
+          "cache_epoch": 0
+        }
+      },
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "request_id": "minutes-ollama-request-20260829-001",
+        "external_send_policy": "local_only",
+        "minutes_model": {
+          "provider": "ollama",
+          "connection_id": "conn-111122223333",
+          "connection_revision": 1,
+          "model_id": "fixture-ollama-text-model",
+          "parameters": {
+            "max_tokens": 4096
+          },
+          "cache_epoch": 0
+        }
       }
     ],
     "output": [
@@ -150,6 +196,61 @@
             "model_id": "fixture-text-model",
             "parameters": {
               "reasoning_effort": "high"
+            },
+            "cache_epoch": 0
+          }
+        },
+        "scope": null
+      },
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "config": {
+          "llm_provider": "none",
+          "external_send_policy": "api_ok",
+          "minutes_model": {
+            "provider": "openai-api",
+            "connection_id": "conn-111122223333",
+            "connection_revision": 1,
+            "model_id": "fixture-openai-api-text-model",
+            "parameters": {
+              "reasoning_effort": "low",
+              "max_tokens": 4096
+            },
+            "cache_epoch": 0
+          }
+        },
+        "scope": null
+      },
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "config": {
+          "llm_provider": "none",
+          "external_send_policy": "api_ok",
+          "minutes_model": {
+            "provider": "anthropic-api",
+            "connection_id": "conn-111122223333",
+            "connection_revision": 1,
+            "model_id": "fixture-anthropic-api-text-model",
+            "parameters": {
+              "max_tokens": 2048
+            },
+            "cache_epoch": 0
+          }
+        },
+        "scope": null
+      },
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "config": {
+          "llm_provider": "none",
+          "external_send_policy": "local_only",
+          "minutes_model": {
+            "provider": "ollama",
+            "connection_id": "conn-111122223333",
+            "connection_revision": 1,
+            "model_id": "fixture-ollama-text-model",
+            "parameters": {
+              "max_tokens": 4096
             },
             "cache_epoch": 0
           }

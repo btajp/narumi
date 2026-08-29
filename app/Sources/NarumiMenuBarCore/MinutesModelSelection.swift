@@ -1,7 +1,8 @@
 import Foundation
 
 /// A pinned, text-only minutes override. Other stages continue to use their existing config.
-public struct CodexMinutesSelection: Codable, Equatable, Sendable {
+public struct MinutesModelSelection: Codable, Equatable, Sendable {
+    public static let providers = ["codex-app-server", "openai-api", "anthropic-api", "ollama"]
     public let provider: String
     public var connectionID: String
     public var connectionRevision: Int
@@ -11,20 +12,29 @@ public struct CodexMinutesSelection: Codable, Equatable, Sendable {
 
     public struct Parameters: Codable, Equatable, Sendable {
         public var reasoningEffort: String?
+        public var maxTokens: Int?
 
-        enum CodingKeys: String, CodingKey { case reasoningEffort = "reasoning_effort" }
+        enum CodingKeys: String, CodingKey {
+            case reasoningEffort = "reasoning_effort"
+            case maxTokens = "max_tokens"
+        }
 
-        public init(reasoningEffort: String? = nil) { self.reasoningEffort = reasoningEffort }
+        public init(reasoningEffort: String? = nil, maxTokens: Int? = nil) {
+            self.reasoningEffort = reasoningEffort
+            self.maxTokens = maxTokens
+        }
 
         public init(from decoder: Decoder) throws {
             let names = try decoder.container(keyedBy: SelectionKey.self)
-            guard names.allKeys.allSatisfy({ $0.stringValue == "reasoning_effort" }) else {
+            guard names.allKeys.allSatisfy({ ["reasoning_effort", "max_tokens"].contains($0.stringValue) }) else {
                 throw DecodingError.dataCorrupted(.init(
                     codingPath: decoder.codingPath, debugDescription: "Unsupported minutes model parameter"))
             }
             let container = try decoder.container(keyedBy: CodingKeys.self)
             reasoningEffort = container.contains(.reasoningEffort)
                 ? try container.decode(String.self, forKey: .reasoningEffort) : nil
+            maxTokens = container.contains(.maxTokens)
+                ? try container.decode(Int.self, forKey: .maxTokens) : nil
         }
     }
 
@@ -38,14 +48,15 @@ public struct CodexMinutesSelection: Codable, Equatable, Sendable {
     }
 
     public init(
+        provider: String = "codex-app-server",
         connectionID: String, connectionRevision: Int, modelID: String,
-        reasoningEffort: String? = nil, cacheEpoch: Int = 0
+        reasoningEffort: String? = nil, maxTokens: Int? = nil, cacheEpoch: Int = 0
     ) {
-        provider = "codex-app-server"
+        self.provider = provider
         self.connectionID = connectionID
         self.connectionRevision = connectionRevision
         self.modelID = modelID
-        parameters = Parameters(reasoningEffort: reasoningEffort)
+        parameters = Parameters(reasoningEffort: reasoningEffort, maxTokens: maxTokens)
         self.cacheEpoch = cacheEpoch
     }
 
@@ -85,12 +96,15 @@ public struct CodexMinutesSelection: Codable, Equatable, Sendable {
     }
 
     public var isWellFormed: Bool {
-        provider == "codex-app-server" && connectionRevision > 0 && cacheEpoch >= 0
+        Self.providers.contains(provider) && connectionRevision > 0 && cacheEpoch >= 0
             && connectionID.range(of: #"\Aconn-[a-f0-9]{12,32}\z"#, options: .regularExpression) != nil
             && !modelID.isEmpty && modelID.count <= 256
             && (parameters.reasoningEffort.map {
                 $0.range(of: #"\A[a-z][a-z0-9_-]{0,31}\z"#, options: .regularExpression) != nil
             } ?? true)
+            && (parameters.maxTokens.map { (1...32768).contains($0) } ?? true)
+            && (provider != "codex-app-server" || parameters.maxTokens == nil)
+            && (["codex-app-server", "openai-api"].contains(provider) || parameters.reasoningEffort == nil)
     }
 }
 

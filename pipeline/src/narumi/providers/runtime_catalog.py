@@ -15,6 +15,7 @@ from narumi.providers._common import timestamp
 from narumi.providers._io import _open_directory, _open_regular
 
 RESOURCES = {
+    "openai-api": ("openai-client", "narumi", "narumi OpenAI HTTP adapter inspection"),
     "anthropic-api": ("anthropic-client", "narumi", "narumi Anthropic HTTP adapter inspection"),
     "claude-agent-sdk": ("claude-sdk", "claude-agent-sdk", "Claude installed SDK inspection"),
     "ollama": ("local-ollama", "narumi", "narumi local Ollama HTTP adapter inspection"),
@@ -72,6 +73,8 @@ class RuntimeInspector:
             raise EngineUnavailableError("Provider runtime changed during preparation")
         if current["version"] is None:
             raise EngineUnavailableError("Provider runtime dependency is not installed")
+        if provider_id in ("openai-api", "anthropic-api", "ollama") and current["sha256"] is None:
+            raise EngineUnavailableError("Provider runtime distribution metadata is incomplete")
         directory = _open_directory(
             root / "providers" / "runtime" / provider_id,
             trusted_root=root,

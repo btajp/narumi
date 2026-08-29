@@ -17,6 +17,10 @@ struct ProviderRuntimeSection: View {
                 LabeledContent("準備状況", value: ProviderDisplay.runtime(provider.runtime.state))
                 LabeledContent("実行環境の版", value: provider.runtime.version ?? "未確認")
                 LabeledContent("アダプタの対応", value: ProviderDisplay.availability(provider.availability))
+                if provider.providerID == .openaiAPI {
+                    Text("narumi 内蔵の HTTP アダプタを確認します。追加の SDK・CLI の導入は不要です。準備だけでは認証や議事録生成の成功を確認したことにはなりません。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if let reason = ProviderDisplay.reason(provider.reason) {
                     Text(reason).font(.caption).foregroundStyle(.secondary)
                 }

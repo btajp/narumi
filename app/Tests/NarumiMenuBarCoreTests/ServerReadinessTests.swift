@@ -37,6 +37,25 @@ final class ServerReadinessTests: XCTestCase {
         XCTAssertNoThrow(try identity.validate(response()))
     }
 
+    func testSupportedContractsStillRequireExactBundledVersion() throws {
+        let supportedVersions = ["2.0.0", "3.0.0", "4.0.0", "4.0.1"]
+        for expectedVersion in supportedVersions {
+            var expected = identity
+            expected.contractVersion = expectedVersion
+            for actualVersion in supportedVersions {
+                var info = try response()
+                info.contractVersion = actualVersion
+                if actualVersion == expectedVersion {
+                    XCTAssertNoThrow(try expected.validate(info), actualVersion)
+                } else {
+                    XCTAssertThrowsError(try expected.validate(info), "\(expectedVersion) vs \(actualVersion)") { error in
+                        XCTAssertEqual((error as? BundledServerIdentity.Mismatch)?.field, "contract_version")
+                    }
+                }
+            }
+        }
+    }
+
     func testMismatchedVersionOrDiagnosticsAreRejected() throws {
         let mutations: [(String, (inout ServerInfo) -> Void)] = [
             ("name", { $0.name = "other" }),
@@ -58,7 +77,7 @@ final class ServerReadinessTests: XCTestCase {
     }
 
     func testUnsupportedContractCannotBeAdoptedEvenWhenBundleVersionMatches() throws {
-        for version in ["1.0.0", "1.1.0", "2.0.0-rc.1", "3.0.0-rc.1", "4.0.0", "malformed"] {
+        for version in ["1.0.0", "1.1.0", "2.0.0-rc.1", "3.0.0-rc.1", "4.0.0-rc.1", "5.0.0", "malformed"] {
             var info = try response()
             info.contractVersion = version
             var expected = identity
@@ -112,7 +131,7 @@ final class ServerReadinessTests: XCTestCase {
         try FileManager.default.createDirectory(at: runtime.contractsDir, withIntermediateDirectories: true)
         try Data("fake recorder".utf8).write(to: recorder)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: recorder.path)
-        try Data("{\"contract_version\":\"3.2.1\"}".utf8)
+        try Data("{\"contract_version\":\"4.2.1\"}".utf8)
             .write(to: runtime.contractsDir.appendingPathComponent("manifest.json"))
         let config = ServerConfig.resolve(
             environment: ["NARUMI_HOME": root.appendingPathComponent("data").path],
@@ -121,7 +140,7 @@ final class ServerReadinessTests: XCTestCase {
             appVersion: "2.0.0", python: "3.13", uvVersion: "0.12.6", wheels: [:], requirementsSHA256: "abc")
         let expected = try BundledServerIdentity.load(config: config, manifest: manifest)
         XCTAssertEqual(expected.serverVersion, "2.0.0")
-        XCTAssertEqual(expected.contractVersion, "3.2.1")
+        XCTAssertEqual(expected.contractVersion, "4.2.1")
         XCTAssertEqual(expected.recorder.path, recorder.path)
         XCTAssertEqual(expected.contractsDirectory.path, runtime.contractsDir.path)
         XCTAssertEqual(expected.dataRoot.path, root.appendingPathComponent("data").path)

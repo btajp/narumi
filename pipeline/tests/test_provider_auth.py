@@ -52,9 +52,10 @@ def start_args(record, *, request_id="authentication-start"):
     }
 
 
-def test_auth_start_is_durable_before_work_and_replays_one_acceptance(auth_setup):
+@pytest.mark.parametrize("provider_id", ["anthropic-api", "openai-api"])
+def test_auth_start_is_durable_before_work_and_replays_one_acceptance(auth_setup, provider_id):
     service, _, metadata, executor = auth_setup
-    record = create_connection(service)
+    record = create_connection(service, provider_id=provider_id)
     args = start_args(record)
     accepted = service.authenticate(args)
     assert accepted["operation"]["state"] == "pending"
@@ -129,9 +130,10 @@ def test_restart_pending_auth_is_unknown_and_never_automatically_reissued(auth_s
     restarted.close()
 
 
-def test_auth_cancel_is_idempotent_and_cannot_be_overwritten(auth_setup):
+@pytest.mark.parametrize("provider_id", ["anthropic-api", "openai-api"])
+def test_auth_cancel_is_idempotent_and_cannot_be_overwritten(auth_setup, provider_id):
     service, _, metadata, executor = auth_setup
-    record = create_connection(service)
+    record = create_connection(service, provider_id=provider_id)
     operation = service.authenticate(start_args(record))["operation"]
     args = {
         "connection_id": record["connection_id"],

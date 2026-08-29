@@ -156,7 +156,7 @@ public struct MeetingConfig: Codable, Equatable, Sendable {
     public var transcriptionEngine: String?
     public var diarizationEngine: String?
     public var llmProvider: String?
-    public var minutesModel: CodexMinutesSelection?
+    public var minutesModel: MinutesModelSelection?
     public var externalSendPolicy: String?
     public var language: String?
     public var selfName: String?
@@ -177,7 +177,7 @@ public struct MeetingConfig: Codable, Equatable, Sendable {
         transcriptionEngine: String? = nil, diarizationEngine: String? = nil,
         llmProvider: String? = nil, externalSendPolicy: String? = nil, language: String? = nil,
         selfName: String? = nil, vocabHints: [String]? = nil,
-        minutesModel: CodexMinutesSelection? = nil
+        minutesModel: MinutesModelSelection? = nil
     ) {
         self.transcriptionEngine = transcriptionEngine
         self.diarizationEngine = diarizationEngine
@@ -372,6 +372,39 @@ public struct Transcript: Codable, Equatable, Sendable {
 public struct ToolErrorInfo: Codable, Equatable, Sendable {
     public var code: String
     public var message: String
+
+    enum CodingKeys: String, CodingKey { case code, message }
+    private enum DetailKeys: String, CodingKey { case details }
+    private struct OutcomeDetails: Decodable {
+        let reason: String?
+        let outcomeUnknown: Bool?
+        enum CodingKeys: String, CodingKey {
+            case reason
+            case outcomeUnknown = "outcome_unknown"
+        }
+    }
+
+    public init(code: String, message: String) {
+        self.code = code
+        self.message = message
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        code = try container.decode(String.self, forKey: .code)
+        let original = try container.decode(String.self, forKey: .message)
+        let extra = try decoder.container(keyedBy: DetailKeys.self)
+        let details = try? extra.decode(OutcomeDetails.self, forKey: .details)
+        message = Self.generationOutcomeMessage(reason: details?.reason, unknown: details?.outcomeUnknown == true) ?? original
+    }
+
+    /// Only known generation facts are localized; arbitrary error details are not retained.
+    public static func generationOutcomeMessage(reason: String?, unknown: Bool) -> String? {
+        guard unknown || ["provider_generation_outcome_unknown", "codex_generation_outcome_unknown"].contains(reason ?? "") else {
+            return nil
+        }
+        return "議事録生成の結果が不明なため、自動再送しません。新しい試行では外部プロバイダの課金・利用枠を重複して消費する可能性があります。会議設定で試行番号を増やす前に確認してください。"
+    }
 }
 
 /// Known keys of a succeeded job's `result` (free-form object in the contract).
@@ -606,6 +639,7 @@ public struct ServerCapabilities: Codable, Equatable, Sendable {
     public var transcriptionEngines: [String]
     public var diarizationEngines: [String]
     public var llmProviders: [String]
+    public var minutesModelProviders: [String]?
     public var exportDestinations: [String]
     public var permissionSetupInProgress: Bool
     public var workflow: ProviderWorkflowCapabilities?
@@ -617,6 +651,7 @@ public struct ServerCapabilities: Codable, Equatable, Sendable {
         case transcriptionEngines = "transcription_engines"
         case diarizationEngines = "diarization_engines"
         case llmProviders = "llm_providers"
+        case minutesModelProviders = "minutes_model_providers"
         case exportDestinations = "export_destinations"
         case permissionSetupInProgress = "permission_setup_in_progress"
         case workflow
@@ -626,7 +661,7 @@ public struct ServerCapabilities: Codable, Equatable, Sendable {
         recording: Bool, permissions: RecorderPermissions? = nil, transports: [String],
         transcriptionEngines: [String], diarizationEngines: [String], llmProviders: [String],
         exportDestinations: [String], permissionSetupInProgress: Bool = false,
-        workflow: ProviderWorkflowCapabilities? = nil
+        workflow: ProviderWorkflowCapabilities? = nil, minutesModelProviders: [String]? = nil
     ) {
         self.recording = recording
         self.permissions = permissions
@@ -634,6 +669,7 @@ public struct ServerCapabilities: Codable, Equatable, Sendable {
         self.transcriptionEngines = transcriptionEngines
         self.diarizationEngines = diarizationEngines
         self.llmProviders = llmProviders
+        self.minutesModelProviders = minutesModelProviders
         self.exportDestinations = exportDestinations
         self.permissionSetupInProgress = permissionSetupInProgress
         self.workflow = workflow
@@ -647,6 +683,8 @@ public struct ServerCapabilities: Codable, Equatable, Sendable {
         transcriptionEngines = try container.decode([String].self, forKey: .transcriptionEngines)
         diarizationEngines = try container.decode([String].self, forKey: .diarizationEngines)
         llmProviders = try container.decode([String].self, forKey: .llmProviders)
+        minutesModelProviders = container.contains(.minutesModelProviders)
+            ? try container.decode([String].self, forKey: .minutesModelProviders) : nil
         exportDestinations = try container.decode([String].self, forKey: .exportDestinations)
         workflow = try container.decodeIfPresent(ProviderWorkflowCapabilities.self, forKey: .workflow)
         if container.contains(.permissionSetupInProgress) {

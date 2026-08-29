@@ -22,7 +22,10 @@ struct ToolFailure: Error, Equatable, CustomStringConvertible {
         case .tool(let message, let payload):
             if let inner = payload?["error"], let code = inner["code"]?.stringValue {
                 self.code = code
-                self.message = inner["message"]?.stringValue ?? message
+                self.message = ToolErrorInfo.generationOutcomeMessage(
+                    reason: inner["details"]?["reason"]?.stringValue,
+                    unknown: inner["details"]?["outcome_unknown"]?.boolValue == true)
+                    ?? inner["message"]?.stringValue ?? message
             } else {
                 self.code = "error"
                 self.message = message
@@ -181,7 +184,7 @@ struct NarumiClient: Sendable {
         meetingID: String, scope: String?, force: Bool, reason: String?, expectedConfig: MeetingConfig? = nil
     ) async throws -> RegenerateResponse {
         guard !force || expectedConfig?.minutesModel == nil else {
-            throw ToolFailure(code: "invalid_argument", message: "Codex の新しい試行は会議設定で試行番号を増やして保存してください。")
+            throw ToolFailure(code: "invalid_argument", message: "指定した議事録モデルの新しい試行は、会議設定で試行番号を増やして保存してください。")
         }
         var args: [String: JSONNode] = [
             "meeting_id": .string(meetingID),
@@ -197,7 +200,7 @@ struct NarumiClient: Sendable {
             args["reason"] = .string(reason)
         }
         // Contract 2 servers have no expected_config. A contract 3 server rejects a concurrent
-        // legacy -> Codex switch because its saved Codex config requires this confirmation.
+        // legacy -> explicit model switch because the saved model config requires this confirmation.
         if let expectedConfig, expectedConfig.minutesModel != nil {
             args["expected_config"] = .object(try Self.arguments(expectedConfig))
         }

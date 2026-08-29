@@ -1,7 +1,7 @@
 {
   "name": "set_profile",
   "title": "Set profile",
-  "description": "Create or update a saved meeting profile (source of truth: <NARUMI_HOME>/profiles.json). Only the keys you pass change; omitted keys keep their current value (a new profile starts with an empty config, no scope / engagement and no export destinations). `scope` here is the default value stored in the profile — not a scope selector — and, like `engagement`, accepts null to clear it. `config` keys are merged into the stored config (a key set to its null-clearing value where the type allows, e.g. self_name=null or minutes_model=null, clears it). minutes_model, when present, is a whole-object text minutes override validated against the enabled connection, pinned revision, official model catalog, authentication and resulting policy. Omitted minutes_model retains the saved value; old profiles without it retain legacy llm_provider behavior. It does not select models for other stages. `export_destinations` replaces the stored list (registry names from list_export_destinations); they run automatically when a meeting using this profile finishes processing. make_default=true makes this the profile applied when start_recording / import_recording omit `profile` (exactly one profile is default at a time). Returns the full stored profile. `request_id` is the client-generated idempotency key: repeating the call returns the original result. On failure returns an error_envelope (isError=true) with code: invalid_argument (bad name or config, unknown export destination), policy_violation (the stored config would select engines / providers not allowed by its external_send_policy — validated at save time, nothing is silently downgraded), engine_unavailable (config names an engine / provider not registered or its runtime is unavailable), configuration_conflict, authentication_required, model_unavailable, internal.",
+  "description": "Create or update a saved meeting profile (source of truth: <NARUMI_HOME>/profiles.json). Only the keys you pass change; omitted keys keep their current value (a new profile starts with an empty config, no scope / engagement and no export destinations). `scope` here is the default value stored in the profile — not a scope selector — and, like `engagement`, accepts null to clear it. `config` keys are merged into the stored config (a key set to its null-clearing value where the type allows, e.g. self_name=null or minutes_model=null, clears it). minutes_model, when present, is a whole-object text minutes override validated against the enabled connection, pinned revision, verified model catalog, authentication and resulting policy. Codex requires subscription_ok or api_ok; Anthropic/OpenAI API require api_ok; numeric-loopback Ollama with verified local models may use local_only. Supported text adapters are listed in capabilities.minutes_model_providers; unknown models and Claude Agent SDK generation are not selectable. Parameters are closed per provider, max_tokens is restricted to 1..32768 and a known model output limit is also enforced. When omitted, token-limited adapters use min(4096, known model limit), or an application limit of 4096 when unknown, without populating unknown model capabilities. Omitted minutes_model retains the saved value; old profiles without it retain legacy llm_provider behavior. It does not select models for other stages. `export_destinations` replaces the stored list (registry names from list_export_destinations); they run automatically when a meeting using this profile finishes processing. make_default=true makes this the profile applied when start_recording / import_recording omit `profile` (exactly one profile is default at a time). Returns the full stored profile. `request_id` is the client-generated idempotency key: repeating the call returns the original result. On failure returns an error_envelope (isError=true) with code: invalid_argument (bad name or config, unknown export destination), policy_violation (the stored config would select engines / providers not allowed by its external_send_policy — validated at save time, nothing is silently downgraded), engine_unavailable (config names an engine / provider not registered or its runtime is unavailable), configuration_conflict, authentication_required, model_unavailable, internal.",
   "annotations": {
     "readOnlyHint": false,
     "destructiveHint": false,
@@ -98,6 +98,24 @@
           }
         },
         "request_id": "profile-codex-request-20260829-001"
+      },
+      {
+        "name": "openai-minutes",
+        "config": {
+          "llm_provider": "none",
+          "external_send_policy": "api_ok",
+          "minutes_model": {
+            "provider": "openai-api",
+            "connection_id": "conn-111122223333",
+            "connection_revision": 1,
+            "model_id": "fixture-openai-api-text-model",
+            "parameters": {
+              "max_tokens": 4096
+            },
+            "cache_epoch": 0
+          }
+        },
+        "request_id": "profile-openai-request-20260829-001"
       }
     ],
     "output": [

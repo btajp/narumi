@@ -199,6 +199,7 @@ public struct ProviderModelDescriptor: Decodable, Equatable, Sendable {
     public let maxOutputTokens: Int?
     public let parameterSchema: ProviderParameterSchema
     public let availability: ProviderAvailability
+    public let availabilityExpiresOn: String?
     public let reason: String?
     public let source: ProviderModelSource
     public let fetchedAt: String?
@@ -216,6 +217,7 @@ public struct ProviderModelDescriptor: Decodable, Equatable, Sendable {
         case maxOutputTokens = "max_output_tokens"
         case parameterSchema = "parameter_schema"
         case availability, reason, source
+        case availabilityExpiresOn = "availability_expires_on"
         case fetchedAt = "fetched_at"
         case billing
     }
@@ -226,7 +228,7 @@ public struct ProviderModelDescriptor: Decodable, Equatable, Sendable {
         roles: [ProviderRole], timestampSupport: ProviderTimestampSupport, contextWindow: Int?,
         maxOutputTokens: Int?, parameterSchema: ProviderParameterSchema,
         availability: ProviderAvailability, reason: String?, source: ProviderModelSource,
-        fetchedAt: String?, billing: ProviderModelBilling
+        fetchedAt: String?, billing: ProviderModelBilling, availabilityExpiresOn: String? = nil
     ) {
         self.modelID = modelID
         self.displayName = displayName
@@ -239,6 +241,7 @@ public struct ProviderModelDescriptor: Decodable, Equatable, Sendable {
         self.maxOutputTokens = maxOutputTokens
         self.parameterSchema = parameterSchema
         self.availability = availability
+        self.availabilityExpiresOn = availabilityExpiresOn
         self.reason = reason
         self.source = source
         self.fetchedAt = fetchedAt
@@ -258,17 +261,44 @@ public struct ProviderModelDescriptor: Decodable, Equatable, Sendable {
         maxOutputTokens = try container.decode(Int?.self, forKey: .maxOutputTokens)
         parameterSchema = try container.decode(ProviderParameterSchema.self, forKey: .parameterSchema)
         availability = try container.decode(ProviderAvailability.self, forKey: .availability)
+        availabilityExpiresOn = try container.decodeIfPresent(String.self, forKey: .availabilityExpiresOn)
         reason = try container.decode(String?.self, forKey: .reason)
         source = try container.decode(ProviderModelSource.self, forKey: .source)
         fetchedAt = try container.decode(String?.self, forKey: .fetchedAt)
         billing = try container.decode(ProviderModelBilling.self, forKey: .billing)
         guard contextWindow.map({ $0 > 0 }) ?? true, maxOutputTokens.map({ $0 > 0 }) ?? true,
             Set(inputModalities).count == inputModalities.count,
-            Set(outputModalities).count == outputModalities.count, Set(roles).count == roles.count
+            Set(outputModalities).count == outputModalities.count, Set(roles).count == roles.count,
+            availabilityExpiresOn.map({ Self.expirationDate($0) != nil }) ?? true
         else {
             throw DecodingError.dataCorruptedError(
                 forKey: .contextWindow, in: container,
                 debugDescription: "Model limits and modalities must match the contract")
         }
+    }
+
+    public var availabilityExpired: Bool { isAvailabilityExpired(at: Date()) }
+
+    /// The provider publishes a date, not a precise shutdown instant.
+    /// Conservatively stop selecting it when that date begins in UTC.
+    public func isAvailabilityExpired(at now: Date) -> Bool {
+        guard let availabilityExpiresOn else { return false }
+        guard let date = Self.expirationDate(availabilityExpiresOn) else { return true }
+        return now >= date
+    }
+
+    private static func expirationDate(_ value: String) -> Date? {
+        guard value.range(of: #"\A[0-9]{4}-[0-9]{2}-[0-9]{2}\z"#, options: .regularExpression) != nil else {
+            return nil
+        }
+        let parts = value.split(separator: "-").compactMap { Int($0) }
+        guard parts.count == 3, parts[0] >= 1 else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let expected = DateComponents(year: parts[0], month: parts[1], day: parts[2])
+        guard let date = calendar.date(from: expected) else { return nil }
+        let actual = calendar.dateComponents([.year, .month, .day], from: date)
+        guard actual.year == expected.year, actual.month == expected.month, actual.day == expected.day else { return nil }
+        return date
     }
 }

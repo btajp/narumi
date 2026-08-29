@@ -371,7 +371,7 @@ def run_generate(
     config = bundle.manifest.config
     if config.minutes_model is not None and force:
         raise InvalidArgumentError(
-            "Codex minutes cannot use force; start a new cache epoch instead"
+            "Connected minutes cannot use force; start a new cache epoch instead"
         )
     check_cancelled(should_cancel)
     selected_provider = None

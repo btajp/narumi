@@ -71,7 +71,8 @@ public final class ProviderSettingsStore {
     }
     public var canTest: Bool {
         canUseSavedConnection && pendingAuthentication?.unresolved != true
-            && (selectedConnection?.providerID != .codexAppServer || selectedProvider?.runtime.state == .ready)
+            && (![ProviderID.codexAppServer, .openaiAPI].contains(editor.providerID)
+                || selectedProvider?.runtime.state == .ready)
             && (selectedConnection?.authMethod == ProviderAuthMethod.none || selectedConnection?.credentialPresent == true)
     }
     public var canAuthenticate: Bool {
@@ -216,9 +217,7 @@ public final class ProviderSettingsStore {
             upsert(result.connection)
             editor.adopt(result.connection)
             lastTest = result
-            notice = result.connected
-                ? "接続とメタデータを確認しました。議事録生成は未検証です。"
-                : "接続を確認できませんでした。認証・実行環境の状態を確認してください。"
+            notice = ProviderDisplay.connectionTestResult(result)
             finish(token)
         } catch { fail(error, token: token) }
     }

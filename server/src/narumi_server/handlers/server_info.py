@@ -11,6 +11,7 @@ from narumi.errors import NarumiError
 from narumi.export import list_exporters
 from narumi.llm import available_providers
 from narumi.preprocess import ffmpeg_path, ffprobe_path, tool_version
+from narumi.providers.generation import MINUTES_MODEL_PROVIDERS
 from narumi.transcribe import AUTO
 from narumi.transcribe import available_engines as transcription_engines
 
@@ -57,6 +58,9 @@ def get_server_info(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
             "ensemble_generation": False,
         },
         **capability_names(),
+        "minutes_model_providers": (
+            list(MINUTES_MODEL_PROVIDERS) if "streamable-http" in ctx.transports else []
+        ),
     }
     if permissions is not None:
         capabilities["permissions"] = permissions

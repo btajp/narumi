@@ -13,7 +13,9 @@ extension MainWindowModel {
         }
         guard await validateMinutesSelection(form.processing, title: "会議設定を保存できません") else { return false }
         do {
-            var updates = try NarumiClient.arguments(form.processing.makeUpdate(supportsMinutesModel: supportsMinutesModels))
+            var updates = try NarumiClient.arguments(form.processing.makeUpdate(
+                supportsMinutesModel: supportsMinutesModels,
+                supportedProviders: minutesModelCatalog.supportedProviders))
             let newScope = form.scopeText.trimmingCharacters(in: .whitespaces)
             if newScope != (detail.meeting.scope ?? "") {
                 updates["new_scope"] = newScope.isEmpty ? .null : .string(newScope)
@@ -50,7 +52,9 @@ extension MainWindowModel {
         }
         guard await validateMinutesSelection(form.processing, title: "プロファイルを保存できません") else { return false }
         do {
-            let config = try NarumiClient.arguments(form.processing.makeUpdate(supportsMinutesModel: supportsMinutesModels))
+            let config = try NarumiClient.arguments(form.processing.makeUpdate(
+                supportsMinutesModel: supportsMinutesModels,
+                supportedProviders: minutesModelCatalog.supportedProviders))
             var updates: [String: JSONNode] = ["config": .object(config)]
             let scope = form.scope.trimmingCharacters(in: .whitespaces)
             updates["scope"] = scope.isEmpty ? .null : .string(scope)
@@ -77,7 +81,7 @@ extension MainWindowModel {
     }
 
     private func validateMinutesSelection(_ form: ProcessingConfigurationForm, title: String) async -> Bool {
-        guard form.minutesModel.mode == .codex else { return true }
+        guard form.minutesModel.mode == .selected else { return true }
         await minutesModelCatalog.loadCachedCatalog(
             connectionID: form.minutesModel.connectionID, selectedModelID: form.minutesModel.modelID)
         guard !Task.isCancelled else { return false }
@@ -90,6 +94,7 @@ extension MainWindowModel {
 
     private var supportsMinutesModels: Bool {
         // Legacy operations remain available against an authenticated contract 2 server.
-        serverInfo?.contractVersion.split(separator: ".").first != "2"
+        guard let version = serverInfo?.contractVersion else { return false }
+        return ["3", "4"].contains(String(version.split(separator: ".").first ?? ""))
     }
 }

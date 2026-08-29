@@ -10,6 +10,8 @@ from narumi.errors import EngineUnavailableError
 
 MODEL_ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,255}\Z")
 _CREDENTIAL = re.compile(r"(?:sk-(?:ant-|proj-|svcacct-)[A-Za-z0-9_-]+|Bearer\s+\S+)")
+APP_MAX_OUTPUT_TOKENS = 32_768
+DEFAULT_OUTPUT_TOKENS = 4096
 
 
 def invalid_metadata(reason: str = "invalid_metadata") -> EngineUnavailableError:
@@ -72,11 +74,17 @@ def check_public_payload(
 
 
 def parameter_schema(max_tokens: int | None, *, enabled: bool = True) -> dict[str, Any]:
+    """Advertise a bounded request option without inventing a model capability."""
     properties: dict[str, Any] = {}
     if enabled:
-        properties["max_tokens"] = {"type": "integer", "minimum": 1}
-        if max_tokens is not None:
-            properties["max_tokens"]["maximum"] = max_tokens
+        known_limit = optional_positive_integer(max_tokens)
+        maximum = min(APP_MAX_OUTPUT_TOKENS, known_limit or APP_MAX_OUTPUT_TOKENS)
+        properties["max_tokens"] = {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": maximum,
+            "default": min(DEFAULT_OUTPUT_TOKENS, maximum),
+        }
     return {
         "type": "object",
         "properties": properties,

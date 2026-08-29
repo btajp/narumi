@@ -110,6 +110,7 @@ class FakeRuntimeInspector(RuntimeInspector):
                 "anthropic-api": "anthropic-client",
                 "ollama": "local-ollama",
                 "claude-agent-sdk": "claude-sdk",
+                "openai-api": "openai-client",
             }[provider_id],
             "display_name": "Installed runtime fixture",
             "kind": "runtime",
@@ -229,6 +230,53 @@ class FakeCodexBackend:
         self.calls.append(("close",))
 
 
+class FakeHTTPBackend:
+    """Record explicit generation arguments without HTTP, ambient keys or worker threads."""
+
+    def __init__(self):
+        self.calls = []
+        self.response = "fixture completion"
+        self.returned_model = None
+        self.usage = None
+        self.complete_error = None
+
+    def complete(
+        self,
+        provider_id,
+        endpoint,
+        api_key,
+        model,
+        parameters,
+        prompt,
+        *,
+        system=None,
+        should_cancel=None,
+    ):
+        from narumi.providers.http_generation import HTTPCompletionResult
+
+        self.calls.append(
+            (
+                "complete",
+                provider_id,
+                endpoint,
+                api_key,
+                copy.deepcopy(model),
+                copy.deepcopy(parameters),
+                prompt,
+                system,
+            )
+        )
+        if should_cancel is not None and should_cancel():
+            raise CancelledError("fixture generation cancelled")
+        if self.complete_error is not None:
+            raise self.complete_error
+        return HTTPCompletionResult(
+            self.response,
+            self.returned_model if self.returned_model is not None else model["model_id"],
+            copy.deepcopy(self.usage),
+        )
+
+
 def create_connection(
     service, *, provider_id="anthropic-api", key="fixture-key", request_id="create"
 ):
@@ -270,3 +318,49 @@ def prepared_codex_connection(service, *, models=None, request_id="prepared-code
         record = copy.deepcopy(saved)
     backend.authenticated.add(record["connection_id"])
     return record
+
+
+def prepared_http_connection(
+    service, provider_id="openai-api", *, models=None, request_id="prepared-http", key="fixture-key"
+):
+    """Verify fake HTTP metadata after seeding a prepared, connection-independent adapter."""
+    record = create_connection(service, provider_id=provider_id, request_id=request_id, key=key)
+    if models is None:
+        model = copy.deepcopy(
+            load_contracts()["list_provider_models"].output_examples[0]["models"][0]
+        )
+        model.update(
+            model_id={
+                "openai-api": "gpt-4.1",
+                "ollama": "fixture-local-model:latest",
+            }.get(provider_id, "fixture-model"),
+            availability="available",
+            reason=None,
+            source="runtime" if provider_id == "ollama" else "provider_api",
+            resolved_revision="sha256:" + "b" * 64 if provider_id == "ollama" else None,
+            parameter_schema={
+                "type": "object",
+                "properties": {
+                    "max_tokens": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 32768,
+                        "default": 4096,
+                    }
+                },
+                "required": [],
+                "additionalProperties": False,
+            },
+        )
+        model["billing"]["kind"] = "local" if provider_id == "ollama" else "api"
+        models = [model]
+    service.metadata.models = copy.deepcopy(models)
+    with service.store.transaction() as document:
+        runtime = service.runtime._current(provider_id, document)
+        runtime["state"] = "ready"
+        document["runtimes"][provider_id] = runtime
+    result = service.test_connection(
+        {"connection_id": record["connection_id"], "expected_revision": record["revision"]}
+    )
+    assert result["connected"] is True
+    return result["connection"]

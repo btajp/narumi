@@ -83,7 +83,7 @@ final class RecordingPermissionSetupStateTests: XCTestCase {
     }
 
     func testDeniedMicrophoneUsesSettingsWhileScreenStillAllowsRequest() throws {
-        for version in ["2.0.0", "3.0.0"] {
+        for version in ["2.0.0", "3.0.0", "4.0.0"] {
             let state = try connected(info(microphone: "denied", screen: "denied", contract: version))
             XCTAssertTrue(state.supportsSetup)
             XCTAssertEqual(state.permissionState(.microphone), .notGranted)
@@ -97,7 +97,7 @@ final class RecordingPermissionSetupStateTests: XCTestCase {
     }
 
     func testOldAndUnknownMajorContractsKeepSetupUnavailable() throws {
-        for version in ["1.0.0", "1.1.0", "4.0.0", "unrecognized"] {
+        for version in ["1.0.0", "1.1.0", "4.0.0-rc.1", "5.0.0", "unrecognized"] {
             var state = try connected(info(contract: version))
             XCTAssertFalse(state.supportsSetup)
             XCTAssertTrue(state.needsSetup)

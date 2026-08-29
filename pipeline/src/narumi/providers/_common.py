@@ -13,12 +13,14 @@ PROVIDERS = {
     "claude-agent-sdk": "Claude Agent SDK",
     "codex-app-server": "Codex App Server",
     "ollama": "Ollama",
+    "openai-api": "OpenAI API",
 }
 AUTH_METHODS = {
     "anthropic-api": "api_key",
     "claude-agent-sdk": "api_key",
     "codex-app-server": "chatgpt",
     "ollama": "none",
+    "openai-api": "api_key",
 }
 CONNECTION_FIELDS = (
     "connection_id",

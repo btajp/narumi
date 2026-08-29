@@ -61,7 +61,7 @@ final class ProviderContractModelsTests: XCTestCase {
 
     func testAllNineProviderToolResponseContracts() throws {
         let providers = try all(ListProvidersResponse.self, "list_providers")
-        XCTAssertEqual(providers[0].providers.map(\.providerID), [.anthropicAPI, .claudeAgentSDK, .ollama, .codexAppServer])
+        XCTAssertEqual(providers[0].providers.map(\.providerID), [.anthropicAPI, .claudeAgentSDK, .ollama, .codexAppServer, .openaiAPI])
         XCTAssertEqual(providers[0].providers[1].authMethods, [.apiKey])
         XCTAssertEqual(providers[0].providers[1].runtime.state, .notPrepared)
         let connections = try all(ListProviderConnectionsResponse.self, "list_provider_connections")
@@ -118,7 +118,7 @@ final class ProviderContractModelsTests: XCTestCase {
     }
 
     func testUnknownCapabilitiesAndWrongBooleanTypesAreRejected() throws {
-        XCTAssertThrowsError(try decode(ProviderID.self, "openai-api"))
+        XCTAssertThrowsError(try decode(ProviderID.self, "future-provider"))
         XCTAssertThrowsError(try decode(ProviderRole.self, "future_role"))
         XCTAssertThrowsError(try decode(ProviderAuthMethod.self, "subscription"))
         XCTAssertThrowsError(try decode(ProviderAvailability.self, "future_state"))
@@ -183,6 +183,23 @@ final class ProviderContractModelsTests: XCTestCase {
         for value: Any in ["free", "-1", 0, true] {
             billing["input_usd_per_million_tokens"] = value
             XCTAssertThrowsError(try decode(ProviderModelBilling.self, billing))
+        }
+    }
+
+    func testOptionalModelShutdownDateRequiresARealCalendarDate() throws {
+        var model = try firstArrayItem("list_provider_models", "models")
+        model.removeValue(forKey: "availability_expires_on")
+        XCTAssertNil(try decode(ProviderModelDescriptor.self, model).availabilityExpiresOn)
+        model["availability_expires_on"] = NSNull()
+        XCTAssertNil(try decode(ProviderModelDescriptor.self, model).availabilityExpiresOn)
+        for valid in ["2026-08-29", "2028-02-29"] {
+            model["availability_expires_on"] = valid
+            XCTAssertEqual(try decode(ProviderModelDescriptor.self, model).availabilityExpiresOn, valid)
+        }
+        for invalid: Any in ["2026-02-29", "2026-02-30", "2026-13-01", "2026-8-29",
+                             "2026-08-29T00:00:00Z", "0000-01-01", true, 0] {
+            model["availability_expires_on"] = invalid
+            XCTAssertThrowsError(try decode(ProviderModelDescriptor.self, model))
         }
     }
 
@@ -298,6 +315,51 @@ final class ProviderContractModelsTests: XCTestCase {
         XCTAssertThrowsError(try encoded(SetProviderConnectionRequest(
             providerID: .codexAppServer, displayName: "Meeting Codex", authMethod: .chatgpt,
             endpoint: "https://example.invalid")))
+    }
+
+    func testOpenAIConnectionContractUsesOnlyAPIKeyAndFixedEndpoint() throws {
+        let descriptor = try XCTUnwrap(all(ListProvidersResponse.self, "list_providers")[0].providers.first {
+            $0.providerID == .openaiAPI
+        })
+        XCTAssertEqual(descriptor.authMethods, [.apiKey])
+        let saved = try XCTUnwrap(all(ProviderConnectionResponse.self, "set_provider_connection").first {
+            $0.connection.providerID == .openaiAPI
+        })
+        XCTAssertEqual(saved.connection.authMethod, .apiKey)
+        XCTAssertEqual(saved.connection.endpoint, ProviderConnectionSettings.openaiEndpoint)
+        var connection = try firstArrayItem("list_provider_connections", "connections")
+        connection["provider_id"] = "openai-api"
+        connection["auth_method"] = "api_key"
+        connection["endpoint"] = ProviderConnectionSettings.openaiEndpoint
+        XCTAssertNoThrow(try decode(ProviderConnection.self, connection))
+        for endpoint: Any in ["https://chatgpt.com", "https://example.invalid", "https://api.openai.com/v1", NSNull()] {
+            var changed = connection
+            changed["endpoint"] = endpoint
+            XCTAssertThrowsError(try decode(ProviderConnection.self, changed))
+        }
+        for auth in ["chatgpt", "none"] {
+            var changed = connection
+            changed["auth_method"] = auth
+            XCTAssertThrowsError(try decode(ProviderConnection.self, changed))
+        }
+
+        let request = SetProviderConnectionRequest(
+            providerID: .openaiAPI, displayName: "Meeting API", authMethod: .apiKey,
+            endpoint: ProviderConnectionSettings.openaiEndpoint, apiKey: .replace("fixture-openai-key"))
+        let valid = try encoded(request)
+        XCTAssertEqual(valid["provider_id"] as? String, "openai-api")
+        XCTAssertEqual(valid["auth_method"] as? String, "api_key")
+        XCTAssertEqual(valid["endpoint"] as? String, "https://api.openai.com")
+        XCTAssertEqual(valid["api_key"] as? String, "fixture-openai-key")
+        XCTAssertFalse(String(describing: request).contains("fixture-openai-key"))
+        for auth in [ProviderAuthMethod.chatgpt, .none] {
+            XCTAssertThrowsError(try encoded(SetProviderConnectionRequest(
+                providerID: .openaiAPI, displayName: "Meeting API", authMethod: auth)))
+        }
+        for endpoint in ["https://example.invalid", "https://api.openai.com/v1", "https://api.openai.com@evil.invalid"] {
+            XCTAssertThrowsError(try encoded(SetProviderConnectionRequest(
+                providerID: .openaiAPI, displayName: "Meeting API", authMethod: .apiKey, endpoint: endpoint)))
+        }
     }
 
     func testDeviceAuthorizationChallengeIsAcceptedOnlyWhileLoginIsPending() throws {

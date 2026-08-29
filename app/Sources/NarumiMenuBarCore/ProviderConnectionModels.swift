@@ -114,6 +114,7 @@ public struct ProviderConnection: Decodable, Equatable, Sendable {
         lastGenerationState = try container.decode(ProviderGenerationState.self, forKey: .lastGenerationState)
         guard revision > 0, authMethod == providerID.supportedAuthMethod,
             providerID != .ollama || !credentialPresent,
+            providerID != .openaiAPI || endpoint == ProviderConnectionSettings.openaiEndpoint,
             providerID != .codexAppServer || endpoint == ProviderConnectionSettings.codexEndpoint
         else {
             throw DecodingError.dataCorruptedError(

@@ -11,6 +11,7 @@ from jsonschema import Draft202012Validator
 from narumi.contracts import load_contracts
 from narumi.errors import (
     AuthenticationRequiredError,
+    CancelledError,
     EngineUnavailableError,
     InvalidArgumentError,
     ModelUnavailableError,
@@ -104,7 +105,7 @@ def test_anthropic_discovery_intersects_adapter_capabilities_and_contract():
     assert model["availability"] == "available"
     assert model["input_modalities"] == ["text", "image"]
     assert model["parameter_schema"]["properties"] == {
-        "max_tokens": {"type": "integer", "minimum": 1, "maximum": 8192}
+        "max_tokens": {"type": "integer", "minimum": 1, "maximum": 8192, "default": 4096}
     }
     assert model["resolved_revision"] is None
     assert model["billing"]["kind"] == "api"
@@ -127,6 +128,36 @@ def test_missing_capabilities_and_limits_are_not_invented():
     assert model["reason"] == "model_capabilities_unavailable"
     assert model["input_modalities"] == ["text"]
     assert model["context_window"] is model["max_output_tokens"] is None
+    validate_models([model])
+
+
+@pytest.mark.parametrize(
+    ("known_limit", "maximum", "default"),
+    [
+        (None, 32768, 4096),
+        (1, 1, 1),
+        (2048, 2048, 2048),
+        (32768, 32768, 4096),
+        (128000, 32768, 4096),
+    ],
+)
+def test_anthropic_output_option_separates_application_limit_from_model_capability(
+    known_limit, maximum, default
+):
+    metadata, _ = client(page(api_model(max_tokens=known_limit)))
+    model = metadata.fetch("anthropic-api", API, KEY)[0]
+    assert model["max_output_tokens"] == known_limit
+    option = model["parameter_schema"]["properties"]["max_tokens"]
+    assert option == {"type": "integer", "minimum": 1, "maximum": maximum, "default": default}
+    validator = Draft202012Validator(model["parameter_schema"])
+    validator.validate({"max_tokens": maximum})
+    for parameters in (
+        {"max_tokens": 0},
+        {"max_tokens": maximum + 1},
+        {"max_tokens": True},
+        {"reasoning_effort": "high"},
+    ):
+        assert not validator.is_valid(parameters)
     validate_models([model])
 
 
@@ -210,7 +241,7 @@ def test_ollama_verifies_local_selector_and_discards_private_model_content():
     assert model["max_output_tokens"] is None
     assert model["input_modalities"] == ["text", "image"]
     assert model["parameter_schema"]["properties"] == {
-        "max_tokens": {"type": "integer", "minimum": 1}
+        "max_tokens": {"type": "integer", "minimum": 1, "maximum": 32768, "default": 4096}
     }
     assert model["billing"]["kind"] == "local"
     assert "private" not in str(models).lower()
@@ -261,6 +292,42 @@ def test_missing_local_proof_does_not_call_show():
     assert models[0]["availability"] == "unverified"
     assert models[0]["reason"] == "local_model_metadata_unverified"
     assert len(http.calls) == 1
+
+
+def test_ollama_unknown_context_and_output_limits_remain_unknown():
+    metadata, _ = client({"models": [local_model()]}, local_show(model_info={}))
+    model = metadata.require_local_ollama_model(LOCAL, "fixture:1")
+    assert model["context_window"] is model["max_output_tokens"] is None
+    assert model["parameter_schema"]["properties"]["max_tokens"]["maximum"] == 32768
+    assert model["parameter_schema"]["properties"]["max_tokens"]["default"] == 4096
+    validate_models([model])
+
+
+def test_local_model_verification_checks_cancellation_before_request():
+    metadata, http = client()
+    with pytest.raises(CancelledError):
+        metadata.require_local_ollama_model(LOCAL, "fixture:1", should_cancel=lambda: True)
+    assert http.calls == []
+
+
+def test_local_model_verification_forwards_cancellation_and_stops_between_requests():
+    calls = iter([False, True])
+
+    def should_cancel():
+        return next(calls)
+
+    metadata, http = client({"models": [local_model()]})
+    with pytest.raises(CancelledError):
+        metadata.require_local_ollama_model(LOCAL, "fixture:1", should_cancel=should_cancel)
+    assert len(http.calls) == 1
+    assert http.calls[0]["should_cancel"] is should_cancel
+
+
+def test_local_model_verification_does_not_hide_http_cancellation_as_unverified():
+    metadata, http = client({"models": [local_model()]}, CancelledError("fixture cancelled"))
+    with pytest.raises(CancelledError):
+        metadata.require_local_ollama_model(LOCAL, "fixture:1", should_cancel=lambda: False)
+    assert len(http.calls) == 2
 
 
 def test_discovery_has_an_overall_deadline():

@@ -52,6 +52,11 @@ private struct ProviderModelCandidateRow: View {
                 LabeledContent("出力上限", value: model.maxOutputTokens.map { "\($0) tokens" } ?? "未確認")
                 LabeledContent("時刻情報", value: timestampSupport)
                 LabeledContent("モデルの固定版", value: model.resolvedRevision ?? "未確認")
+                if let expiresOn = model.availabilityExpiresOn {
+                    LabeledContent("提供終了予定日", value: expiresOn)
+                    Text("UTC の日付が終了予定日に達した後は、候補から選択できません。公式の終了時刻を示すものではありません。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 LabeledContent("課金区分", value: ProviderDisplay.billing(model.billing.kind))
                 LabeledContent("入力単価", value: ProviderDisplay.price(model.billing.inputUSDPerMillionTokens, unit: "100万 tokens"))
                 LabeledContent("出力単価", value: ProviderDisplay.price(model.billing.outputUSDPerMillionTokens, unit: "100万 tokens"))
@@ -63,7 +68,7 @@ private struct ProviderModelCandidateRow: View {
                     Text("確認済みパラメータ: " + model.parameterSchema.properties.keys.sorted().joined(separator: "、"))
                         .font(.caption)
                 }
-                Text("この一覧は候補情報です。Codex のモデルは会議の「設定」またはプロファイルの「議事録の生成方法」で選択して保存します。接続だけでは会議に適用しません。")
+                Text("この一覧は候補情報です。議事録のモデルは会議の「設定」またはプロファイルの「議事録の生成方法」で選択して保存します。接続だけでは会議に適用しません。Claude Agent SDK の議事録生成は未対応です。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             .font(.caption)
@@ -71,9 +76,9 @@ private struct ProviderModelCandidateRow: View {
         } label: {
             VStack(alignment: .leading, spacing: 3) {
                 Text(model.displayName)
-                Text(ProviderDisplay.availability(model.availability))
+                Text(model.availabilityExpired ? "提供終了予定日に到達（選択不可）" : ProviderDisplay.availability(model.availability))
                     .font(.caption)
-                    .foregroundStyle(model.availability == .available ? .green : .orange)
+                    .foregroundStyle(model.availability == .available && !model.availabilityExpired ? .green : .orange)
             }
         }
     }
