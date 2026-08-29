@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 
 from click.testing import CliRunner
-from conftest import PerCallClient, call, wait_job
+from conftest import PerCallClient, call, meeting_entries, wait_job
 from narumi.bundle import Bundle
 from narumi_server import cli_tools
 from narumi_server.context import ServerContext
@@ -236,7 +236,7 @@ async def test_policy_violation_is_rejected_at_config_time(
     )
     assert denied["error"]["code"] == "policy_violation"
     assert denied["error"]["details"]["provider"] == "anthropic-api"
-    assert list(ctx.meetings_root.iterdir()) == []  # no orphan bundle
+    assert meeting_entries(ctx) == []  # no orphan bundle
 
 
 async def test_policy_violation_inside_the_job_fails_it(client: PerCallClient, ctx: ServerContext):

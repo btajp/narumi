@@ -12,7 +12,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import PerCallClient, call, make_recorded_bundle, wait_job, write_fake_minutes
+from conftest import (
+    PerCallClient,
+    call,
+    make_recorded_bundle,
+    meeting_entries,
+    wait_job,
+    write_fake_minutes,
+)
 from narumi.bundle import Bundle, TrackRecord
 from narumi.models import EngineInfo, Segment, Transcript
 from narumi_server.context import ServerContext
@@ -216,7 +223,7 @@ async def test_import_recording(client: PerCallClient, ctx: ServerContext, tmp_p
         {"meeting_name": "once", "mic_path": str(mic), "auto_process": False, "request_id": key},
     )
     assert again == once
-    assert len(list(ctx.meetings_root.iterdir())) == 2
+    assert len(meeting_entries(ctx)) == 2
 
 
 async def test_import_recording_hardlink_and_started_at_default(
@@ -283,7 +290,7 @@ async def test_import_recording_errors(client: PerCallClient, ctx: ServerContext
         {"meeting_name": "x", "mic_path": str(mic), "profile": "vip", "request_id": rid()},
     )
     assert profile["error"]["code"] == "invalid_argument"
-    assert list(ctx.meetings_root.iterdir()) == []  # every rejection left nothing behind
+    assert meeting_entries(ctx) == []  # every rejection left nothing behind
 
 
 async def test_import_recording_auto_process_e2e(

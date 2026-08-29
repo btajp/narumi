@@ -15,6 +15,7 @@ from conftest import (
     call,
     fake_process_meeting,
     make_recorded_bundle,
+    meeting_entries,
     wait_job,
     write_fake_minutes,
 )
@@ -51,6 +52,15 @@ def collect_refs(schema: Any) -> list[str]:
         for item in schema:
             refs.extend(collect_refs(item))
     return refs
+
+
+def test_meeting_entries_excludes_only_the_manifest_lock_directory(ctx: ServerContext):
+    (ctx.meetings_root / ".manifest-locks").mkdir(exist_ok=True)
+    assert meeting_entries(ctx) == []
+
+    orphan = ctx.meetings_root / ".orphan"
+    orphan.mkdir()
+    assert meeting_entries(ctx) == [orphan]
 
 
 # ---------------------------------------------------------------------------- discovery
@@ -355,7 +365,7 @@ async def test_recorder_missing(home: Path, monkeypatch: pytest.MonkeyPatch):
             result = await call(client, "start_recording", {"request_id": rid()})
             assert result["error"]["code"] == "recorder_unavailable"
             assert str(home / "does-not-exist") in result["error"]["details"]["candidates"]
-            assert list(ctx.meetings_root.iterdir()) == []  # no orphan bundle
+            assert meeting_entries(ctx) == []  # no orphan bundle
     finally:
         ctx.close()
 
@@ -365,7 +375,7 @@ async def test_recorder_error_event(client: PerCallClient, ctx: ServerContext, m
     result = await call(client, "start_recording", {"request_id": rid()})
     assert result["error"]["code"] == "recorder_unavailable"
     assert result["error"]["details"]["recorder_code"] == "permission_denied"
-    assert list(ctx.meetings_root.iterdir()) == []
+    assert meeting_entries(ctx) == []
     assert ctx.recorder.is_active is False
 
 
@@ -403,7 +413,7 @@ async def test_idempotent_replay(client: PerCallClient, ctx: ServerContext):
     replay2 = await call(client, "start_recording", {"request_id": key})
     assert replay2 == first
     assert ctx.recorder.is_active is False
-    assert len(list(ctx.meetings_root.iterdir())) == 1
+    assert len(meeting_entries(ctx)) == 1
     # and replaying stop does not raise not_found
     assert await call(client, "stop_recording", {"request_id": stop_key}) == stopped
     # the same key on a different tool is rejected
@@ -716,7 +726,7 @@ async def test_start_recording_config_policy(client: PerCallClient, ctx: ServerC
         },
     )
     assert result["error"]["code"] == "policy_violation"
-    assert list(ctx.meetings_root.iterdir()) == []
+    assert meeting_entries(ctx) == []
     bad_profile = await call(client, "start_recording", {"request_id": rid(), "profile": "vip"})
     assert bad_profile["error"]["code"] == "invalid_argument"
 

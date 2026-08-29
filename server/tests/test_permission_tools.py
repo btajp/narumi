@@ -10,7 +10,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-from conftest import PerCallClient, call
+from conftest import PerCallClient, call, meeting_entries
 from narumi_server import recording
 from narumi_server.app import dispatch
 from narumi_server.context import ServerContext, build_context
@@ -36,7 +36,7 @@ async def test_permission_mcp_roundtrip_without_recording(
     assert await call(client, "get_recording_status") == {"active": False}
     assert await call(client, "list_meetings") == {"meetings": []}
     assert ctx.catalog.list_jobs() == []
-    assert not list(ctx.meetings_root.glob("*"))
+    assert not meeting_entries(ctx)
     info = await call(client, "get_server_info", {"refresh_permissions": True})
     assert info["capabilities"]["permission_setup_in_progress"] is False
 
@@ -115,7 +115,7 @@ def test_same_id_and_competing_start_fail_immediately(
         assert competing.is_error and competing.payload["error"]["code"] == "busy"
         start = dispatch(ctx, "start_recording", {"request_id": str(uuid4())})
         assert start.is_error and start.payload["error"]["code"] == "busy"
-        assert not list(ctx.meetings_root.glob("*"))
+        assert not meeting_entries(ctx)
         info = dispatch(ctx, "get_server_info", {"refresh_permissions": True})
         assert info.payload["capabilities"]["permission_setup_in_progress"] is True
         first = pending.result(timeout=5)
@@ -140,7 +140,7 @@ def test_start_preflight_reserves_gate_before_bundle_creation(ctx: ServerContext
         try:
             action = dispatch(ctx, TOOL, arguments())
             assert action.is_error and action.payload["error"]["code"] == "busy"
-            assert not list(ctx.meetings_root.glob("*"))
+            assert not meeting_entries(ctx)
         finally:
             release.set()
         assert not pending.result(timeout=5).is_error

@@ -13,6 +13,7 @@ from mcp.client import Client
 from mcp.server import Server
 from mcp_types import CallToolResult, ListToolsResult
 from narumi.bundle import Bundle, MinutesVersionRecord, utc_now_iso
+from narumi.bundle.manifest_writer import LOCK_DIRECTORY_NAME
 from narumi.models import MergedSegment, MergedTranscript, MinutesMeta, SpeakerEntry, SpeakerMap
 from narumi.pipeline import ProcessResult
 from narumi_server.app import build_server
@@ -110,6 +111,18 @@ def started_at_from_id(meeting_id: str) -> str:
     """``20260827T010000Z-…`` → ``2026-08-27T01:00:00Z`` (the id embeds the UTC start)."""
     stamp = meeting_id.split("-", 1)[0]
     return f"{stamp[0:4]}-{stamp[4:6]}-{stamp[6:8]}T{stamp[9:11]}:{stamp[11:13]}:{stamp[13:15]}Z"
+
+
+def meeting_entries(ctx: ServerContext) -> list[Path]:
+    """Return real meeting-root entries, excluding only the durable lock directory."""
+    return sorted(
+        (
+            entry
+            for entry in ctx.meetings_root.iterdir()
+            if not (entry.name == LOCK_DIRECTORY_NAME and entry.is_dir())
+        ),
+        key=lambda entry: entry.name,
+    )
 
 
 def make_recorded_bundle(
