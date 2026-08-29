@@ -9,9 +9,13 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from narumi.model_selection import ModelSelection
+from narumi.transcription_selection import (
+    TranscriptionModelSelection,
+    normalize_transcription_language,
+)
 
 SPEAKER_ME = "me"
 SPEAKER_OTHER = "other"
@@ -29,6 +33,7 @@ class MeetingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     transcription_engine: str = "auto"
+    transcription_model: TranscriptionModelSelection | None = None
     diarization_engine: str = "none"
     llm_provider: str = "none"
     minutes_model: ModelSelection | None = None
@@ -36,6 +41,12 @@ class MeetingConfig(BaseModel):
     language: str = "ja"
     self_name: str | None = None
     vocab_hints: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _transcription_language(self) -> MeetingConfig:
+        if self.transcription_model is not None:
+            normalize_transcription_language(self.language)
+        return self
 
 
 class Word(BaseModel):

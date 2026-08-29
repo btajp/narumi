@@ -1,7 +1,7 @@
 {
   "name": "stop_recording",
   "title": "Stop recording",
-  "description": "Stop the currently running recording, finalize the track files and record their sizes, sha256 hashes and durations in the bundle manifest. With auto_process=true (default) a `process` job (ffmpeg split → transcription → diarization → alignment → integration → minutes) is enqueued and its job_id is returned; poll it with get_job_status. With discard_video=true the screen video track is deleted after finalization and marked discarded (audio tracks are kept); this cannot be undone. `request_id` is the client-generated idempotency key: repeating the call returns the original result without enqueuing a second job. On failure returns an error_envelope (isError=true) with code: not_found (no recording is running), recorder_unavailable (the recorder process died or could not finalize the files), invalid_argument, internal.",
+  "description": "Stop the currently running recording, finalize the track files and record their sizes, sha256 hashes and durations in the bundle manifest. With auto_process=true (default) a `process` job (ffmpeg split → transcription → diarization → alignment → integration → minutes) is enqueued and its job_id is returned; poll it with get_job_status. With discard_video=true the screen video track is deleted after finalization and marked discarded (audio tracks are kept); this cannot be undone. `request_id` is the client-generated idempotency key: repeating the call returns the original result without enqueuing a second job. On failure returns an error_envelope (isError=true) with code: not_found (no recording is running), recorder_unavailable (the recorder process died or could not finalize the files), invalid_argument, internal. With an explicitly saved API transcription_model and api_ok, auto_process uses the accepted effective config snapshot and validates it before processing. Recording stop/finalization completes before a later processing failure. Automatic processing never carries a transcription_retry confirmation, never retransmits an outcome-unknown chunk merely because cache_epoch changed, and reports typed recovery details through get_job_status instead.",
   "annotations": {
     "readOnlyHint": false,
     "destructiveHint": true,
@@ -11,7 +11,9 @@
   "inputSchema": {
     "type": "object",
     "properties": {
-      "request_id": { "$ref": "../defs/common.json#/$defs/request_id" },
+      "request_id": {
+        "$ref": "../defs/common.json#/$defs/request_id"
+      },
       "auto_process": {
         "type": "boolean",
         "description": "Enqueue a `process` job right after stopping (default true). Set false to only stop; call regenerate later to process.",
@@ -23,14 +25,23 @@
         "default": false
       }
     },
-    "required": ["request_id"],
+    "required": [
+      "request_id"
+    ],
     "additionalProperties": false
   },
   "outputSchema": {
     "type": "object",
-    "required": ["meeting_id", "stopped_at", "duration_sec", "tracks"],
+    "required": [
+      "meeting_id",
+      "stopped_at",
+      "duration_sec",
+      "tracks"
+    ],
     "properties": {
-      "meeting_id": { "$ref": "../defs/common.json#/$defs/meeting_id" },
+      "meeting_id": {
+        "$ref": "../defs/common.json#/$defs/meeting_id"
+      },
       "stopped_at": {
         "$ref": "../defs/common.json#/$defs/timestamp",
         "description": "UTC time capture ended."
@@ -43,7 +54,9 @@
       "tracks": {
         "type": "object",
         "description": "Track name (screen / mic / system) → final file status. A discarded track has discarded=true and null sha256/bytes.",
-        "additionalProperties": { "$ref": "../defs/common.json#/$defs/track_status" }
+        "additionalProperties": {
+          "$ref": "../defs/common.json#/$defs/track_status"
+        }
       },
       "job_id": {
         "$ref": "../defs/common.json#/$defs/job_id",

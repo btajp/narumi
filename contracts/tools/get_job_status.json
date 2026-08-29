@@ -1,7 +1,7 @@
 {
   "name": "get_job_status",
   "title": "Get job status",
-  "description": "Return the current state of a background job created by stop_recording (kind process), regenerate / register_context (kind regenerate) or export_minutes (kind export), or prepare_provider_runtime (kind provider_setup, no meeting). `status` is queued / running / succeeded / failed / cancelled. While running, `progress` carries the current stage name and a 0..1 fraction. When succeeded, `result` holds the job output (process / regenerate: {meeting_id, minutes_version, stages, skipped, unresolved_speakers}; export: {destination, ref, minutes_version, at}). When failed, `error` holds the structured error (same codes as tool errors, e.g. policy_violation or engine_unavailable). Jobs are volatile: they are not rebuilt from bundles after a catalog rebuild. Provider setup acceptance IDs and unresolved states are separately persisted in list_providers.runtime.active_setup/last_setup; a missing live job after restart is not proof of completion. Read-only. On failure returns an error_envelope (isError=true) with code: not_found (unknown or expired job_id), invalid_argument, internal.",
+  "description": "Return the current state of a background job created by stop_recording (kind process), regenerate / register_context (kind regenerate) or export_minutes (kind export), or prepare_provider_runtime (kind provider_setup, no meeting). `status` is queued / running / succeeded / failed / cancelled. While running, `progress` carries the current stage name and a 0..1 fraction. When succeeded, `result` holds the job output (process / regenerate: {meeting_id, minutes_version, stages, skipped, unresolved_speakers}; export: {destination, ref, minutes_version, at}). When failed, `error` holds the structured error (same codes as tool errors, e.g. policy_violation or engine_unavailable). Jobs are volatile: they are not rebuilt from bundles after a catalog rebuild. Provider setup acceptance IDs and unresolved states are separately persisted in list_providers.runtime.active_setup/last_setup; a missing live job after restart is not proof of completion. Read-only. On failure returns an error_envelope (isError=true) with code: not_found (unknown or expired job_id), invalid_argument, internal. API transcription outcome-unknown errors carry typed details with stage=transcribe, reason=transcription_outcome_unknown, outcome_unknown=true, input/chunk fingerprints, blocked_epoch, track, chunk counts and sample bounds. They support one-chunk retransmission confirmation through regenerate; they do not prove a request was unprocessed or unbilled. A missing live job does not erase the durable ASR attempt ledger, and resuming without confirmation reconstructs the blocked details without retransmitting.",
   "annotations": {
     "readOnlyHint": true,
     "destructiveHint": false,
@@ -16,21 +16,31 @@
         "description": "Job id returned by stop_recording, regenerate, register_context, export_minutes or prepare_provider_runtime. provider_setup jobs are not associated with a meeting."
       }
     },
-    "required": ["job_id"],
+    "required": [
+      "job_id"
+    ],
     "additionalProperties": false
   },
   "outputSchema": {
     "type": "object",
-    "required": ["job"],
+    "required": [
+      "job"
+    ],
     "properties": {
-      "job": { "$ref": "../defs/common.json#/$defs/job" }
+      "job": {
+        "$ref": "../defs/common.json#/$defs/job"
+      }
     },
     "additionalProperties": false
   },
   "examples": {
     "input": [
-      { "job_id": "job-0123456789ab" },
-      { "job_id": "job-fedcba9876543210fedcba9876543210" }
+      {
+        "job_id": "job-0123456789ab"
+      },
+      {
+        "job_id": "job-fedcba9876543210fedcba9876543210"
+      }
     ],
     "output": [
       {
@@ -39,7 +49,10 @@
           "meeting_id": "20260827T030500Z-a1b2c3d4",
           "kind": "process",
           "status": "running",
-          "progress": { "stage": "transcribe", "fraction": 0.4 },
+          "progress": {
+            "stage": "transcribe",
+            "fraction": 0.4
+          },
           "created_at": "2026-08-27T04:02:10Z",
           "updated_at": "2026-08-27T04:03:00Z"
         }
@@ -53,10 +66,46 @@
           "error": {
             "code": "policy_violation",
             "message": "destination notion sends data externally but external_send_policy is local_only",
-            "details": { "destination": "notion", "external_send_policy": "local_only" }
+            "details": {
+              "destination": "notion",
+              "external_send_policy": "local_only"
+            }
           },
           "created_at": "2026-08-27T04:15:00Z",
           "updated_at": "2026-08-27T04:15:01Z"
+        }
+      },
+      {
+        "job": {
+          "job_id": "job-abcdefabcdef",
+          "meeting_id": "20260827T030500Z-a1b2c3d4",
+          "kind": "regenerate",
+          "status": "failed",
+          "created_at": "2026-08-29T03:00:00Z",
+          "updated_at": "2026-08-29T03:01:00Z",
+          "error": {
+            "code": "engine_unavailable",
+            "message": "Transcription request outcome is unknown; explicit chunk confirmation is required.",
+            "details": {
+              "stage": "transcribe",
+              "reason": "transcription_outcome_unknown",
+              "outcome_unknown": true,
+              "input_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "chunk_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "blocked_epoch": 0,
+              "track": "system",
+              "chunk_index": 1,
+              "chunk_count": 2,
+              "completed_chunks": 1,
+              "start_sample": 0,
+              "end_sample": 9600000,
+              "sample_rate": 16000,
+              "provider": "openai-api",
+              "model_id": "whisper-1",
+              "connection_id": "conn-111122223333",
+              "connection_revision": 1
+            }
+          }
         }
       }
     ]

@@ -12,19 +12,21 @@ contracts/
 ├── defs/providers.json  # プロバイダ・runtime・対応機能
 ├── defs/provider_connections.json # 接続・認証操作
 ├── defs/provider_models.json      # モデル・能力・料金・議事録モデル選択
+├── defs/transcription_models.json # API 音声認識の選択・再試行・結果不明情報
 └── tools/<name>.json    # 1 ツール 1 ファイル。ファイル名 = "name"
 ```
 
 - `manifest.json` の `tools` はツール名の配列。`tools/<name>.json` と **過不足なく一致** させる（一致しなければローダーが起動時に `contract_mismatch` を投げる）
 - `manifest.json` の `defs` は共通定義ファイルの相対パス配列。定義名は全ファイルを通して一意
 
-## v4 ツール一覧（37）
+## v5 ツール一覧（37）
 
-契約 4.0.0 は OpenAI API 接続と、4 系統のテキスト議事録モデル選択を扱う。
+契約 5.0.0 は、既存の 4 系統の議事録モデル選択に OpenAI API 音声認識を追加する。
 既存の `llm_provider` は維持し、文字起こし・発話統合・画像処理へ選択を暗黙に適用しない。
 `get_server_info.capabilities.minutes_model_providers` は議事録生成を実装した adapter の一覧。
 この一覧とは別に、接続の認証・準備状態と各モデルの能力を確認する。
-全工程のモデル選択、外部 API の文字起こし、複数生成・統合、Claude Agent SDK による明示的な議事録モデル選択は今回の対象外。
+`transcription_model_providers` は API 音声認識の対応経路で、常駐 HTTP サーバーは `["openai-api"]`、それ以外は `[]` を返す。
+全工程のモデル選択、複数生成・統合、Claude Agent SDK による明示的な議事録モデル選択、既知話者の参照音声送信は今回の対象外。
 
 | 分類 | ツール |
 |---|---|
@@ -108,8 +110,8 @@ API 送信は `api_ok`、Codex 送信は `subscription_ok` または `api_ok` �
 同じ入力と選択では既存の議事録を再利用する。選択や `cache_epoch` だけを変更した場合は、
 文字起こしや発話統合をやり直さず議事録生成だけを更新する。
 
-`regenerate.force=true` は `minutes_model` が null の従来処理だけで使う。
-明示的な `minutes_model` を選択した会議では `invalid_argument` で拒否する。
+`regenerate.force=true` は `minutes_model` と `transcription_model` が両方 null の従来処理だけで使う。
+どちらかのモデルを明示選択した会議では `invalid_argument` で拒否する。
 同じ内容で明示的に新しい生成試行を始める場合は、実行と送信先をユーザーが確認した後、
 `set_meeting_config` で `minutes_model.cache_epoch` を明示的に増やして保存する。
 その保存結果を `expected_config` に渡し、新しい `request_id` と `force=false` で `regenerate` を呼ぶ。
@@ -120,6 +122,83 @@ API 送信は `api_ok`、Codex 送信は `subscription_ok` または `api_ok` �
 送信確認時に取得した設定全体を `expected_config` として渡す。
 サーバーは会議のロック内で現設定と照合し、確認後に変更されていれば `configuration_conflict` で拒否する。
 旧来の生成と、生成しないコンテキスト登録では省略できる。指定した場合はどちらでも照合する。
+
+### API 音声認識のモデル選択
+
+`meeting_config.transcription_model` は独立した nullable な選択オブジェクト。
+会議・プロファイル・新規録画・取り込み・読込応答で同じ型を使う。
+更新時の省略は保持、null は解除。`transcription_engine` はローカル用の設定として残し、
+API 選択中だけ使用しない。既存保存データに選択がなければ従来のローカル処理を維持する。
+
+```json
+{
+  "provider": "openai-api",
+  "connection_id": "conn-111122223333",
+  "connection_revision": 1,
+  "model_id": "whisper-1",
+  "parameters": {},
+  "cache_epoch": 0
+}
+```
+
+`model_id` は `whisper-1` または `gpt-4o-transcribe-diarize` の明示 ID。
+前者は word / segment、後者は diarized segment の時刻付き結果を使う。
+時刻を扱えないモデルは候補表示しても選択できない。OpenAI 接続の roles は `llm` と `transcription` を含み、
+`list_provider_models` の候補・ページ情報・UI キャッシュは role ごとに区別する。
+
+接続の有効状態・版・認証・時刻対応・終了日と、`api_ok` を保存時と各送信直前に確認する。
+共通 `language` は API 選択時だけ `auto` または小文字 2 文字の ISO 639-1 言語コードに制限する。
+コードの実在性は実装側で検証し、`auto` は API の language を省略する。
+`parameters` は省略時 `{}` で、初版は追加キーを受け付けない。
+用語 prompt・話者名・参照音声・任意の応答形式・言語指定・Responses API のオプションを入れることはできない。
+共通 `vocab_hints` は API 音声認識へ送らず、発話統合で引き続き使う。
+
+保存・候補表示では音声を送らない。処理実行時に mic と system を別々に送り、API 課金の可能性を明示する。
+送信は 16 kHz mono PCM16 WAV を 9,600,000 samples（10 分）以下の非重複区間に分け、mic → system の固定順で逐次実行する。
+各ファイルはヘッダー込み 24,000,000 bytes 以下、全体は最大 144 区間・合計 24 時間の音声。
+これらはアプリの送信上限であり、費用の上限や API 側の処理回数を保証しない。
+
+### 結果不明の音声区間を再試行する
+
+`cache_epoch` は省略時 0、非負整数。成功区間は epoch にかかわらず hash を照合して再利用する。
+epoch だけの変更では完成した Transcript や下流の指紋を変えず、成功区間を再送しない。
+送信後の切断・timeout・不正応答・保存失敗・取消は結果不明として台帳に残す。
+再起動、DB 再構築、時間経過、force、選択の解除・復元でこの状態を消さない。
+取消によって API 側の処理・課金が停止したとは保証しない。
+
+結果不明の区間を一つ再送する場合は、ユーザーが対象と追加課金の可能性を確認した後、
+選択の epoch を増やして保存し、`regenerate` に次の `transcription_retry` を渡す。
+これは保存設定ではなく、一回の再試行確認である。
+
+```json
+{
+  "input_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "chunk_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "blocked_epoch": 0
+}
+```
+
+指紋は小文字 hex 64 文字の SHA256。`expected_config` とその非 null な `transcription_model` が必須で、
+現在の `cache_epoch` が `blocked_epoch` より大きいこと、実入力・対象区間・直近の不明 epoch が一致することを送信前に確認する。
+再送前の pending 保存で確認を一度消費し、再び結果不明になった場合は新たな確認を必要とする。
+成功区間は再利用し、確認対象以外の不明区間を自動再送しない。epoch を増やすだけでは再送を許可しない。
+
+`set_meeting_config` と `set_profile` の任意 `expected_config` は、保存前の全実効設定を照合する。
+UI は通常の設定保存と epoch 更新でこの snapshot を渡し、同時変更を上書きしない。
+不一致なら変更前に `configuration_conflict` を返す。省略した既存クライアントの保存動作は維持する。
+初めて作るプロファイルは、`MeetingConfig` の既定値を比較基準としてから新しい設定を適用する。
+
+`regenerate` と `auto_regenerate=true` の `register_context` は、API 音声認識でも設定全体の `expected_config` が必要。
+録画・取り込みの自動処理は受理時の設定 snapshot を実行開始時に照合する。
+自動処理とコンテキスト登録には不明区間の再送確認を渡さず、明示的な `regenerate` だけで確認する。
+
+共通 `error.details.reason=transcription_outcome_unknown` は閉じた型として検証する。
+必須項目は `stage=transcribe`、`reason`、`outcome_unknown=true`、二つの指紋、`blocked_epoch`、
+`track`（mic / system）、全体計画の 0 始まり `chunk_index`、`chunk_count`、`completed_chunks`、
+track 相対の半開区間 `start_sample / end_sample`、`sample_rate=16000`。
+`provider / model_id / connection_id / connection_revision` は任意の安全な識別情報として返せる。
+上流のエラー本文・音声・認証情報・パスは含めない。一般エラーの details は従来互換を保つ。
+ジョブが失われても台帳を維持し、通常の再開では送信せず同じ確認情報を復元する。
 
 プロバイダ操作は認証済み常駐サーバーを使い、平文 HTTP や in-process へ降格しない。
 `secure_transport` は要件の説明であり、証明書 pin や client token の信頼元ではない。
@@ -186,6 +265,8 @@ semver。`get_server_info` が返す `contract_version` でクライアントが
 v3 では旧クライアントが受け付けない provider / auth enum 値と、認可 URL の文字列応答を追加したため major を上げる。
 v4 は OpenAI API の provider 値、議事録の選択対象・パラメータ、必須の対応 provider 一覧を追加する。
 旧 v3 Swift 型は Codex 以外の議事録選択を拒否するため major を上げ、v3 の保存済み Codex 設定と省略時の動作は維持する。
+v5 は音声認識の選択・対応 provider 一覧・OpenAI roles・型付き再試行情報を追加する。
+旧クライアントの閉じた型と整合しないため major を上げるが、既存の選択省略・ローカル処理は維持する。
 
 手順: `contracts/` を編集 → `manifest.json` の `contract_version` を更新 → `uv run pytest pipeline/tests/contracts` → 実装 → サーバーテスト。エラーコードを増やすときは `defs/common.json#/$defs/error_code` と `narumi.errors.ErrorCode` を同時に更新する（テストが一致を検査する）。
 

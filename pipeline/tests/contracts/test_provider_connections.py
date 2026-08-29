@@ -173,7 +173,9 @@ def test_openai_public_connection_and_runtime_metadata(contracts: ContractSet) -
         contracts.validate_output("set_provider_connection", {"connection": connection})
 
     descriptor = deepcopy(contracts["list_providers"].output_examples[0]["providers"][0])
-    descriptor.update(provider_id="openai-api", auth_methods=["api_key"])
+    descriptor.update(
+        provider_id="openai-api", auth_methods=["api_key"], roles=["llm", "transcription"]
+    )
     contracts.validate_output("list_providers", {"providers": [descriptor]})
     descriptor["auth_methods"] = ["chatgpt"]
     with pytest.raises(ContractMismatchError):

@@ -134,7 +134,15 @@
       "properties": {
         "code": { "$ref": "#/$defs/error_code" },
         "message": { "type": "string" },
-        "details": { "type": "object", "additionalProperties": true }
+        "details": {
+          "type": "object",
+          "additionalProperties": true,
+          "if": {
+            "required": ["reason"],
+            "properties": { "reason": { "const": "transcription_outcome_unknown" } }
+          },
+          "then": { "$ref": "#/$defs/transcription_outcome_unknown_details" }
+        }
       },
       "additionalProperties": false
     },
@@ -149,15 +157,25 @@
       "type": "object",
       "properties": {
         "transcription_engine": { "type": "string", "description": "Registry name: auto | fake | mlx-whisper | faster-whisper" },
+        "transcription_model": { "$ref": "#/$defs/transcription_model" },
         "diarization_engine": { "type": "string", "description": "Registry name: none | fake | pyannote" },
         "llm_provider": { "type": "string", "description": "Registry name: none | fake | claude-agent-sdk | anthropic-api | ollama" },
         "minutes_model": { "$ref": "#/$defs/minutes_model" },
         "external_send_policy": { "$ref": "#/$defs/external_send_policy" },
-        "language": { "type": "string", "description": "BCP-47-ish language code for transcription, e.g. ja" },
+        "language": { "type": "string", "description": "Shared transcription language. API transcription requires auto or a real lowercase two-letter ISO 639-1 code; auto omits the API field. Local engine behavior is unchanged." },
         "self_name": { "type": ["string", "null"], "description": "Display name for the microphone track speaker (me)." },
         "vocab_hints": { "type": "array", "items": { "type": "string" } }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": ["transcription_model"],
+            "properties": { "transcription_model": { "$ref": "#/$defs/transcription_model_selection" } }
+          },
+          "then": { "properties": { "language": { "$ref": "#/$defs/api_transcription_language" } } }
+        }
+      ]
     },
     "track_status": {
       "type": "object",
