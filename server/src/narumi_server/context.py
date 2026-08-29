@@ -60,11 +60,12 @@ class ServerContext:
     server_instance_id: str = field(default_factory=lambda: str(uuid4()))
     """Opaque lifetime identity; never persisted or reused after a context restart."""
     idempotency: IdempotencyStore = field(init=False, repr=False)
-    locks: MeetingLocks = field(default_factory=MeetingLocks, repr=False)
+    locks: MeetingLocks = field(init=False, repr=False)
     """Per-meeting write locks shared by jobs and tool handlers (see ``narumi_server.locks``)."""
     _closed: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        self.locks = MeetingLocks(self.meetings_root)
         self.idempotency = IdempotencyStore(self.catalog)
         from narumi.providers.service import ProviderService
 

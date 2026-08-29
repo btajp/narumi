@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -12,55 +15,149 @@ from narumi.bundle import Bundle
 from narumi.errors import BusyError
 from narumi.models import MeetingConfig
 from narumi_server.app import dispatch
+from narumi_server.context import build_context
 from narumi_server.handlers import common, importing, processing, recording
 from narumi_server.locks import MeetingLocks
 from test_surface_tools import write_silence_wav
 
+MEETING_A = "20260829T000000Z-000010c1"
+MEETING_B = "20260829T000000Z-000010c2"
 
-def test_hold_is_exclusive_per_meeting_and_reports_the_holder():
-    locks = MeetingLocks()
+
+def test_hold_is_exclusive_per_meeting_and_reports_the_holder(tmp_path: Path):
+    locks = MeetingLocks(tmp_path)
     released = threading.Event()
     entered = threading.Event()
 
     def job() -> None:
-        with locks.hold("m1", purpose="job"):
+        with locks.hold(MEETING_A, purpose="job"):
             entered.set()
             released.wait(5)
 
     worker = threading.Thread(target=job)
     worker.start()
     assert entered.wait(5)
-    assert locks.holder("m1") == "job" and locks.holder("m2") is None
+    assert locks.holder(MEETING_A) == "job" and locks.holder(MEETING_B) is None
     with pytest.raises(BusyError) as excinfo:
-        with locks.hold("m1", purpose="handler", timeout=0.05):
+        with locks.hold(MEETING_A, purpose="handler", timeout=0.05):
             pass
-    assert excinfo.value.details == {"meeting_id": "m1", "holder": "job"}
-    with locks.hold("m2", purpose="handler", timeout=0.05):  # another meeting is independent
-        assert locks.holder("m2") == "handler"
+    assert excinfo.value.details == {"meeting_id": MEETING_A, "holder": "job"}
+    with locks.hold(MEETING_B, purpose="handler", timeout=0.05):  # another meeting is independent
+        assert locks.holder(MEETING_B) == "handler"
     released.set()
     worker.join(5)
-    assert locks.holder("m1") is None
-    with locks.hold("m1", purpose="handler", timeout=0.05):
+    assert locks.holder(MEETING_A) is None
+    with locks.hold(MEETING_A, purpose="handler", timeout=0.05):
         pass
+    with locks.hold(MEETING_A, purpose="outer", timeout=0.05):
+        with locks.hold(MEETING_A, purpose="inner", timeout=0):
+            assert locks.holder(MEETING_A) == "inner"
+        assert locks.holder(MEETING_A) == "outer"
 
 
-def test_hold_waits_for_a_short_holder_and_releases_on_error():
-    locks = MeetingLocks()
+def test_hold_waits_for_a_short_holder_and_releases_on_error(tmp_path: Path):
+    locks = MeetingLocks(tmp_path)
     done = threading.Event()
 
     def short() -> None:
-        with locks.hold("m1", purpose="short"):
+        with locks.hold(MEETING_A, purpose="short"):
             done.wait(0.2)
 
     worker = threading.Thread(target=short)
     worker.start()
-    with locks.hold("m1", purpose="waiter", timeout=5.0):  # waits ≤ 0.2 s instead of failing
+    with locks.hold(MEETING_A, purpose="waiter", timeout=5.0):
         pass
     worker.join(5)
     with pytest.raises(RuntimeError):
-        with locks.hold("m1", purpose="boom"):
+        with locks.hold(MEETING_A, purpose="boom"):
             raise RuntimeError("inside")
-    assert locks.holder("m1") is None  # released although the body raised
+    assert locks.holder(MEETING_A) is None  # released although the body raised
+
+
+def test_separate_contexts_share_fence_other_meeting_runs_and_save_reenters(
+    ctx, home: Path, monkeypatch: pytest.MonkeyPatch
+):
+    bundle = make_recorded_bundle(ctx, meeting_id=MEETING_A)
+    other = build_context(home, transports=["in-memory"], validate_output=True)
+    entered, release = threading.Event(), threading.Event()
+
+    def job() -> None:
+        with ctx.locks.hold(MEETING_A, purpose="job"):
+            fresh = Bundle.find(ctx.meetings_root, MEETING_A)
+            fresh.manifest.meeting_name = "saved under server and manifest locks"
+            fresh.save()  # same-thread manifest-fence re-entry must not deadlock
+            entered.set()
+            assert release.wait(5)
+
+    worker = threading.Thread(target=job)
+    worker.start()
+    try:
+        assert entered.wait(5)
+        with other.locks.hold(MEETING_B, purpose="other_meeting", timeout=0.1):
+            pass
+        monkeypatch.setattr(common, "HANDLER_WAIT_SECONDS", 0.05)
+        rejected = dispatch(
+            other,
+            "set_meeting_config",
+            {
+                "meeting_id": MEETING_A,
+                "self_name": "must wait",
+                "request_id": str(uuid4()),
+            },
+        )
+        assert rejected.is_error and rejected.payload["error"]["code"] == "busy"
+        assert rejected.payload["error"]["details"] == {
+            "meeting_id": MEETING_A,
+            "holder": None,
+        }
+    finally:
+        release.set()
+        worker.join(5)
+        other.close()
+    assert not worker.is_alive()
+    saved = Bundle.find(ctx.meetings_root, bundle.meeting_id)
+    assert saved.manifest.meeting_name == "saved under server and manifest locks"
+
+
+def test_external_process_manifest_holder_blocks_server_lock(tmp_path: Path):
+    program = """
+import sys
+from pathlib import Path
+from narumi.bundle import manifest_writer_lock
+with manifest_writer_lock(Path(sys.argv[1]), sys.argv[2]):
+    print("ready", flush=True)
+    sys.stdin.readline()
+"""
+    child = subprocess.Popen(
+        [sys.executable, "-c", program, str(tmp_path), MEETING_A],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert child.stdout is not None and child.stdout.readline().strip() == "ready"
+    job_entered = threading.Event()
+
+    def wait_as_job() -> None:
+        with MeetingLocks(tmp_path).hold(MEETING_A, purpose="job"):
+            job_entered.set()
+
+    waiter = threading.Thread(target=wait_as_job)
+    waiter.start()
+    try:
+        assert not job_entered.wait(0.1)
+        with pytest.raises(BusyError) as excinfo:
+            with MeetingLocks(tmp_path).hold(MEETING_A, purpose="handler", timeout=0.05):
+                pass
+        assert excinfo.value.details == {"meeting_id": MEETING_A, "holder": None}
+    finally:
+        assert child.stdin is not None
+        child.stdin.write("release\n")
+        child.stdin.flush()
+        _, stderr = child.communicate(timeout=5)
+        waiter.join(5)
+    assert child.returncode == 0, stderr
+    assert job_entered.is_set() and not waiter.is_alive()
 
 
 @pytest.mark.parametrize("change", ["scope", "queued_job"])

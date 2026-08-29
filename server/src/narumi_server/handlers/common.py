@@ -90,11 +90,12 @@ def locked_bundle(
     purpose: str,
     allow_recording: bool = False,
 ) -> Iterator[Bundle]:
-    """Open a meeting for a manifest write: ``not_found`` → ``scope_denied`` → ``busy`` → lock.
+    """Open a meeting for a manifest write: precheck, lock, then authorize a fresh read.
 
-    Yields a *fresh* :class:`Bundle` read under the meeting's write lock, so the read → modify →
-    ``save()`` inside the block can neither revert nor be reverted by a job or another handler.
-    A job that owns the lock makes this ``busy`` after a short wait.
+    The lock combines the server-local mutex and process-shared manifest fence. Yields a *fresh*
+    :class:`Bundle` read after both are held, so the read → modify → ``save()`` inside the block
+    can neither revert nor be reverted by another context or process. A holder makes this
+    ``busy`` after one cumulative handler deadline.
     """
     bundle = find_bundle(ctx, meeting_id)
     check_scope(ctx, bundle, scope)
