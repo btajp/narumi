@@ -255,16 +255,116 @@
           "maxLength": 500
         },
         "reason": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "minLength": 1,
-          "maxLength": 128
+          "type": "string",
+          "enum": [
+            "minutes_outcome_unknown",
+            "provider_generation_failed",
+            "provider_generation_cancelled",
+            "invalid_structure",
+            "invalid_evidence",
+            "non_reducing",
+            "minutes_storage_corrupt",
+            "minutes_storage_unavailable",
+            "minutes_retry_conflict",
+            "minutes_attempt_limit_exceeded",
+            "minutes_retry_limit_exceeded",
+            "minutes_generation_limit"
+          ]
         }
       },
+      "allOf": [
+        {
+          "if": { "properties": { "reason": { "const": "minutes_outcome_unknown" } } },
+          "then": {
+            "properties": {
+              "code": { "const": "engine_unavailable" },
+              "message": { "const": "Minutes generation outcome is unknown; explicit call confirmation is required." }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "reason": { "const": "provider_generation_failed" } } },
+          "then": {
+            "properties": {
+              "message": { "const": "The selected provider did not complete this call." }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "reason": { "const": "provider_generation_cancelled" } } },
+          "then": {
+            "properties": {
+              "code": { "const": "cancelled" },
+              "message": { "const": "The selected provider did not complete this call." }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "reason": { "enum": ["invalid_structure", "invalid_evidence", "non_reducing"] } } },
+          "then": {
+            "properties": {
+              "code": { "const": "engine_unavailable" },
+              "message": { "const": "The provider response did not pass ensemble validation." }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "reason": { "const": "minutes_storage_corrupt" } } },
+          "then": {
+            "properties": {
+              "code": { "const": "engine_unavailable" },
+              "message": { "const": "The minutes generation history could not be verified." }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "reason": { "const": "minutes_storage_unavailable" } } },
+          "then": {
+            "properties": {
+              "code": { "const": "engine_unavailable" },
+              "message": { "const": "The minutes generation history could not be saved." }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "reason": { "const": "minutes_retry_conflict" } } },
+          "then": {
+            "properties": {
+              "code": { "const": "configuration_conflict" },
+              "message": { "const": "The saved minutes execution no longer matches this request." }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "reason": { "const": "minutes_attempt_limit_exceeded" } } },
+          "then": {
+            "properties": {
+              "code": { "const": "configuration_conflict" },
+              "message": { "const": "The minutes generation run reached its attempt limit." }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "reason": { "const": "minutes_retry_limit_exceeded" } } },
+          "then": {
+            "properties": {
+              "code": { "const": "configuration_conflict" },
+              "message": { "const": "The confirmed retry chain reached its attempt limit." }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "reason": { "const": "minutes_generation_limit" } } },
+          "then": {
+            "properties": {
+              "code": { "const": "engine_unavailable" },
+              "message": { "const": "The ensemble execution cannot complete within its validated bounds." }
+            }
+          }
+        }
+      ],
       "additionalProperties": false,
-      "description": "Closed error assembled from trusted local code and bounded public messages. Never include upstream bodies, arbitrary provider diagnostics, secrets, raw requests or paths."
+      "description": "Closed error assembled only from the enumerated local reason and its exact code/message mapping. provider_generation_failed may preserve any public contract error code while still replacing the upstream message. Never include upstream bodies, arbitrary provider diagnostics, secrets, raw requests or paths."
     },
     "minutes_outcome_unknown_details": {
       "type": "object",

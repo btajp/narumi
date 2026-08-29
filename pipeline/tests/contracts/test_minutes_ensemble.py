@@ -753,3 +753,32 @@ def test_processing_runtime_lineage_invariants_are_normative(contracts: Contract
 
     artifact_description = contracts.schema_for_def("processing_artifact_header")["description"]
     assert "origin must equal retry_lineage.resolved_by" in artifact_description
+
+
+def test_processing_safe_errors_use_closed_local_reason_mappings(
+    contracts: ContractSet,
+) -> None:
+    output = deepcopy(contracts["get_processing_run"].output_examples[0])
+    error = output["run"]["nodes"][1]["error"]
+    assert error["reason"] == "minutes_outcome_unknown"
+    contracts.validate_output("get_processing_run", output)
+
+    invalid_values = (
+        ("reason", None),
+        ("reason", "upstream_timeout"),
+        ("message", "Provider response at /Users/alice/private.json"),
+        ("code", "cancelled"),
+    )
+    for field, value in invalid_values:
+        invalid = deepcopy(output)
+        invalid["run"]["nodes"][1]["error"][field] = value
+        with pytest.raises(ContractMismatchError):
+            contracts.validate_output("get_processing_run", invalid)
+
+    provider_failure = deepcopy(output)
+    provider_failure["run"]["nodes"][1]["error"] = {
+        "code": "model_unavailable",
+        "message": "The selected provider did not complete this call.",
+        "reason": "provider_generation_failed",
+    }
+    contracts.validate_output("get_processing_run", provider_failure)
