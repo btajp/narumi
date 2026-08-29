@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import math
+import re
 
 import pytest
-from narumi.generate.ensemble.canonical import canonical_bytes, canonical_float
+from narumi.generate.ensemble.canonical import canonical_bytes, canonical_float, canonical_json
 from narumi.generate.ensemble.source import (
     ChunkingPolicy,
     EnsembleSourceError,
@@ -13,6 +14,7 @@ from narumi.generate.ensemble.source import (
     evidence_view,
     snapshot_source,
 )
+from narumi.generate.ensemble.types import SourceBinding
 from narumi.models import MergedSegment, MergedTranscript
 from pydantic import ValidationError
 
@@ -76,8 +78,10 @@ def test_identical_occurrences_are_distinct_and_reordering_does_not_change_model
         (1, 2),
     ]
     assert [item.view() for item in before.evidence] == [item.view() for item in after.evidence]
-    assert sorted(item.source_binding.segment_id for item in before.evidence) == ["first", "second"]
-    assert sorted(item.source_binding.segment_id for item in after.evidence) == ["first", "second"]
+    before_ids = {item.source_binding.segment_id for item in before.evidence}
+    after_ids = {item.source_binding.segment_id for item in after.evidence}
+    assert before_ids == after_ids
+    assert all(re.fullmatch(r"segment-[0-9a-f]{64}", value) for value in before_ids)
 
 
 def test_duplicate_occurrences_bind_in_canonical_json_order_not_length_prefix_order():
@@ -90,7 +94,60 @@ def test_duplicate_occurrences_bind_in_canonical_json_order_not_length_prefix_or
     )
 
     assert [item.occurrence_index for item in snapshot.evidence] == [0, 1]
-    assert [item.source_binding.segment_id for item in snapshot.evidence] == ["aa", "z"]
+    bindings = [canonical_json(item.source_binding) for item in snapshot.evidence]
+    assert bindings == sorted(bindings, key=lambda value: value.encode("utf-8"))
+
+
+def test_private_source_identifiers_are_replaced_by_stable_opaque_public_labels():
+    segment_path = "/Users/example/Library/Application Support/narumi/merged.json"
+    private_source = "../tracks/system-secret.wav"
+    credential_like_source = "api_key_example_value"
+    value = merged(
+        segment(
+            segment_path,
+            0,
+            "公開可能な発言",
+            sources=[private_source, "own-system:42", credential_like_source],
+        )
+    )
+
+    first = snapshot_source(value, "meeting-private-source")
+    repeated = snapshot_source(value, "meeting-private-source")
+    other_meeting = snapshot_source(value, "meeting-private-source-other")
+    binding = first.evidence[0].source_binding
+    serialized = canonical_json(first.evidence[0])
+
+    assert first == repeated
+    assert binding.segment_id.startswith("segment-")
+    assert binding.sources[1] == "own-system"
+    assert binding.sources[0].startswith("source-")
+    assert binding.sources[2].startswith("source-")
+    assert binding.segment_id != other_meeting.evidence[0].source_binding.segment_id
+    for private in (segment_path, private_source, credential_like_source):
+        assert private not in serialized
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("segment_id", "/tmp/private/merged.json"),
+        ("segment_id", "../private/merged.json"),
+        ("segment_id", "api_key_example_value"),
+        ("sources", "/tmp/private/system.wav"),
+        ("sources", "system-secret"),
+    ],
+)
+def test_source_binding_rejects_non_public_paths_and_sensitive_labels(field: str, value: str):
+    payload = {
+        "segment_index": 0,
+        "segment_id": "segment-" + "a" * 64,
+        "segment_text_sha256": "1" * 64,
+        "sources": ["own-system"],
+    }
+    payload[field] = [value] if field == "sources" else value
+
+    with pytest.raises(ValidationError, match="public|sensitive"):
+        SourceBinding.model_validate(payload)
 
 
 def test_front_insertion_and_renumbering_do_not_invalidate_an_unmodified_time_window():

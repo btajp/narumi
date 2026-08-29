@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -29,6 +30,13 @@ SOURCE_WINDOW_SECONDS = 600
 SOURCE_PACKET_CHARS = 3_000
 SOURCE_PACKET_ATOMS = 32
 MAX_SOURCE_PACKETS = 64
+
+_PUBLIC_SOURCE_LABEL = re.compile(
+    r"^(?:merged|mic|system|own-mic|own-system|ext-ctx-[0-9a-f]{8,32})$"
+)
+_PUBLIC_SOURCE_OCCURRENCE = re.compile(
+    r"^(merged|mic|system|own-mic|own-system|ext-ctx-[0-9a-f]{8,32}):[0-9]+$"
+)
 
 
 class EnsembleSourceError(ValueError):
@@ -82,6 +90,32 @@ def _sha_text(text: str) -> str:
         raise EnsembleSourceError("source text contains invalid Unicode") from exc
 
 
+def _opaque_public_label(kind: str, meeting_id: str, value: str) -> str:
+    return f"{kind}-" + sha256_canonical(
+        {
+            "version": "ensemble-public-source-label-v1",
+            "kind": kind,
+            "meeting_id": meeting_id,
+            "value": value,
+        }
+    )
+
+
+def _public_segment_id(meeting_id: str, value: str) -> str:
+    if re.fullmatch(r"segment-[0-9a-f]{64}", value):
+        return value
+    return _opaque_public_label("segment", meeting_id, value)
+
+
+def _public_source_label(meeting_id: str, value: str) -> str:
+    if re.fullmatch(r"source-[0-9a-f]{64}", value) or _PUBLIC_SOURCE_LABEL.fullmatch(value):
+        return value
+    occurrence = _PUBLIC_SOURCE_OCCURRENCE.fullmatch(value)
+    if occurrence is not None:
+        return occurrence.group(1)
+    return _opaque_public_label("source", meeting_id, value)
+
+
 def _validate_segment(segment: MergedSegment, index: int) -> tuple[float, float]:
     start = float(segment.start)
     end = float(segment.end)
@@ -120,7 +154,7 @@ def _validate_segment(segment: MergedSegment, index: int) -> tuple[float, float]
 
 
 def _atoms(
-    segments: Sequence[MergedSegment], atom_chars: int
+    segments: Sequence[MergedSegment], atom_chars: int, meeting_id: str
 ) -> tuple[list[_Atom], tuple[str, ...]]:
     result: list[_Atom] = []
     texts: list[str] = []
@@ -130,9 +164,9 @@ def _atoms(
         texts.append(segment.text)
         binding = SourceBinding(
             segment_index=index,
-            segment_id=segment.id,
+            segment_id=_public_segment_id(meeting_id, segment.id),
             segment_text_sha256=text_hash,
-            sources=list(segment.sources),
+            sources=[_public_source_label(meeting_id, source) for source in segment.sources],
         )
         for char_start in range(0, len(segment.text), atom_chars):
             char_end = min(len(segment.text), char_start + atom_chars)
@@ -180,7 +214,7 @@ def snapshot_source(
         raise EnsembleSourceError("meeting_id contains invalid Unicode") from exc
     selected = policy or ChunkingPolicy()
     segments = merged.segments if isinstance(merged, MergedTranscript) else list(merged)
-    atoms, texts = _atoms(segments, selected.atom_chars)
+    atoms, texts = _atoms(segments, selected.atom_chars, meeting_id)
     if not atoms:
         raise EnsembleSourceError("source contains no referenceable text")
 

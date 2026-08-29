@@ -42,6 +42,12 @@ Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 NonBlank600 = Annotated[str, StringConstraints(min_length=1, max_length=600, pattern=r"\S")]
 NonBlank120 = Annotated[str, StringConstraints(min_length=1, max_length=120, pattern=r"\S")]
 
+_OPAQUE_SEGMENT_ID = re.compile(r"^segment-[0-9a-f]{64}$")
+_LEGACY_PUBLIC_SEGMENT_ID = re.compile(r"^(?:m-[0-9]+|merged-segment-[0-9]+)$")
+_PUBLIC_SOURCE_LABEL = re.compile(
+    r"^(?:merged|mic|system|own-mic|own-system|ext-ctx-[0-9a-f]{8,32}|source-[0-9a-f]{64})$"
+)
+
 
 class ClosedModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, populate_by_name=True, frozen=True)
@@ -54,6 +60,22 @@ class SourceBinding(ClosedModel):
     sources: FrozenTuple[Annotated[str, StringConstraints(min_length=1, max_length=512)]] = Field(
         min_length=0, max_length=256
     )
+
+    @field_validator("segment_id")
+    @classmethod
+    def _public_segment_id(cls, value: str) -> str:
+        if _OPAQUE_SEGMENT_ID.fullmatch(value):
+            return value
+        if not _LEGACY_PUBLIC_SEGMENT_ID.fullmatch(value):
+            raise ValueError("segment_id must be an opaque ID or a closed legacy public ID")
+        return value
+
+    @field_validator("sources")
+    @classmethod
+    def _public_source_labels(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(_PUBLIC_SOURCE_LABEL.fullmatch(item) is None for item in value):
+            raise ValueError("sources must contain only closed public source labels")
+        return value
 
 
 class EvidenceView(ClosedModel):
