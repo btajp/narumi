@@ -18,6 +18,7 @@ from uuid import uuid4
 
 import pytest
 from click.testing import CliRunner
+from narumi.contracts import load_contracts
 from narumi.errors import InvalidArgumentError
 from narumi_server import cli_tools
 from narumi_server.cli_transport import ConfidentialHttpTransport, confidential_endpoint
@@ -31,6 +32,7 @@ from narumi_server.secure_transport import (
 
 SECRET = "fake-cli-tls-key-6380"
 GAIA_URL = "http://127.0.0.1:4111/mcp"
+CONTRACT_VERSION = load_contracts().contract_version
 PROXY_VARIABLES = (
     "HTTP_PROXY",
     "http_proxy",
@@ -75,7 +77,7 @@ class Endpoint:
     failure_status: int = 403
     rpc_error_label: str | None = None
     delay_label: str | None = None
-    contract_version: str = "5.0.0"
+    contract_version: str = CONTRACT_VERSION
     protocol_version: str = cli_tools.PROTOCOL_VERSION
     reported_instance: str | None = None
 
@@ -325,7 +327,8 @@ def test_authentication_failures_do_not_fallback_or_resend(
 
 
 @pytest.mark.parametrize(
-    "version", ["1.1.0", "2.0.0", "3.0.0", "4.0.0", "6.0.0", "invalid", SECRET]
+    "version",
+    ["1.1.0", "2.0.0", "3.0.0", "4.0.0", "5.0.0", "7.0.0", "invalid", SECRET],
 )
 def test_contract_major_is_checked_before_sending_new_arguments(
     endpoint_factory, monkeypatch, version
@@ -426,7 +429,7 @@ def test_reinitialization_keeps_the_same_authenticated_transport(endpoint_factor
     client = cli_tools.McpHttpClient(endpoint.client)
     try:
         for _ in range(2):
-            client.probe()
+            client.probe(CONTRACT_VERSION)
             client.call_tool("set_gaia_connection", {"url": GAIA_URL, "api_key": SECRET})
     finally:
         client.close()

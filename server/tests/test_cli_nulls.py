@@ -74,7 +74,13 @@ def test_real_contracts_get_clear_flags_only_for_nullable_top_level_properties()
     expected = {
         "set_gaia_connection": {"url", "api_key"},
         "set_profile": {"scope", "engagement"},
-        "set_meeting_config": {"self_name", "new_scope", "minutes_model", "transcription_model"},
+        "set_meeting_config": {
+            "self_name",
+            "new_scope",
+            "minutes_model",
+            "minutes_ensemble",
+            "transcription_model",
+        },
         "set_provider_connection": {"api_key"},
         "list_provider_models": {"cursor"},
     }
