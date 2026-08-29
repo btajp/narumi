@@ -13,6 +13,8 @@
 
 実行確認では、全担当の接続・モデル・送信先・費用区分を表示する。
 API担当を含む場合はapi_okが必要で、許可を自動変更しない。
+アプリは外部送信担当を含む録画・取込をまずauto_process=falseで確定し、停止や取込を遅らせず、その後full configの明示確認から公開regenerateを呼ぶ。
+全担当がlocal_onlyの場合だけ既存の自動処理を維持する。APIのauto_process=trueは明示操作として残し、同じpolicy・CAS・全選択検証を適用する。
 既存のASR確認と併用し、音声認識と議事録の送信許可を混同しない。
 作成中・成功・失敗・取消・結果不明を担当別に表示し、成功した案は完成版がなくても閲覧する。
 完成版のエクスポートは、すべての必要な生成・統合・検証に成功した版だけを対象にする。
@@ -108,6 +110,7 @@ run/node/callは現在の確認対象を表し、元の送信先・run・nodeは
 他の不明callや古いattemptの確認には流用しない。
 確認再送の来歴は、元の不明attempt、最大64件のretry ancestry、成功時の解消attemptを閉じた公開型で保持する。
 元のattemptは不明のまま書き換えず、実際に採用した成果の実行元と現在runへの採用を分けて表示する。
+同一内容の不明結果に対する確認再送も生涯64attemptまでとし、超過時は確認を消費せず外部送信前に停止する。
 対象の再送成功後は同じ確認済みrunの未実行依存処理と統合を継続する。
 別の不明callは再送せず、別枝の既知失敗もこの確認だけで追加再試行しない。
 minutes_retryはASRより前に、現在の上流入力と対象runの入力条件を外部送信なしで照合する。
@@ -136,7 +139,7 @@ minutes_retryはASRより前に、現在の上流入力と対象runの入力条�
 会議IDとscopeに加え、不透明なrun/artifact IDで検索する。任意ファイルパスを入力として受け付けない。
 artifact取得は指定runに所属または再利用された成果に限定する。
 get_minutesはrequired nullableな型付き来歴を返し、旧版はnull、複数案の版は当時のrun・担当・成果IDへ辿れるようにする。
-get_job_statusの成功結果もrequired nullableなrun参照とし、複数案以外はnullにする。型付き不明call情報を返すが、揮発jobをdurable runと混同しない。
+get_job_statusは全状態でrequired nullableなrun参照を返し、run永続化前と複数案以外はnullにする。成功結果にも同じnullable参照を持たせ、nonnullなら一致させる。型付き不明call情報を返すが、揮発jobをdurable runと混同しない。
 製品CLIにも同じ設定・読み取り・確認付き再試行を契約から公開する。
 
 Swiftでは生成担当カード2〜4件と統合担当カードを、安定した担当IDで管理する。
