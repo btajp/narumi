@@ -1,5 +1,9 @@
 # contracts/ — narumi MCP ツール契約
 
+**v6 正式契約。**
+設定・更新入口・上限通知、実行履歴・成果物・公開版来歴の JSON I/F を定義する。
+Schema、例、最小設定型の契約ゲートを通した後に、server・CLI・Swift の実装と統合検証を行う。
+
 契約が正本。ツールの追加・変更は **契約 → テスト → 実装** の順で行う（AGENTS.md）。
 サーバー（`narumi_server`）は起動時にここを読み込み、`tools/list` の内容と `tools/call` の入出力検証をこのファイル群から組み立てる。
 
@@ -13,20 +17,26 @@ contracts/
 ├── defs/provider_connections.json # 接続・認証操作
 ├── defs/provider_models.json      # モデル・能力・料金・議事録モデル選択
 ├── defs/transcription_models.json # API 音声認識の選択・再試行・結果不明情報
+├── defs/minutes_ensemble.json     # 複数案と統合の設定・確認付き再試行・上限
+├── defs/processing_runs.json      # 実行・node・call・attempt・artifact の不透明ID
+├── defs/processing_provenance.json # current target・実行origin・安全なerror
+├── defs/processing_run_records.json # run・node・一覧summary
+├── defs/ensemble_documents.json   # evidence・claim・question・成果物本文
+├── defs/processing_artifacts.json # artifact header・生成観測・reuse binding・公開来歴
 └── tools/<name>.json    # 1 ツール 1 ファイル。ファイル名 = "name"
 ```
 
 - `manifest.json` の `tools` はツール名の配列。`tools/<name>.json` と **過不足なく一致** させる（一致しなければローダーが起動時に `contract_mismatch` を投げる）
 - `manifest.json` の `defs` は共通定義ファイルの相対パス配列。定義名は全ファイルを通して一意
 
-## v5 ツール一覧（37）
+## v6 ツール一覧（40）
 
-契約 5.0.0 は、既存の 4 系統の議事録モデル選択に OpenAI API 音声認識を追加する。
+契約 6.0.0 は、既存の単独議事録生成と API 音声認識を維持し、複数案の生成・統合と実行履歴の読み取りを追加する。
 既存の `llm_provider` は維持し、文字起こし・発話統合・画像処理へ選択を暗黙に適用しない。
 `get_server_info.capabilities.minutes_model_providers` は議事録生成を実装した adapter の一覧。
 この一覧とは別に、接続の認証・準備状態と各モデルの能力を確認する。
 `transcription_model_providers` は API 音声認識の対応経路で、常駐 HTTP サーバーは `["openai-api"]`、それ以外は `[]` を返す。
-全工程のモデル選択、複数生成・統合、Claude Agent SDK による明示的な議事録モデル選択、既知話者の参照音声送信は今回の対象外。
+全工程のモデル選択、並列実行、画像送信、Claude Agent SDK による明示的な議事録モデル選択、既知話者の参照音声送信は今回の対象外。
 
 | 分類 | ツール |
 |---|---|
@@ -34,6 +44,7 @@ contracts/
 | 録画権限 | `configure_recording_permission`（許可要求 / 設定を開く。録画しない） |
 | 録画 | `start_recording` / `stop_recording` / `get_recording_status` / `import_recording` |
 | 会議の閲覧 | `list_meetings`（`active_job` 付き）/ `search_transcripts` / `get_meeting` / `get_transcript` / `get_minutes` |
+| 複数案の実行履歴 | `list_processing_runs` / `get_processing_run` / `get_processing_artifact` |
 | 会議の変更 | `register_context` / `regenerate` / `set_meeting_config` / `discard_tracks` / `delete_meeting` |
 | エクスポート | `export_minutes` / `list_export_destinations` |
 | ジョブ | `get_job_status` / `cancel_job` |
@@ -110,8 +121,8 @@ API 送信は `api_ok`、Codex 送信は `subscription_ok` または `api_ok` �
 同じ入力と選択では既存の議事録を再利用する。選択や `cache_epoch` だけを変更した場合は、
 文字起こしや発話統合をやり直さず議事録生成だけを更新する。
 
-`regenerate.force=true` は `minutes_model` と `transcription_model` が両方 null の従来処理だけで使う。
-どちらかのモデルを明示選択した会議では `invalid_argument` で拒否する。
+`regenerate.force=true` は `minutes_model`・`minutes_ensemble`・`transcription_model` がすべて null の従来処理だけで使う。
+どれかのモデルを明示選択した会議では `invalid_argument` で拒否する。
 同じ内容で明示的に新しい生成試行を始める場合は、実行と送信先をユーザーが確認した後、
 `set_meeting_config` で `minutes_model.cache_epoch` を明示的に増やして保存する。
 その保存結果を `expected_config` に渡し、新しい `request_id` と `force=false` で `regenerate` を呼ぶ。
@@ -122,6 +133,153 @@ API 送信は `api_ok`、Codex 送信は `subscription_ok` または `api_ok` �
 送信確認時に取得した設定全体を `expected_config` として渡す。
 サーバーは会議のロック内で現設定と照合し、確認後に変更されていれば `configuration_conflict` で拒否する。
 旧来の生成と、生成しないコンテキスト登録では省略できる。指定した場合はどちらでも照合する。
+
+### 複数案の生成と統合
+
+`meeting_config.minutes_ensemble` は nullable な全置換の設定。
+生成担当を2〜4件、統合担当を1件指定し、どちらも既存の `minutes_model_selection` を使う。
+
+```json
+{
+  "generators": [
+    {
+      "id": "gen-11111111111111111111111111111111",
+      "label": "第一案",
+      "selection": {
+        "provider": "openai-api",
+        "connection_id": "conn-111122223333",
+        "connection_revision": 1,
+        "model_id": "fixture-openai-api-text-model",
+        "parameters": {"max_tokens": 4096},
+        "cache_epoch": 0
+      }
+    },
+    {
+      "id": "gen-22222222222222222222222222222222",
+      "label": "第二案",
+      "selection": {
+        "provider": "anthropic-api",
+        "connection_id": "conn-444455556666",
+        "connection_revision": 1,
+        "model_id": "fixture-anthropic-api-text-model",
+        "parameters": {"max_tokens": 4096},
+        "cache_epoch": 0
+      }
+    }
+  ],
+  "synthesizer": {
+    "provider": "codex-app-server",
+    "connection_id": "conn-fedcba987654",
+    "connection_revision": 1,
+    "model_id": "fixture-text-model",
+    "parameters": {"reasoning_effort": "high"},
+    "cache_epoch": 0
+  }
+}
+```
+
+IDは表示名・配列順と分離し、生成担当間で一意にする。
+JSON Schemaは同一オブジェクトの重複を拒否し、型と実装は同じIDでlabelやselectionだけが異なる場合も拒否する。
+labelは空白のみを拒否して最大80文字。generator ID、label、表示順はsemantic run/request identityから除外し、
+変更だけなら同じrunと成果を採用してprovider送信を0件にする。
+semantic identityはprovider・connection ID・model・実効content条件（connection revisionは除外）とcache_epochのmultiset、
+同一scopeのdeterministic duplicate ordinal、synthesizerのcontent scopeで作る。現在のrevisionと認可は別に再検証する。
+synthesizerへ渡すdraftは`(content_projection_sha256, deterministic_duplicate_ordinal)`順で固定し、
+opaque generator ID、label、UI順序をpromptや並びの根拠にしない。
+同じプロバイダ・接続の別モデルを使用でき、統合担当が生成担当と同じモデルでもよい。
+同じ成果を共有した場合は、独立した二回の生成と表示しない。
+
+省略は保持、nullは解除、objectは全置換。`minutes_model` との同時指定は更新後の全設定で拒否する。
+モードの切替では以前の選択を明示的にnullにする。両方nullなら既存 `llm_provider` の経路を維持する。
+会議・プロファイル・録画開始・取り込み・全設定CASと実行時の `expected_config` は同じ共通定義を使う。
+保存だけでは生成しない。全担当・統合担当・ASRを一度のprovider transactionで検証し、各外部callと公開直前にも再検証する。
+API担当を含む場合は `api_ok` を必要とし、許可を自動変更しない。
+
+`capabilities.minutes_ensemble_limits` は上限通知だけで、実行可能性を保証しない。
+`workflow.ensemble_generation` と各providerの能力・現在の認可を別に確認する。
+通知する上限は `max_generators=4`、`max_concurrency=1`、`max_generation_attempts_per_run=64`、
+`input_modalities=["text"]`、`max_reduction_depth=6`。
+試行数は一runの再開・確認済み再送を累積し、成功再利用は新規試行に数えない。
+この上限はSDK内部の全HTTP通信回数や会議全履歴の金額上限を示すものではない。
+
+### 結果不明の議事録callを再試行する
+
+`regenerate.minutes_retry` は `{run_id, node_id, call_id, blocked_attempt_id}` の閉じた確認オブジェクト。
+run / node / call は現在確認している対象を指し、元の実行の出自はblocked attemptから復元して別表示する。
+現在の全 `expected_config` と非nullの `minutes_ensemble` が必須。
+`transcription_retry` との同時指定と `force=true` は拒否する。
+
+現在の対象・設定・直近の不明receiptを送信前に照合し、新pendingの保存とともに一度だけ確認を消費する。
+他の不明callや古いattemptの確認に流用しない。
+epoch・新run・担当ID・接続IDの変更や、設定の解除・復元だけではunknownを解除しない。
+同じrequest IDの復旧は同じ要求本文に限り、受付が不明なときは自動再送しない。
+自動処理・コンテキスト登録にはminutes_retryを渡さない。
+
+### 実行・成果物の読み取り
+
+識別子は小文字hexの不透明IDで、`gen-`と`run-`は32桁、`slot-`、`node-`と`call-`は64桁、
+`attempt-`と`artifact-`は32桁。内容のfingerprintとは別に扱う。
+読み取りは会議IDとscopeを必ず照合し、任意のファイルパスを入力に取らない。
+
+`list_processing_runs` はlimit既定20・1〜100、任意のURL-safe cursorは1〜256文字。
+入力のcursorは省略できるがnullにはせず、応答のnext_cursorはnullableとする。
+created_atの降順とrun_idで安定した順序を保ち、すべてのページで会議とscopeを検証する。
+`get_processing_run` はrun_id、`get_processing_artifact` はrun_idとartifact_idを追加で受け取る。
+成果物はそのrunに所属または再利用されたものに限る。単独生成・ASRに架空のrunを補わない。
+
+一覧は軽量summaryだけを返し、詳細runは固定の設定・送信ポリシー、最大4096 nodes、最大8192 bindings、
+公開版、部分成功、最大64試行、不明callを返す。run状態は
+`prepared / running / blocked / succeeded / failed / cancelled / interrupted`。
+有効な実行leaseがないrunningは、未解決pendingがなければinterrupted、あればblocked/node unknownに復元する。
+揮発jobの消失から完了を推測せず、保存済みreceiptが有効なら再送せず復元する。
+
+成果物kindと本文は閉じた対応にする。
+
+| kind | payload | generation |
+|---|---|---|
+| `source_index` | `ensemble-source-index-v1`（packet ID 0〜64） | null |
+| `source` | `ensemble-source-v1`（evidence 1〜32） | null |
+| `draft_chunk` | `ensemble-document-v1` | 生成観測 |
+| `draft` | `ensemble-draft-v1`（part 1〜64） | null |
+| `synthesis` | `ensemble-document-v1` | 生成観測 |
+
+evidenceは時刻、話者、Unicode codepointの半開文字区間、元segmentのhashを保持する。
+claimは1〜8件のevidence参照を必要とし、action以外のowner/dueはnull、actionはnullまたは空白以外を含む120文字以下とする。
+conflict questionは2〜4案、missing_contextは1〜4案を持ち、各案は1〜8件の参照を必要とする。
+claim・question・alternativeのtextと、nonnullの話者label/nameは空白のみを拒否する。
+有限数・区間順・出現番号・参照解決・ID一意性は保存前に型とserverでも検査する。
+`body_sha256` は公開payload全体の整合hashで、provider requestや下流projectionのhashとは別物。
+
+artifact headerのrun_idは不変の元所有run。応答のrequested_run_idとbinding.run_idが現在の採用runを表す。
+応答top-levelのreusedはrequiredでbinding.reusedと一致させ、UIがnested bindingを推測せず現在の再利用状態を読めるようにする。
+reuse bindingは最大64件の公開dependency mappingと不透明なauthorization snapshot IDだけを返し、
+秘密のsnapshot・prompt・raw request/response・credentialを返さない。
+同じrequestでも応答projectionが変われば`content_projection_sha256`が変わり、古い下流成果を再利用しない。
+
+直接生成した成果物だけが、要求selection、実効parameters、返却model、確認済みtoken usage、送信先、費用区分を持つ。
+usageは6種類の任意counterを1件以上持ち、空のprovider usageはnullへ正規化する。欠損値を0と推測しない。
+派生成果物のgenerationはnull。
+
+runは2〜4件のcanonical slotを持ち、現在のgenerator IDと採用draftをsemantic slotへ対応付ける。
+slotはselection scope hash、cache epoch、duplicate ordinalの順で固定し、ID・label・UI順序だけの変更は同じslotを採用する。
+同じartifactを共有するslotはsynthesizerへ1件だけ渡し、別artifactでも同じprojectionならprojectionとwire duplicate ordinalで正規化する。
+
+結果不明callを確認付きで再試行した場合は、node・外部callのgeneration・公開bindingにrequired nullableなretry lineageを返す。
+lineageは最初のunknown origin、最大64件のattempt/outcome鎖、最後の成功attemptを保持する。
+別接続で成功しても元のunknownを上書きせず、成果物originは実際に成功した再送先を示す。
+未再試行はnull。先頭一致、attempt ID一意、retry ancestry順、末尾成功とresolved_byの一致を型とserverで検査する。
+この64件は同一content unknown barrierの生涯上限で、各runの64試行とは別に数える。
+65件目は確認proofを消費せず、run予算を予約せず、送信0件で拒否し、元のunknown/chainを保持する。
+安全なnode error reasonは`minutes_retry_limit_exceeded`。別contentの再試行枠は消費しない。
+
+`get_minutes.provenance` はrequired nullable。旧版・単独版はnull、統合版だけはprovider=`ensemble`と
+公開時のrun/input/generator/synthesizer artifact snapshotを双方向に一致させる。
+実送信originは成果物から辿る。全status/kindのjobはtop-levelにrequired nullableな`processing_run_id`を返し、
+統合runがpreparedとして永続化された後はrunning・failed・cancelledでもそのIDを維持する。
+作成前、旧処理、export、provider setup等はnullにする。成功jobのresultにも同じrequired nullable fieldを返し、
+top-levelとresultの両方がnonnullなら同じrun IDでなければならない。
+
+この契約ゲートの成功だけで、server・CLI・Swift を含む製品全体の実装完了とは扱わない。
 
 ### API 音声認識のモデル選択
 
@@ -267,6 +425,8 @@ v4 は OpenAI API の provider 値、議事録の選択対象・パラメータ�
 旧 v3 Swift 型は Codex 以外の議事録選択を拒否するため major を上げ、v3 の保存済み Codex 設定と省略時の動作は維持する。
 v5 は音声認識の選択・対応 provider 一覧・OpenAI roles・型付き再試行情報を追加する。
 旧クライアントの閉じた型と整合しないため major を上げるが、既存の選択省略・ローカル処理は維持する。
+v6 はnullableなensemble設定・上限通知・確認付きcall再試行と読み取り3ツールを追加する。
+新しい設定や再試行fieldを旧契約5以下の開発用接続へ送らない。
 
 手順: `contracts/` を編集 → `manifest.json` の `contract_version` を更新 → `uv run pytest pipeline/tests/contracts` → 実装 → サーバーテスト。エラーコードを増やすときは `defs/common.json#/$defs/error_code` と `narumi.errors.ErrorCode` を同時に更新する（テストが一致を検査する）。
 

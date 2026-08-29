@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "narumi:defs/minutes_ensemble.json",
+  "title": "narumi explicit minutes ensemble configuration and retry",
+  "$defs": {
+    "ensemble_generator_id": {
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^gen-[0-9a-f]{32}$",
+      "description": "Stable caller-generated UI/provenance identity for one generator, unique within the current ensemble. It is separate from label and array position and is excluded from semantic run/request identity. Changing only this ID must not create a run or external call."
+    },
+    "ensemble_generator_label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "\\S",
+      "description": "Display-only label. Whitespace-only labels are rejected. Neither this label nor display order is sent in model prompts or used as a reason to generate again."
+    },
+    "minutes_ensemble_generator": {
+      "type": "object",
+      "required": [
+        "id",
+        "label",
+        "selection"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ensemble_generator_id"
+        },
+        "label": {
+          "$ref": "#/$defs/ensemble_generator_label"
+        },
+        "selection": {
+          "$ref": "#/$defs/minutes_model_selection"
+        }
+      },
+      "additionalProperties": false
+    },
+    "minutes_ensemble_selection": {
+      "type": "object",
+      "required": [
+        "generators",
+        "synthesizer"
+      ],
+      "properties": {
+        "generators": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/minutes_ensemble_generator"
+          },
+          "minItems": 2,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "description": "Two to four configured generators. Implementations must also reject duplicate generator IDs even when labels or selections differ; JSON Schema uniqueItems alone does not enforce identity uniqueness. The same provider/connection with different models is allowed."
+        },
+        "synthesizer": {
+          "$ref": "#/$defs/minutes_model_selection",
+          "description": "One explicitly selected text synthesis model. It may share a provider, connection and model with a generator; never infer an independent additional generation from shared/reused output."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Explicit text-only ensemble, mutually exclusive with minutes_model after the full config update is merged. Saving does not generate or send data. All generators, synthesizer and any API transcription selection must pass one transaction's policy/connection/model/runtime validation before execution, and each external call is revalidated. Reuse ModelSelection's closed provider parameters without changing legacy single-generation fingerprint or checkpoint semantics. API participants require explicit api_ok; policy is never promoted automatically. Execution concurrency is fixed at one. Semantic run identity is the multiset of resolver content scopes (provider, connection_id, model and effective content conditions; excluding connection_revision) with cache_epoch and deterministic duplicate ordinals, plus the synthesizer content scope. Generator ID, label and UI order are excluded. Changing only those excluded identities reuses the same run with zero provider sends, while current authorization/revision is still revalidated. Synthesizer inputs are sorted by (draft content_projection_sha256, deterministic_duplicate_ordinal), never opaque generator ID, label or UI order."
+    },
+    "minutes_ensemble": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/minutes_ensemble_selection"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Nullable ensemble override. Omitted updates retain the saved value, null clears it, and an object replaces the whole configuration. A non-null minutes_model and non-null minutes_ensemble cannot coexist, including after partial updates. If both are null, retain the existing llm_provider path."
+    },
+    "minutes_retry": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "node_id",
+        "call_id",
+        "blocked_attempt_id"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/processing_run_id"
+        },
+        "node_id": {
+          "$ref": "#/$defs/processing_node_id"
+        },
+        "call_id": {
+          "$ref": "#/$defs/processing_call_id"
+        },
+        "blocked_attempt_id": {
+          "$ref": "#/$defs/processing_attempt_id"
+        }
+      },
+      "additionalProperties": false,
+      "description": "One explicit retransmission confirmation for the currently inspected minutes-ensemble run/node/call and its latest blocked attempt. The input run/node/call identify the current confirmation target, not the origin run. Recover historical execution origin from the blocked attempt and expose it separately in read/error provenance. Require full expected_config with a non-null minutes_ensemble, force=false, and no transcription_retry. Compare current target membership, config and unknown receipt before sending, then consume this confirmation once when persisting the new pending attempt. Other unknown calls or stale attempt confirmations cannot reuse it. Increasing cache_epoch, creating another run or changing generator/connection identity never clears an unknown barrier. One content-unknown ancestry allows at most 64 lifetime attempts including its origin. Reject attempt 65 before consuming proof, reserving per-run budget or sending; preserve the barrier and expose a safe node error with reason=minutes_retry_limit_exceeded."
+    },
+    "minutes_ensemble_limits": {
+      "type": "object",
+      "required": [
+        "max_generators",
+        "max_concurrency",
+        "max_generation_attempts_per_run",
+        "input_modalities",
+        "max_reduction_depth"
+      ],
+      "properties": {
+        "max_generators": {
+          "const": 4
+        },
+        "max_concurrency": {
+          "const": 1
+        },
+        "max_generation_attempts_per_run": {
+          "const": 64
+        },
+        "input_modalities": {
+          "const": [
+            "text"
+          ]
+        },
+        "max_reduction_depth": {
+          "const": 6
+        }
+      },
+      "additionalProperties": false,
+      "description": "Application limits only. Execution also requires workflow.ensemble_generation and validated participant capabilities/authorization. Limits do not make a disabled transport executable. Attempt count accumulates across resume and confirmed retries in one run, excluding reused successes; it is not an exact HTTP-call count or a monetary ceiling."
+    }
+  }
+}

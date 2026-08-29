@@ -1,0 +1,318 @@
+{
+  "name": "get_processing_artifact",
+  "title": "Get processing artifact",
+  "description": "Read one validated immutable minutes-ensemble artifact using meeting_id, scope, run_id and opaque artifact_id. The requested run must own it or have a recorded public reuse binding; presence elsewhere is insufficient. artifact.run_id is the immutable original owner; requested_run_id/binding.run_id identify current adoption. The top-level reused flag and binding.reused must be identical. binding exposes bounded public dependency mappings, nullable retry lineage and an opaque authorization snapshot ID. A generated artifact keeps the successful retry origin while lineage preserves the first unknown and full confirmed chain, including connection changes. Private snapshots, prompts, credentials, canonical requests, raw provider responses, paths and runtime state are never returned. body_sha256 covers the complete public payload; content_projection_sha256 is the stable downstream projection and differs from request identity. Partial validated drafts are readable before publication. Local read only. On failure return error_envelope (isError=true) with not_found, scope_denied, invalid_argument or internal.",
+  "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "meeting_id": {
+        "$ref": "../defs/common.json#/$defs/meeting_id"
+      },
+      "scope": {
+        "$ref": "../defs/common.json#/$defs/scope"
+      },
+      "run_id": {
+        "$ref": "../defs/processing_runs.json#/$defs/processing_run_id"
+      },
+      "artifact_id": {
+        "$ref": "../defs/processing_runs.json#/$defs/processing_artifact_id"
+      }
+    },
+    "required": [
+      "meeting_id",
+      "run_id",
+      "artifact_id"
+    ],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": [
+      "requested_run_id",
+      "artifact",
+      "payload",
+      "binding",
+      "reused"
+    ],
+    "properties": {
+      "requested_run_id": {
+        "$ref": "../defs/processing_runs.json#/$defs/processing_run_id"
+      },
+      "artifact": {
+        "$ref": "../defs/processing_artifacts.json#/$defs/processing_artifact_header"
+      },
+      "payload": {},
+      "binding": {
+        "$ref": "../defs/processing_artifacts.json#/$defs/processing_artifact_binding"
+      },
+      "reused": {
+        "type": "boolean",
+        "description": "Required current-adoption reuse flag. Server validation requires it to equal binding.reused."
+      }
+    },
+    "additionalProperties": false,
+    "$ref": "../defs/processing_artifacts.json#/$defs/processing_artifact_response"
+  },
+  "examples": {
+    "input": [
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "run_id": "run-33333333333333333333333333333333",
+        "artifact_id": "artifact-88888888888888888888888888888888"
+      },
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "scope": "cloudnative",
+        "run_id": "run-77777777777777777777777777777777",
+        "artifact_id": "artifact-99999999999999999999999999999999"
+      }
+    ],
+    "output": [
+      {
+        "requested_run_id": "run-33333333333333333333333333333333",
+        "artifact": {
+          "artifact_id": "artifact-88888888888888888888888888888888",
+          "run_id": "run-33333333333333333333333333333333",
+          "node_id": "node-5555555555555555555555555555555555555555555555555555555555555555",
+          "kind": "synthesis",
+          "body_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "source_artifact_ids": [
+            "artifact-11111111111111111111111111111111",
+            "artifact-22222222222222222222222222222222"
+          ],
+          "origin": {
+            "run_id": "run-33333333333333333333333333333333",
+            "node_id": "node-5555555555555555555555555555555555555555555555555555555555555555",
+            "call_id": "call-8888888888888888888888888888888888888888888888888888888888888888",
+            "attempt_id": "attempt-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "provider": "openai-api",
+            "connection_id": "conn-111122223333",
+            "connection_revision": 1,
+            "model_id": "fixture-openai-api-text-model"
+          },
+          "generation": {
+            "requested_selection": {
+              "provider": "openai-api",
+              "connection_id": "conn-111122223333",
+              "connection_revision": 1,
+              "model_id": "fixture-openai-api-text-model",
+              "parameters": {
+                "reasoning_effort": "high",
+                "max_tokens": 4096
+              },
+              "cache_epoch": 0
+            },
+            "effective_parameters": {
+              "reasoning_effort": "high",
+              "max_tokens": 4096
+            },
+            "returned_model": "fixture-openai-api-text-model-2026-08-01",
+            "usage": {
+              "input_tokens": 1200,
+              "output_tokens": 180,
+              "total_tokens": 1380,
+              "cached_input_tokens": 400,
+              "reasoning_output_tokens": 32
+            },
+            "data_destination": "openai",
+            "cost_class": "api",
+            "retry_lineage": {
+              "origin_unknown": {
+                "run_id": "run-77777777777777777777777777777777",
+                "node_id": "node-3333333333333333333333333333333333333333333333333333333333333333",
+                "call_id": "call-6666666666666666666666666666666666666666666666666666666666666666",
+                "attempt_id": "attempt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "provider": "anthropic-api",
+                "connection_id": "conn-444455556666",
+                "connection_revision": 1,
+                "model_id": "fixture-anthropic-api-text-model"
+              },
+              "attempt_chain": [
+                {
+                  "attempt": {
+                    "run_id": "run-77777777777777777777777777777777",
+                    "node_id": "node-3333333333333333333333333333333333333333333333333333333333333333",
+                    "call_id": "call-6666666666666666666666666666666666666666666666666666666666666666",
+                    "attempt_id": "attempt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "provider": "anthropic-api",
+                    "connection_id": "conn-444455556666",
+                    "connection_revision": 1,
+                    "model_id": "fixture-anthropic-api-text-model"
+                  },
+                  "outcome": "unknown"
+                },
+                {
+                  "attempt": {
+                    "run_id": "run-33333333333333333333333333333333",
+                    "node_id": "node-5555555555555555555555555555555555555555555555555555555555555555",
+                    "call_id": "call-8888888888888888888888888888888888888888888888888888888888888888",
+                    "attempt_id": "attempt-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "provider": "openai-api",
+                    "connection_id": "conn-111122223333",
+                    "connection_revision": 1,
+                    "model_id": "fixture-openai-api-text-model"
+                  },
+                  "outcome": "succeeded"
+                }
+              ],
+              "resolved_by": {
+                "run_id": "run-33333333333333333333333333333333",
+                "node_id": "node-5555555555555555555555555555555555555555555555555555555555555555",
+                "call_id": "call-8888888888888888888888888888888888888888888888888888888888888888",
+                "attempt_id": "attempt-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "provider": "openai-api",
+                "connection_id": "conn-111122223333",
+                "connection_revision": 1,
+                "model_id": "fixture-openai-api-text-model"
+              }
+            }
+          },
+          "created_at": "2026-08-29T08:02:00Z"
+        },
+        "payload": {
+          "schema_version": "ensemble-document-v1",
+          "claims": [
+            {
+              "id": "cl_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "kind": "decision",
+              "text": "オンボーディング資料を来週までに更新する。",
+              "evidence": [
+                {
+                  "evidence_id": "ev_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                  "char_start": 0,
+                  "char_end": 18
+                }
+              ],
+              "owner": null,
+              "due": null
+            }
+          ],
+          "questions": []
+        },
+        "binding": {
+          "run_id": "run-33333333333333333333333333333333",
+          "artifact_id": "artifact-88888888888888888888888888888888",
+          "reused": false,
+          "dependency_mappings": [
+            {
+              "origin_artifact_id": "artifact-11111111111111111111111111111111",
+              "current_artifact_id": "artifact-11111111111111111111111111111111",
+              "content_projection_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            {
+              "origin_artifact_id": "artifact-22222222222222222222222222222222",
+              "current_artifact_id": "artifact-22222222222222222222222222222222",
+              "content_projection_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            }
+          ],
+          "authorization_snapshot_id": "auth-dddddddddddddddddddddddddddddddd",
+          "retry_lineage": {
+            "origin_unknown": {
+              "run_id": "run-77777777777777777777777777777777",
+              "node_id": "node-3333333333333333333333333333333333333333333333333333333333333333",
+              "call_id": "call-6666666666666666666666666666666666666666666666666666666666666666",
+              "attempt_id": "attempt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "provider": "anthropic-api",
+              "connection_id": "conn-444455556666",
+              "connection_revision": 1,
+              "model_id": "fixture-anthropic-api-text-model"
+            },
+            "attempt_chain": [
+              {
+                "attempt": {
+                  "run_id": "run-77777777777777777777777777777777",
+                  "node_id": "node-3333333333333333333333333333333333333333333333333333333333333333",
+                  "call_id": "call-6666666666666666666666666666666666666666666666666666666666666666",
+                  "attempt_id": "attempt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "provider": "anthropic-api",
+                  "connection_id": "conn-444455556666",
+                  "connection_revision": 1,
+                  "model_id": "fixture-anthropic-api-text-model"
+                },
+                "outcome": "unknown"
+              },
+              {
+                "attempt": {
+                  "run_id": "run-33333333333333333333333333333333",
+                  "node_id": "node-5555555555555555555555555555555555555555555555555555555555555555",
+                  "call_id": "call-8888888888888888888888888888888888888888888888888888888888888888",
+                  "attempt_id": "attempt-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "provider": "openai-api",
+                  "connection_id": "conn-111122223333",
+                  "connection_revision": 1,
+                  "model_id": "fixture-openai-api-text-model"
+                },
+                "outcome": "succeeded"
+              }
+            ],
+            "resolved_by": {
+              "run_id": "run-33333333333333333333333333333333",
+              "node_id": "node-5555555555555555555555555555555555555555555555555555555555555555",
+              "call_id": "call-8888888888888888888888888888888888888888888888888888888888888888",
+              "attempt_id": "attempt-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "provider": "openai-api",
+              "connection_id": "conn-111122223333",
+              "connection_revision": 1,
+              "model_id": "fixture-openai-api-text-model"
+            }
+          }
+        },
+        "reused": false
+      },
+      {
+        "requested_run_id": "run-77777777777777777777777777777777",
+        "artifact": {
+          "artifact_id": "artifact-99999999999999999999999999999999",
+          "run_id": "run-33333333333333333333333333333333",
+          "node_id": null,
+          "kind": "source",
+          "body_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "source_artifact_ids": [],
+          "origin": null,
+          "generation": null,
+          "created_at": "2026-08-29T07:55:00Z"
+        },
+        "payload": {
+          "schema_version": "ensemble-source-v1",
+          "evidence": [
+            {
+              "evidence_id": "ev_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "start_seconds": 12.5,
+              "end_seconds": 15.25,
+              "speaker_label": "SPEAKER_01",
+              "speaker_name": "岡村",
+              "char_start": 0,
+              "char_end": 18,
+              "text": "オンボーディング資料を来週までに更新する",
+              "occurrence_index": 0,
+              "occurrence_count": 1,
+              "source_binding": {
+                "segment_index": 3,
+                "segment_id": "merged-segment-0003",
+                "segment_text_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+                "sources": [
+                  "own-system"
+                ]
+              }
+            }
+          ]
+        },
+        "binding": {
+          "run_id": "run-77777777777777777777777777777777",
+          "artifact_id": "artifact-99999999999999999999999999999999",
+          "reused": true,
+          "dependency_mappings": [],
+          "authorization_snapshot_id": "auth-22222222222222222222222222222222",
+          "retry_lineage": null
+        },
+        "reused": true
+      }
+    ]
+  }
+}

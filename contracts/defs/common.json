@@ -5,32 +5,73 @@
   "$defs": {
     "recording_permission": {
       "type": "string",
-      "enum": ["microphone", "screen_recording"],
+      "enum": [
+        "microphone",
+        "screen_recording"
+      ],
       "description": "The local macOS permission to configure. No recording is started."
     },
     "recording_permission_action": {
       "type": "string",
-      "enum": ["request", "open_settings"],
+      "enum": [
+        "request",
+        "open_settings"
+      ],
       "description": "Request OS permission or open its fixed macOS privacy settings pane. Permission is never granted automatically."
     },
     "recording_permission_report": {
       "type": "object",
       "description": "Read-only recorder permission report. Screen recording denied also covers never requested. Microphone unknown normally means not requested yet.",
-      "required": ["screen_recording", "microphone"],
+      "required": [
+        "screen_recording",
+        "microphone"
+      ],
       "properties": {
-        "screen_recording": { "type": "string", "enum": ["granted", "denied", "unknown"] },
-        "microphone": { "type": "string", "enum": ["granted", "denied", "unknown"] }
+        "screen_recording": {
+          "type": "string",
+          "enum": [
+            "granted",
+            "denied",
+            "unknown"
+          ]
+        },
+        "microphone": {
+          "type": "string",
+          "enum": [
+            "granted",
+            "denied",
+            "unknown"
+          ]
+        }
       },
       "additionalProperties": false
     },
     "gaia_connection": {
       "type": "object",
       "description": "Public Gaia connection settings. Credentials are write-only and are never returned.",
-      "required": ["url", "has_api_key", "source"],
+      "required": [
+        "url",
+        "has_api_key",
+        "source"
+      ],
       "properties": {
-        "url": { "type": ["string", "null"] },
-        "has_api_key": { "type": "boolean" },
-        "source": { "type": "string", "enum": ["saved", "environment", "unconfigured"] }
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "has_api_key": {
+          "type": "boolean"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "saved",
+            "environment",
+            "unconfigured"
+          ]
+        }
       },
       "additionalProperties": false
     },
@@ -64,8 +105,17 @@
     "scope": {
       "description": "Scope selector. Omitted = only unscoped meetings (default deny). A single name = that scope plus unscoped meetings. An array with 2+ names = explicit cross-scope query (those scopes plus unscoped), which is audit-logged.",
       "oneOf": [
-        { "$ref": "#/$defs/scope_name" },
-        { "type": "array", "items": { "$ref": "#/$defs/scope_name" }, "minItems": 1, "uniqueItems": true }
+        {
+          "$ref": "#/$defs/scope_name"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/scope_name"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        }
       ]
     },
     "timestamp": {
@@ -76,39 +126,160 @@
     "external_send_policy": {
       "type": "string",
       "description": "What may leave the machine. local_only: nothing. subscription_ok: approved subscription authentication routes allowed. api_ok: metered APIs allowed too. The actual authentication route determines billing; Claude Agent SDK API-key use requires api_ok, and unapproved subscription login is unavailable.",
-      "enum": ["local_only", "subscription_ok", "api_ok"]
+      "enum": [
+        "local_only",
+        "subscription_ok",
+        "api_ok"
+      ]
     },
     "job_status": {
       "type": "string",
-      "enum": ["queued", "running", "succeeded", "failed", "cancelled"]
+      "enum": [
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ]
     },
     "job_kind": {
       "type": "string",
-      "enum": ["process", "regenerate", "export", "provider_setup"]
+      "enum": [
+        "process",
+        "regenerate",
+        "export",
+        "provider_setup"
+      ]
     },
     "job": {
       "type": "object",
-      "required": ["job_id", "kind", "status", "created_at", "updated_at"],
+      "required": [
+        "job_id",
+        "kind",
+        "status",
+        "processing_run_id",
+        "created_at",
+        "updated_at"
+      ],
       "properties": {
-        "job_id": { "$ref": "#/$defs/job_id" },
-        "meeting_id": { "$ref": "#/$defs/meeting_id" },
-        "kind": { "$ref": "#/$defs/job_kind" },
-        "status": { "$ref": "#/$defs/job_status" },
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "meeting_id": {
+          "$ref": "#/$defs/meeting_id"
+        },
+        "kind": {
+          "$ref": "#/$defs/job_kind"
+        },
+        "status": {
+          "$ref": "#/$defs/job_status"
+        },
+        "processing_run_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/processing_run_id"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Durable minutes-ensemble run correlated with this job once its run has been prepared and persisted, including running, blocked, failed and cancelled states. Null means no ensemble run is known yet or the job is legacy single-generation, export or provider setup. This field is always present. When both this field and succeeded result.processing_run_id are non-null, server validation requires them to be identical."
+        },
         "progress": {
           "type": "object",
           "description": "Free-form progress info (stage name, fraction).",
           "properties": {
-            "stage": { "type": "string" },
-            "fraction": { "type": "number", "minimum": 0, "maximum": 1 }
+            "stage": {
+              "type": "string"
+            },
+            "fraction": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
           },
           "additionalProperties": true
         },
-        "result": { "type": "object", "additionalProperties": true },
-        "error": { "$ref": "#/$defs/error" },
-        "created_at": { "$ref": "#/$defs/timestamp" },
-        "updated_at": { "$ref": "#/$defs/timestamp" }
+        "result": {
+          "type": "object",
+          "required": [
+            "processing_run_id"
+          ],
+          "properties": {
+            "processing_run_id": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/processing_run_id"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Durable minutes-ensemble run produced by this successful job, or null when the successful operation did not run a minutes ensemble. The field is never omitted from a success result."
+            }
+          },
+          "additionalProperties": true
+        },
+        "error": {
+          "$ref": "#/$defs/error"
+        },
+        "created_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/timestamp"
+        }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "succeeded"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "result"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "status",
+              "kind"
+            ],
+            "properties": {
+              "status": {
+                "const": "succeeded"
+              },
+              "kind": {
+                "enum": [
+                  "export",
+                  "provider_setup"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "properties": {
+                  "processing_run_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "error_code": {
       "type": "string",
@@ -130,18 +301,50 @@
     },
     "error": {
       "type": "object",
-      "required": ["code", "message"],
+      "required": [
+        "code",
+        "message"
+      ],
       "properties": {
-        "code": { "$ref": "#/$defs/error_code" },
-        "message": { "type": "string" },
+        "code": {
+          "$ref": "#/$defs/error_code"
+        },
+        "message": {
+          "type": "string"
+        },
         "details": {
           "type": "object",
           "additionalProperties": true,
           "if": {
-            "required": ["reason"],
-            "properties": { "reason": { "const": "transcription_outcome_unknown" } }
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "const": "transcription_outcome_unknown"
+              }
+            }
           },
-          "then": { "$ref": "#/$defs/transcription_outcome_unknown_details" }
+          "then": {
+            "$ref": "#/$defs/transcription_outcome_unknown_details"
+          },
+          "allOf": [
+            {
+              "if": {
+                "required": [
+                  "reason"
+                ],
+                "properties": {
+                  "reason": {
+                    "const": "minutes_outcome_unknown"
+                  }
+                }
+              },
+              "then": {
+                "$ref": "#/$defs/minutes_outcome_unknown_details"
+              }
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -149,81 +352,231 @@
     "error_envelope": {
       "type": "object",
       "description": "Structured content returned with isError=true.",
-      "required": ["error"],
-      "properties": { "error": { "$ref": "#/$defs/error" } },
+      "required": [
+        "error"
+      ],
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/error"
+        }
+      },
       "additionalProperties": false
     },
     "meeting_config": {
       "type": "object",
       "properties": {
-        "transcription_engine": { "type": "string", "description": "Registry name: auto | fake | mlx-whisper | faster-whisper" },
-        "transcription_model": { "$ref": "#/$defs/transcription_model" },
-        "diarization_engine": { "type": "string", "description": "Registry name: none | fake | pyannote" },
-        "llm_provider": { "type": "string", "description": "Registry name: none | fake | claude-agent-sdk | anthropic-api | ollama" },
-        "minutes_model": { "$ref": "#/$defs/minutes_model" },
-        "external_send_policy": { "$ref": "#/$defs/external_send_policy" },
-        "language": { "type": "string", "description": "Shared transcription language. API transcription requires auto or a real lowercase two-letter ISO 639-1 code; auto omits the API field. Local engine behavior is unchanged." },
-        "self_name": { "type": ["string", "null"], "description": "Display name for the microphone track speaker (me)." },
-        "vocab_hints": { "type": "array", "items": { "type": "string" } }
+        "transcription_engine": {
+          "type": "string",
+          "description": "Registry name: auto | fake | mlx-whisper | faster-whisper"
+        },
+        "transcription_model": {
+          "$ref": "#/$defs/transcription_model"
+        },
+        "diarization_engine": {
+          "type": "string",
+          "description": "Registry name: none | fake | pyannote"
+        },
+        "llm_provider": {
+          "type": "string",
+          "description": "Registry name: none | fake | claude-agent-sdk | anthropic-api | ollama"
+        },
+        "minutes_model": {
+          "$ref": "#/$defs/minutes_model"
+        },
+        "minutes_ensemble": {
+          "$ref": "#/$defs/minutes_ensemble"
+        },
+        "external_send_policy": {
+          "$ref": "#/$defs/external_send_policy"
+        },
+        "language": {
+          "type": "string",
+          "description": "Shared transcription language. API transcription requires auto or a real lowercase two-letter ISO 639-1 code; auto omits the API field. Local engine behavior is unchanged."
+        },
+        "self_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Display name for the microphone track speaker (me)."
+        },
+        "vocab_hints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       },
       "additionalProperties": false,
       "allOf": [
         {
+          "not": {
+            "required": [
+              "minutes_model",
+              "minutes_ensemble"
+            ],
+            "properties": {
+              "minutes_model": {
+                "$ref": "#/$defs/minutes_model_selection"
+              },
+              "minutes_ensemble": {
+                "$ref": "#/$defs/minutes_ensemble_selection"
+              }
+            }
+          }
+        },
+        {
           "if": {
-            "required": ["transcription_model"],
-            "properties": { "transcription_model": { "$ref": "#/$defs/transcription_model_selection" } }
+            "required": [
+              "transcription_model"
+            ],
+            "properties": {
+              "transcription_model": {
+                "$ref": "#/$defs/transcription_model_selection"
+              }
+            }
           },
-          "then": { "properties": { "language": { "$ref": "#/$defs/api_transcription_language" } } }
+          "then": {
+            "properties": {
+              "language": {
+                "$ref": "#/$defs/api_transcription_language"
+              }
+            }
+          }
         }
       ]
     },
     "track_status": {
       "type": "object",
-      "required": ["path", "discarded"],
+      "required": [
+        "path",
+        "discarded"
+      ],
       "properties": {
-        "path": { "type": "string" },
-        "sha256": { "type": ["string", "null"] },
-        "bytes": { "type": ["integer", "null"] },
-        "duration_sec": { "type": ["number", "null"] },
-        "discarded": { "type": "boolean" }
+        "path": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bytes": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "duration_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "discarded": {
+          "type": "boolean"
+        }
       },
       "additionalProperties": false
     },
     "meeting_summary": {
       "type": "object",
-      "required": ["meeting_id", "meeting_name", "status", "started_at"],
+      "required": [
+        "meeting_id",
+        "meeting_name",
+        "status",
+        "started_at"
+      ],
       "properties": {
-        "meeting_id": { "$ref": "#/$defs/meeting_id" },
-        "meeting_name": { "type": "string" },
-        "engagement": { "type": ["string", "null"] },
-        "scope": { "type": ["string", "null"] },
-        "status": { "type": "string", "enum": ["recording", "recorded", "processing", "ready", "failed"] },
-        "started_at": { "$ref": "#/$defs/timestamp" },
-        "stopped_at": { "oneOf": [ { "$ref": "#/$defs/timestamp" }, { "type": "null" } ] },
-        "latest_minutes_version": { "type": ["integer", "null"] },
+        "meeting_id": {
+          "$ref": "#/$defs/meeting_id"
+        },
+        "meeting_name": {
+          "type": "string"
+        },
+        "engagement": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "recording",
+            "recorded",
+            "processing",
+            "ready",
+            "failed"
+          ]
+        },
+        "started_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "stopped_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latest_minutes_version": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "active_job": {
           "description": "The queued or running job for this meeting, or null / absent when none.",
           "oneOf": [
             {
               "type": "object",
-              "required": ["job_id", "kind", "status"],
+              "required": [
+                "job_id",
+                "kind",
+                "status"
+              ],
               "properties": {
-                "job_id": { "$ref": "#/$defs/job_id" },
-                "kind": { "$ref": "#/$defs/job_kind" },
-                "status": { "$ref": "#/$defs/job_status" },
+                "job_id": {
+                  "$ref": "#/$defs/job_id"
+                },
+                "kind": {
+                  "$ref": "#/$defs/job_kind"
+                },
+                "status": {
+                  "$ref": "#/$defs/job_status"
+                },
                 "progress": {
                   "type": "object",
                   "description": "Free-form progress info (stage name, fraction).",
                   "properties": {
-                    "stage": { "type": "string" },
-                    "fraction": { "type": "number", "minimum": 0, "maximum": 1 }
+                    "stage": {
+                      "type": "string"
+                    },
+                    "fraction": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    }
                   },
                   "additionalProperties": true
                 }
               },
               "additionalProperties": false
             },
-            { "type": "null" }
+            {
+              "type": "null"
+            }
           ]
         }
       },
@@ -231,21 +584,62 @@
     },
     "segment": {
       "type": "object",
-      "required": ["id", "start", "end", "text"],
+      "required": [
+        "id",
+        "start",
+        "end",
+        "text"
+      ],
       "properties": {
-        "id": { "type": "string" },
-        "start": { "type": "number", "minimum": 0 },
-        "end": { "type": "number", "minimum": 0 },
-        "text": { "type": "string" },
-        "speaker": { "type": ["string", "null"], "description": "Speaker label (me / other / SPEAKER_00 …) or resolved name." },
-        "speaker_name": { "type": ["string", "null"] },
-        "confidence": { "type": ["number", "null"] }
+        "id": {
+          "type": "string"
+        },
+        "start": {
+          "type": "number",
+          "minimum": 0
+        },
+        "end": {
+          "type": "number",
+          "minimum": 0
+        },
+        "text": {
+          "type": "string"
+        },
+        "speaker": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Speaker label (me / other / SPEAKER_00 …) or resolved name."
+        },
+        "speaker_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "confidence": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
       },
       "additionalProperties": false
     },
     "context_source_type": {
       "type": "string",
-      "enum": ["notion_ai_minutes", "zoom_transcript", "meet_transcript", "teams_transcript", "chat_log", "document", "text", "url", "file"]
+      "enum": [
+        "notion_ai_minutes",
+        "zoom_transcript",
+        "meet_transcript",
+        "teams_transcript",
+        "chat_log",
+        "document",
+        "text",
+        "url",
+        "file"
+      ]
     },
     "export_destination": {
       "type": "string",
@@ -255,22 +649,47 @@
     "profile": {
       "type": "object",
       "description": "Saved meeting profile (<NARUMI_HOME>/profiles.json): config defaults, default scope / engagement and automatic export destinations applied to new meetings.",
-      "required": ["name", "config", "scope", "engagement", "export_destinations", "is_default"],
+      "required": [
+        "name",
+        "config",
+        "scope",
+        "engagement",
+        "export_destinations",
+        "is_default"
+      ],
       "properties": {
-        "name": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "config": { "$ref": "#/$defs/meeting_config" },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "config": {
+          "$ref": "#/$defs/meeting_config"
+        },
         "scope": {
           "description": "Default affiliation scope for meetings created with this profile (null = unscoped).",
-          "oneOf": [{ "$ref": "#/$defs/scope_name" }, { "type": "null" }]
+          "oneOf": [
+            {
+              "$ref": "#/$defs/scope_name"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "engagement": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Default engagement label for meetings created with this profile."
         },
         "export_destinations": {
           "type": "array",
           "description": "Exporter registry names run automatically when a meeting using this profile finishes processing.",
-          "items": { "$ref": "#/$defs/export_destination" },
+          "items": {
+            "$ref": "#/$defs/export_destination"
+          },
           "uniqueItems": true
         },
         "is_default": {

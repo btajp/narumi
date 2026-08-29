@@ -1,7 +1,7 @@
 {
   "name": "get_minutes",
   "title": "Get minutes",
-  "description": "Return one minutes version of a meeting as markdown. `version` selects which one (defaults to the latest); `available_versions` lists every generated version in ascending order. Versions are append-only: regenerate appends a new version and never overwrites an existing one, so a version, once returned, is stable. `generated_at` and `provider` (LLM provider registry name; none = plain minutes) describe how this version was produced. `unresolved_speakers` lists the speaker labels that could not be resolved to real names (rendered as 話者不明 in the markdown). `scope` is the scope selector (default deny): omitted = only unscoped meetings; a single name = that scope + unscoped; an array of 2+ names = explicit cross-scope lookup (audit-logged). Read-only. On failure returns an error_envelope (isError=true) with code: not_found (unknown meeting, unknown version, or no minutes generated yet — check get_meeting.minutes_versions and the processing job), scope_denied (the request does not cover the meeting's scope), invalid_argument, internal.",
+  "description": "Return one immutable minutes version of a meeting as markdown. `version` selects one version (latest by default); `available_versions` is ascending. Regeneration appends and never overwrites. `generated_at` and `provider` describe production; provider=ensemble exactly when the required nullable `provenance` contains the published ensemble selection/artifact snapshot. Legacy, plain and single-provider versions return provenance=null. The publication snapshot is not a fabricated execution origin: inspect its artifacts for original run/call/attempt, effective parameters and confirmed usage. `unresolved_speakers` lists unresolved labels rendered as 話者不明. `scope` follows default-deny meeting lookup. Read-only. On failure returns error_envelope (isError=true) with code: not_found (unknown meeting/version or no minutes), scope_denied, invalid_argument, internal.",
   "annotations": {
     "readOnlyHint": true,
     "destructiveHint": false,
@@ -33,6 +33,7 @@
       "markdown",
       "generated_at",
       "provider",
+      "provenance",
       "unresolved_speakers",
       "available_versions"
     ],
@@ -53,8 +54,19 @@
       },
       "provider": {
         "type": "string",
-        "description": "LLM provider registry name used for generation (none = plain minutes).",
+        "description": "LLM provider registry name used for legacy/single generation, none for plain minutes, or ensemble exactly when provenance is non-null.",
         "minLength": 1
+      },
+      "provenance": {
+        "oneOf": [
+          {
+            "$ref": "../defs/processing_artifacts.json#/$defs/published_minutes_ensemble_provenance"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Required nullable publication provenance. Older and non-ensemble versions use null rather than omitting the field."
       },
       "unresolved_speakers": {
         "type": "array",
@@ -69,7 +81,35 @@
         "uniqueItems": true
       }
     },
-    "additionalProperties": false
+    "additionalProperties": false,
+    "allOf": [
+      {
+        "if": {
+          "required": [
+            "provider"
+          ],
+          "properties": {
+            "provider": {
+              "const": "ensemble"
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "provenance": {
+              "$ref": "../defs/processing_artifacts.json#/$defs/published_minutes_ensemble_provenance"
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "provenance": {
+              "type": "null"
+            }
+          }
+        }
+      }
+    ]
   },
   "examples": {
     "input": [
@@ -89,8 +129,71 @@
         "markdown": "# 週次定例\n\n## 決定事項\n- オンボーディング資料を来週までに更新する\n",
         "generated_at": "2026-08-27T04:12:00Z",
         "provider": "none",
+        "provenance": null,
         "unresolved_speakers": ["SPEAKER_01"],
         "available_versions": [1, 2]
+      },
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "version": 3,
+        "markdown": "# 週次定例\n\n## 決定事項\n- オンボーディング資料を来週までに更新する\n",
+        "generated_at": "2026-08-29T08:03:00Z",
+        "provider": "ensemble",
+        "provenance": {
+          "kind": "ensemble",
+          "run_id": "run-33333333333333333333333333333333",
+          "input_artifact_id": "artifact-00000000000000000000000000000000",
+          "generators": [
+            {
+              "generator_id": "gen-11111111111111111111111111111111",
+              "label": "第一案",
+              "selection": {
+                "provider": "openai-api",
+                "connection_id": "conn-111122223333",
+                "connection_revision": 1,
+                "model_id": "fixture-openai-api-text-model",
+                "parameters": {
+                  "max_tokens": 4096
+                },
+                "cache_epoch": 0
+              },
+              "artifact_id": "artifact-11111111111111111111111111111111",
+              "reused": false
+            },
+            {
+              "generator_id": "gen-22222222222222222222222222222222",
+              "label": "第二案",
+              "selection": {
+                "provider": "anthropic-api",
+                "connection_id": "conn-444455556666",
+                "connection_revision": 1,
+                "model_id": "fixture-anthropic-api-text-model",
+                "parameters": {
+                  "max_tokens": 4096
+                },
+                "cache_epoch": 0
+              },
+              "artifact_id": "artifact-22222222222222222222222222222222",
+              "reused": false
+            }
+          ],
+          "synthesizer": {
+            "selection": {
+              "provider": "codex-app-server",
+              "connection_id": "conn-fedcba987654",
+              "connection_revision": 1,
+              "model_id": "fixture-text-model",
+              "parameters": {
+                "reasoning_effort": "high"
+              },
+              "cache_epoch": 0
+            },
+            "artifact_id": "artifact-88888888888888888888888888888888",
+            "reused": false
+          }
+        },
+        "unresolved_speakers": [],
+        "available_versions": [1, 2, 3]
       }
     ]
   }

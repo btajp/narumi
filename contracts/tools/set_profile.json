@@ -1,7 +1,7 @@
 {
   "name": "set_profile",
   "title": "Set profile",
-  "description": "Create or update a saved meeting profile (source of truth: <NARUMI_HOME>/profiles.json). Only the keys you pass change; omitted keys keep their current value (a new profile starts with an empty config, no scope / engagement and no export destinations). `scope` here is the default value stored in the profile — not a scope selector — and, like `engagement`, accepts null to clear it. `config` keys are merged into the stored config (a key set to its null-clearing value where the type allows, e.g. self_name=null or minutes_model=null, clears it). minutes_model, when present, is a whole-object text minutes override validated against the enabled connection, pinned revision, verified model catalog, authentication and resulting policy. Codex requires subscription_ok or api_ok; Anthropic/OpenAI API require api_ok; numeric-loopback Ollama with verified local models may use local_only. Supported text adapters are listed in capabilities.minutes_model_providers; unknown models and Claude Agent SDK generation are not selectable. Parameters are closed per provider, max_tokens is restricted to 1..32768 and a known model output limit is also enforced. When omitted, token-limited adapters use min(4096, known model limit), or an application limit of 4096 when unknown, without populating unknown model capabilities. Omitted minutes_model retains the saved value; old profiles without it retain legacy llm_provider behavior. It does not select models for other stages. `export_destinations` replaces the stored list (registry names from list_export_destinations); they run automatically when a meeting using this profile finishes processing. make_default=true makes this the profile applied when start_recording / import_recording omit `profile` (exactly one profile is default at a time). Returns the full stored profile. `request_id` is the client-generated idempotency key: repeating the call returns the original result. On failure returns an error_envelope (isError=true) with code: invalid_argument (bad name or config, unknown export destination), policy_violation (the stored config would select engines / providers not allowed by its external_send_policy — validated at save time, nothing is silently downgraded), engine_unavailable (config names an engine / provider not registered or its runtime is unavailable), configuration_conflict, authentication_required, model_unavailable, internal. transcription_model is a separate nullable API transcription override: omit to retain it, null to restore the saved transcription_engine without changing that engine. Only openai-api with whisper-1 or gpt-4o-transcribe-diarize is supported, using an enabled matching-revision API-key connection, verified timestamp capabilities and api_ok. The shared language must be auto or a real lowercase two-letter ISO 639-1 code; auto omits the API language field. parameters is closed and empty: no prompt, speaker references or Responses API options. Global vocab_hints are not sent to API transcription and remain available to integration. Saving this selection does not send audio. Microphone and system audio are sent separately only during explicitly enabled processing, with possible API charges. Optional full effective config snapshot for compare-and-set saving. If supplied, compare the entire current effective config under the save lock before any mutation; mismatch returns configuration_conflict without overwriting changes. Omission preserves legacy save behavior. The UI supplies this snapshot when saving configuration, including ASR retry cache_epoch updates. For a profile that does not exist yet, compare against the default MeetingConfig before applying new profile overrides.",
+  "description": "Create or update a saved meeting profile (source of truth: <NARUMI_HOME>/profiles.json). Only the keys you pass change; omitted keys keep their current value (a new profile starts with an empty config, no scope / engagement and no export destinations). `scope` here is the default value stored in the profile — not a scope selector — and, like `engagement`, accepts null to clear it. `config` keys are merged into the stored config (a key set to its null-clearing value where the type allows, e.g. self_name=null or minutes_model=null, clears it). minutes_model, when present, is a whole-object text minutes override validated against the enabled connection, pinned revision, verified model catalog, authentication and resulting policy. Codex requires subscription_ok or api_ok; Anthropic/OpenAI API require api_ok; numeric-loopback Ollama with verified local models may use local_only. Supported text adapters are listed in capabilities.minutes_model_providers; unknown models and Claude Agent SDK generation are not selectable. Parameters are closed per provider, max_tokens is restricted to 1..32768 and a known model output limit is also enforced. When omitted, token-limited adapters use min(4096, known model limit), or an application limit of 4096 when unknown, without populating unknown model capabilities. Omitted minutes_model retains the saved value; old profiles without it retain legacy llm_provider behavior. It does not select models for other stages. `export_destinations` replaces the stored list (registry names from list_export_destinations); they run automatically when a meeting using this profile finishes processing. make_default=true makes this the profile applied when start_recording / import_recording omit `profile` (exactly one profile is default at a time). Returns the full stored profile. `request_id` is the client-generated idempotency key: repeating the call returns the original result. On failure returns an error_envelope (isError=true) with code: invalid_argument (bad name or config, unknown export destination), policy_violation (the stored config would select engines / providers not allowed by its external_send_policy — validated at save time, nothing is silently downgraded), engine_unavailable (config names an engine / provider not registered or its runtime is unavailable), configuration_conflict, authentication_required, model_unavailable, internal. transcription_model is a separate nullable API transcription override: omit to retain it, null to restore the saved transcription_engine without changing that engine. Only openai-api with whisper-1 or gpt-4o-transcribe-diarize is supported, using an enabled matching-revision API-key connection, verified timestamp capabilities and api_ok. The shared language must be auto or a real lowercase two-letter ISO 639-1 code; auto omits the API language field. parameters is closed and empty: no prompt, speaker references or Responses API options. Global vocab_hints are not sent to API transcription and remain available to integration. Saving this selection does not send audio. Microphone and system audio are sent separately only during explicitly enabled processing, with possible API charges. Optional full effective config snapshot for compare-and-set saving. If supplied, compare the entire current effective config under the save lock before any mutation; mismatch returns configuration_conflict without overwriting changes. Omission preserves legacy save behavior. The UI supplies this snapshot when saving configuration, including ASR retry cache_epoch updates. For a profile that does not exist yet, compare against the default MeetingConfig before applying new profile overrides. minutes_ensemble is a nullable text-only ensemble of two to four stable-ID generators and one explicitly selected synthesizer. Omission retains it, null clears it, and an object replaces the whole ensemble. A non-null minutes_model and non-null minutes_ensemble are mutually exclusive after merging all config changes; mode switches must explicitly clear the previous override. Generator IDs must be unique even when labels/selections differ. Display labels and array order are not sent as prompt instructions and do not cause new external calls. All participant selections and API transcription are validated together against current policy/connections/models/runtime before execution and publication, then each external call is revalidated. API participants require explicit api_ok. Saving alone never generates or sends meeting content.",
   "annotations": {
     "readOnlyHint": false,
     "destructiveHint": false,
@@ -58,7 +58,7 @@
       },
       "expected_config": {
         "$ref": "../defs/common.json#/$defs/meeting_config",
-        "description": "Optional full effective config snapshot for compare-and-set saving. If supplied, compare the entire current effective config under the save lock before any mutation; mismatch returns configuration_conflict without overwriting changes. Omission preserves legacy save behavior. The UI supplies this snapshot when saving configuration, including ASR retry cache_epoch updates. For a profile that does not exist yet, compare against the default MeetingConfig before applying new profile overrides."
+        "description": "Optional full effective config snapshot for compare-and-set saving. If supplied, compare the entire current effective config under the save lock before any mutation; mismatch returns configuration_conflict without overwriting changes. Omission preserves legacy save behavior. The UI supplies this snapshot when saving configuration, including ASR retry cache_epoch updates. For a profile that does not exist yet, compare against the default MeetingConfig before applying new profile overrides. Include the full minutes_ensemble and all participant selections when saving a card or switching modes."
       }
     },
     "required": [
@@ -201,6 +201,79 @@
           "diarization_engine": "none",
           "llm_provider": "none",
           "minutes_model": null,
+          "external_send_policy": "local_only",
+          "language": "ja",
+          "self_name": null,
+          "vocab_hints": []
+        }
+      },
+      {
+        "name": "text-minutes-ensemble",
+        "config": {
+          "transcription_engine": "auto",
+          "transcription_model": null,
+          "diarization_engine": "none",
+          "llm_provider": "none",
+          "minutes_model": null,
+          "minutes_ensemble": {
+            "generators": [
+              {
+                "id": "gen-11111111111111111111111111111111",
+                "label": "OpenAI案",
+                "selection": {
+                  "provider": "openai-api",
+                  "connection_id": "conn-111122223333",
+                  "connection_revision": 1,
+                  "model_id": "fixture-openai-api-text-model",
+                  "parameters": {
+                    "max_tokens": 4096
+                  },
+                  "cache_epoch": 0
+                }
+              },
+              {
+                "id": "gen-22222222222222222222222222222222",
+                "label": "Anthropic案",
+                "selection": {
+                  "provider": "anthropic-api",
+                  "connection_id": "conn-444455556666",
+                  "connection_revision": 1,
+                  "model_id": "fixture-anthropic-api-text-model",
+                  "parameters": {
+                    "max_tokens": 4096
+                  },
+                  "cache_epoch": 0
+                }
+              }
+            ],
+            "synthesizer": {
+              "provider": "codex-app-server",
+              "connection_id": "conn-fedcba987654",
+              "connection_revision": 1,
+              "model_id": "fixture-text-model",
+              "parameters": {
+                "reasoning_effort": "high"
+              },
+              "cache_epoch": 0
+            }
+          },
+          "external_send_policy": "api_ok",
+          "language": "ja",
+          "self_name": null,
+          "vocab_hints": []
+        },
+        "scope": "cloudnative",
+        "export_destinations": [
+          "markdown"
+        ],
+        "request_id": "ensemble-set_profile-request",
+        "expected_config": {
+          "transcription_engine": "auto",
+          "transcription_model": null,
+          "diarization_engine": "none",
+          "llm_provider": "none",
+          "minutes_model": null,
+          "minutes_ensemble": null,
           "external_send_policy": "local_only",
           "language": "ja",
           "self_name": null,

@@ -1,7 +1,7 @@
 {
   "name": "cancel_job",
   "title": "Cancel job",
-  "description": "Cancel a background job. A queued job is cancelled immediately (status cancelled). A running job is cancelled cooperatively: a cancellation flag is set that the pipeline checks at its progress checkpoints, so the returned job may still report status running — poll get_job_status until it reaches cancelled. A cancelled job carries error code `cancelled`. For meeting jobs, the manifest status is restored to what it was before the job started (not failed), and completed stage outputs are kept and reused by the next regenerate. provider_setup jobs have no meeting; cancellation preserves verified prepared resources and is reconciled in the provider runtime state. Cancelling a job that is already cancelled is a no-op returning its current state. `request_id` is the client-generated idempotency key: repeating the call returns the original result. On failure returns an error_envelope (isError=true) with code: not_found (unknown or expired job_id), busy (the job already finished — succeeded / failed — and can no longer be cancelled), invalid_argument, internal.",
+  "description": "Cancel a background job. A queued job is cancelled immediately (status cancelled). A running job is cancelled cooperatively: a cancellation flag is set that the pipeline checks at its progress checkpoints, so the returned job may still report status running — poll get_job_status until it reaches cancelled. The returned job always includes nullable processing_run_id; a prepared and persisted minutes-ensemble run remains correlated through running and cancelled states, while jobs without a known ensemble run return null. A cancelled job carries error code `cancelled`. For meeting jobs, the manifest status is restored to what it was before the job started (not failed), and completed stage outputs are kept and reused by the next regenerate. provider_setup jobs have no meeting; cancellation preserves verified prepared resources and is reconciled in the provider runtime state. Cancelling a job that is already cancelled is a no-op returning its current state. `request_id` is the client-generated idempotency key: repeating the call returns the original result. On failure returns an error_envelope (isError=true) with code: not_found (unknown or expired job_id), busy (the job already finished — succeeded / failed — and can no longer be cancelled), invalid_argument, internal.",
   "annotations": {
     "readOnlyHint": false,
     "destructiveHint": false,
@@ -49,6 +49,7 @@
           "meeting_id": "20260827T030500Z-a1b2c3d4",
           "kind": "process",
           "status": "cancelled",
+          "processing_run_id": null,
           "error": {
             "code": "cancelled",
             "message": "cancelled by cancel_job"
@@ -63,6 +64,7 @@
           "meeting_id": "20260827T030500Z-a1b2c3d4",
           "kind": "regenerate",
           "status": "running",
+          "processing_run_id": "run-33333333333333333333333333333333",
           "progress": { "stage": "integrate", "fraction": 0.7 },
           "created_at": "2026-08-27T04:10:00Z",
           "updated_at": "2026-08-27T04:11:00Z"

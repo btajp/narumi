@@ -1,7 +1,7 @@
 {
   "name": "import_recording",
   "title": "Import recording",
-  "description": "Create a session bundle from existing recording files (e.g. a Zoom local recording) instead of live capture. At least one of `mic_path` / `system_path` is required (a Zoom recording with everyone in one file is imported as system); `screen_path` optionally adds a video track. All paths must be absolute paths of regular files. With copy=true (default) the files are copied into the bundle; copy=false hard-links them (same volume required) to avoid duplicating large files. `started_at` sets the recording start used for the meeting_id and timeline; when omitted the server derives it from the oldest input file's modification time. `profile` names a saved profile (see list_profiles) whose config, scope, engagement and export_destinations are applied as defaults — explicit `scope` / `engagement` / `config` keys win; when omitted the default profile is applied. With auto_process=true (default) a `process` job is enqueued and its job_id returned; poll it with get_job_status. `request_id` is the client-generated idempotency key: repeating the call returns the original result without importing twice. On failure returns an error_envelope (isError=true) with code: not_found (an input path does not exist), invalid_argument (relative path, not a regular file, neither mic_path nor system_path given, unknown profile, bad config, copy=false across volumes), policy_violation (config selects an engine / provider not allowed by its external_send_policy — nothing is silently substituted), engine_unavailable (config names an engine / provider not registered on this server), internal. transcription_model is a separate nullable API transcription override: omit to retain it, null to restore the saved transcription_engine without changing that engine. Only openai-api with whisper-1 or gpt-4o-transcribe-diarize is supported, using an enabled matching-revision API-key connection, verified timestamp capabilities and api_ok. The shared language must be auto or a real lowercase two-letter ISO 639-1 code; auto omits the API language field. parameters is closed and empty: no prompt, speaker references or Responses API options. Global vocab_hints are not sent to API transcription and remain available to integration. Saving this selection does not send audio. Microphone and system audio are sent separately only during explicitly enabled processing, with possible API charges. Automatic processing uses the accepted effective config snapshot and validates it before execution. It never carries a transcription_retry confirmation and cannot retransmit outcome-unknown audio chunks.",
+  "description": "Create a session bundle from existing recording files (e.g. a Zoom local recording) instead of live capture. At least one of `mic_path` / `system_path` is required (a Zoom recording with everyone in one file is imported as system); `screen_path` optionally adds a video track. All paths must be absolute paths of regular files. With copy=true (default) the files are copied into the bundle; copy=false hard-links them (same volume required) to avoid duplicating large files. `started_at` sets the recording start used for the meeting_id and timeline; when omitted the server derives it from the oldest input file's modification time. `profile` names a saved profile (see list_profiles) whose config, scope, engagement and export_destinations are applied as defaults — explicit `scope` / `engagement` / `config` keys win; when omitted the default profile is applied. With auto_process=true (default) a `process` job is enqueued and its job_id returned; poll it with get_job_status. `request_id` is the client-generated idempotency key: repeating the call returns the original result without importing twice. On failure returns an error_envelope (isError=true) with code: not_found (an input path does not exist), invalid_argument (relative path, not a regular file, neither mic_path nor system_path given, unknown profile, bad config, copy=false across volumes), policy_violation (config selects an engine / provider not allowed by its external_send_policy — nothing is silently substituted), engine_unavailable (config names an engine / provider not registered on this server), internal. transcription_model is a separate nullable API transcription override: omit to retain it, null to restore the saved transcription_engine without changing that engine. Only openai-api with whisper-1 or gpt-4o-transcribe-diarize is supported, using an enabled matching-revision API-key connection, verified timestamp capabilities and api_ok. The shared language must be auto or a real lowercase two-letter ISO 639-1 code; auto omits the API language field. parameters is closed and empty: no prompt, speaker references or Responses API options. Global vocab_hints are not sent to API transcription and remain available to integration. Saving this selection does not send audio. Microphone and system audio are sent separately only during explicitly enabled processing, with possible API charges. Automatic processing uses the accepted effective config snapshot and validates it before execution. It never carries a transcription_retry confirmation and cannot retransmit outcome-unknown audio chunks. minutes_ensemble is a nullable text-only ensemble of two to four stable-ID generators and one explicitly selected synthesizer. Omission retains it, null clears it, and an object replaces the whole ensemble. A non-null minutes_model and non-null minutes_ensemble are mutually exclusive after merging all config changes; mode switches must explicitly clear the previous override. Generator IDs must be unique even when labels/selections differ. Display labels and array order are not sent as prompt instructions and do not cause new external calls. All participant selections and API transcription are validated together against current policy/connections/models/runtime before execution and publication, then each external call is revalidated. API participants require explicit api_ok. Saving alone never generates or sends meeting content. Automatic processing never supplies minutes_retry and cannot use a new run or epoch to bypass an outcome-unknown minutes call.",
   "annotations": {
     "readOnlyHint": false,
     "destructiveHint": false,
@@ -168,6 +168,64 @@
           "vocab_hints": [
             "narumi"
           ]
+        }
+      },
+      {
+        "meeting_name": "Zoom 顧客定例（録画取り込み）",
+        "system_path": "/Users/me/Documents/Zoom/2026-08-25 10.00.00 顧客定例/audio_only.m4a",
+        "request_id": "ensemble-import_recording-request",
+        "config": {
+          "transcription_engine": "auto",
+          "transcription_model": null,
+          "diarization_engine": "none",
+          "llm_provider": "none",
+          "minutes_model": null,
+          "minutes_ensemble": {
+            "generators": [
+              {
+                "id": "gen-11111111111111111111111111111111",
+                "label": "OpenAI案",
+                "selection": {
+                  "provider": "openai-api",
+                  "connection_id": "conn-111122223333",
+                  "connection_revision": 1,
+                  "model_id": "fixture-openai-api-text-model",
+                  "parameters": {
+                    "max_tokens": 4096
+                  },
+                  "cache_epoch": 0
+                }
+              },
+              {
+                "id": "gen-22222222222222222222222222222222",
+                "label": "Anthropic案",
+                "selection": {
+                  "provider": "anthropic-api",
+                  "connection_id": "conn-444455556666",
+                  "connection_revision": 1,
+                  "model_id": "fixture-anthropic-api-text-model",
+                  "parameters": {
+                    "max_tokens": 4096
+                  },
+                  "cache_epoch": 0
+                }
+              }
+            ],
+            "synthesizer": {
+              "provider": "codex-app-server",
+              "connection_id": "conn-fedcba987654",
+              "connection_revision": 1,
+              "model_id": "fixture-text-model",
+              "parameters": {
+                "reasoning_effort": "high"
+              },
+              "cache_epoch": 0
+            }
+          },
+          "external_send_policy": "api_ok",
+          "language": "ja",
+          "self_name": null,
+          "vocab_hints": []
         }
       }
     ],

@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from narumi.minutes_ensemble import MinutesEnsembleSelection
 from narumi.model_selection import ModelSelection
 from narumi.transcription_selection import (
     TranscriptionModelSelection,
@@ -37,6 +38,7 @@ class MeetingConfig(BaseModel):
     diarization_engine: str = "none"
     llm_provider: str = "none"
     minutes_model: ModelSelection | None = None
+    minutes_ensemble: MinutesEnsembleSelection | None = None
     external_send_policy: ExternalSendPolicy = ExternalSendPolicy.LOCAL_ONLY
     language: str = "ja"
     self_name: str | None = None
@@ -46,6 +48,12 @@ class MeetingConfig(BaseModel):
     def _transcription_language(self) -> MeetingConfig:
         if self.transcription_model is not None:
             normalize_transcription_language(self.language)
+        return self
+
+    @model_validator(mode="after")
+    def _exclusive_minutes_selection(self) -> MeetingConfig:
+        if self.minutes_model is not None and self.minutes_ensemble is not None:
+            raise ValueError("minutes_model and minutes_ensemble are mutually exclusive")
         return self
 
 

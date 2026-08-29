@@ -72,6 +72,9 @@ EXPECTED_TOOLS = {
     "get_provider_auth_status",
     "test_provider_connection",
     "list_provider_models",
+    "list_processing_runs",
+    "get_processing_run",
+    "get_processing_artifact",
 }
 EXTERNAL_METADATA_TOOLS = {
     "prepare_provider_runtime",
@@ -159,6 +162,7 @@ def test_manifest_matches_tool_files() -> None:
 
 def test_manifest_version_is_semver() -> None:
     version = _manifest()["contract_version"]
+    assert version == "6.0.0"
     major, minor, patch = version.split(".")
     assert all(part.isdigit() for part in (major, minor, patch))
 
@@ -323,12 +327,20 @@ def test_error_envelope_schema_accepts_narumi_error_payloads(contracts: Contract
 
 def test_schema_for_def_is_self_contained(contracts: ContractSet) -> None:
     schema = contracts.schema_for_def("job")
-    assert set(schema["$defs"]) >= {"job_id", "meeting_id", "job_kind", "job_status", "error"}
+    assert set(schema["$defs"]) >= {
+        "job_id",
+        "meeting_id",
+        "job_kind",
+        "job_status",
+        "processing_run_id",
+        "error",
+    }
     Draft202012Validator(schema).validate(
         {
             "job_id": "job-0123456789ab",
             "kind": "process",
             "status": "queued",
+            "processing_run_id": None,
             "created_at": "2026-08-27T03:05:00Z",
             "updated_at": "2026-08-27T03:05:00Z",
         }
@@ -591,6 +603,9 @@ def test_read_only_tools_have_no_request_id_and_write_tools_require_it(
         "get_provider_auth_status",
         "test_provider_connection",
         "list_provider_models",
+        "list_processing_runs",
+        "get_processing_run",
+        "get_processing_artifact",
     }
     for name in read_only:
         assert "request_id" not in contracts[name].input_schema["properties"], name

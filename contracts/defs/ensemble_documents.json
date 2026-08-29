@@ -1,0 +1,463 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "narumi:defs/ensemble_documents.json",
+  "title": "narumi validated minutes ensemble document payloads",
+  "$defs": {
+    "ensemble_evidence_id": {
+      "type": "string",
+      "minLength": 67,
+      "maxLength": 67,
+      "pattern": "^ev_[0-9a-f]{64}$"
+    },
+    "ensemble_claim_id": {
+      "type": "string",
+      "minLength": 67,
+      "maxLength": 67,
+      "pattern": "^cl_[0-9a-f]{64}$"
+    },
+    "ensemble_question_id": {
+      "type": "string",
+      "minLength": 67,
+      "maxLength": 67,
+      "pattern": "^qu_[0-9a-f]{64}$"
+    },
+    "ensemble_source_binding": {
+      "type": "object",
+      "required": [
+        "segment_index",
+        "segment_id",
+        "segment_text_sha256",
+        "sources"
+      ],
+      "properties": {
+        "segment_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "segment_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "segment_text_sha256": {
+          "$ref": "#/$defs/processing_sha256"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "minItems": 0,
+          "maxItems": 256
+        }
+      },
+      "additionalProperties": false,
+      "description": "Stable binding to one validated merged-transcript segment. Source strings are public meeting-source labels, never paths, credentials or provider responses."
+    },
+    "ensemble_evidence": {
+      "type": "object",
+      "required": [
+        "evidence_id",
+        "start_seconds",
+        "end_seconds",
+        "speaker_label",
+        "speaker_name",
+        "char_start",
+        "char_end",
+        "text",
+        "occurrence_index",
+        "occurrence_count",
+        "source_binding"
+      ],
+      "properties": {
+        "evidence_id": {
+          "$ref": "#/$defs/ensemble_evidence_id"
+        },
+        "start_seconds": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Finite non-negative source time. The implementation also rejects NaN and infinity and requires end_seconds >= start_seconds."
+        },
+        "end_seconds": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Finite non-negative source time. The implementation also rejects NaN and infinity and requires end_seconds >= start_seconds."
+        },
+        "speaker_label": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 512,
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "speaker_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 512,
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "char_start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "char_end": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Exclusive Unicode-codepoint offset. The implementation requires char_start < char_end and validates the bound source occurrence."
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "occurrence_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "occurrence_count": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The implementation requires occurrence_index < occurrence_count."
+        },
+        "source_binding": {
+          "$ref": "#/$defs/ensemble_source_binding"
+        }
+      },
+      "additionalProperties": false,
+      "description": "One validated evidence occurrence. Character offsets use Unicode codepoints and half-open intervals. IDs are unique within the source document; schema uniqueItems alone is not a substitute for the typed/server ID check."
+    },
+    "ensemble_evidence_ref": {
+      "type": "object",
+      "required": [
+        "evidence_id",
+        "char_start",
+        "char_end"
+      ],
+      "properties": {
+        "evidence_id": {
+          "$ref": "#/$defs/ensemble_evidence_id"
+        },
+        "char_start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "char_end": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Exclusive Unicode-codepoint offset. The implementation requires char_start < char_end and verifies that the reference resolves inside the identified evidence."
+        }
+      },
+      "additionalProperties": false
+    },
+    "ensemble_claim": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "text",
+        "evidence",
+        "owner",
+        "due"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ensemble_claim_id"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "agenda",
+            "discussion",
+            "decision",
+            "action"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 600,
+          "pattern": "\\S"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ensemble_evidence_ref"
+          },
+          "minItems": 1,
+          "maxItems": 8
+        },
+        "owner": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "\\S"
+        },
+        "due": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "\\S"
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "agenda",
+                  "discussion",
+                  "decision"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "owner": {
+                "type": "null"
+              },
+              "due": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "description": "Validated claim. owner and due are required nullable fields: agenda, discussion and decision require both to be null; action may use null or a non-whitespace string of at most 120 codepoints."
+    },
+    "ensemble_question_alternative": {
+      "type": "object",
+      "required": [
+        "text",
+        "evidence"
+      ],
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 600,
+          "pattern": "\\S"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ensemble_evidence_ref"
+          },
+          "minItems": 1,
+          "maxItems": 8
+        }
+      },
+      "additionalProperties": false
+    },
+    "ensemble_question": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "text",
+        "alternatives"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ensemble_question_id"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "conflict",
+            "missing_context"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 600,
+          "pattern": "\\S"
+        },
+        "alternatives": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ensemble_question_alternative"
+          },
+          "minItems": 1,
+          "maxItems": 4
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "conflict"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "alternatives": {
+                "minItems": 2,
+                "maxItems": 4
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "missing_context"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "alternatives": {
+                "minItems": 1,
+                "maxItems": 4
+              }
+            }
+          }
+        }
+      ],
+      "description": "A conflict requires two to four alternatives; missing_context requires one to four. Question and alternative text must contain at least one non-whitespace codepoint."
+    },
+    "ensemble_source_index_document": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "packet_artifact_ids"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "ensemble-source-index-v1"
+        },
+        "packet_artifact_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/processing_artifact_id"
+          },
+          "minItems": 0,
+          "maxItems": 64,
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "ensemble_source_document": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "evidence"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "ensemble-source-v1"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ensemble_evidence"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        }
+      },
+      "additionalProperties": false,
+      "description": "Validated source packet. Evidence IDs must be unique and every offset/occurrence binding must resolve to the immutable source segment."
+    },
+    "ensemble_document": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "claims",
+        "questions"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "ensemble-document-v1"
+        },
+        "claims": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ensemble_claim"
+          },
+          "minItems": 0,
+          "maxItems": 32
+        },
+        "questions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ensemble_question"
+          },
+          "minItems": 0,
+          "maxItems": 16
+        }
+      },
+      "additionalProperties": false,
+      "description": "Validated generated document. Empty claims and questions are allowed. IDs must be unique and all evidence references must resolve before this payload is saved or published."
+    },
+    "ensemble_draft_part": {
+      "type": "object",
+      "required": [
+        "source_artifact_id",
+        "document_artifact_id"
+      ],
+      "properties": {
+        "source_artifact_id": {
+          "$ref": "#/$defs/processing_artifact_id"
+        },
+        "document_artifact_id": {
+          "$ref": "#/$defs/processing_artifact_id"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ensemble_draft_document": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "parts"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "ensemble-draft-v1"
+        },
+        "parts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ensemble_draft_part"
+          },
+          "minItems": 1,
+          "maxItems": 64
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deterministic non-empty draft assembly from one to 64 validated source/document artifact pairs. This derived payload is not an additional provider generation."
+    }
+  }
+}

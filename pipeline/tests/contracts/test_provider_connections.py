@@ -282,6 +282,7 @@ def test_provider_setup_job_does_not_need_a_meeting(contracts: ContractSet) -> N
         "job_id": "job-0123456789ab",
         "kind": "provider_setup",
         "status": "queued",
+        "processing_run_id": None,
         "created_at": "2026-08-28T09:00:00Z",
         "updated_at": "2026-08-28T09:00:00Z",
     }

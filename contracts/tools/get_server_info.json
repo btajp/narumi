@@ -1,7 +1,7 @@
 {
   "name": "get_server_info",
   "title": "Get server info",
-  "description": "Return the narumi server identity, version, capabilities and diagnostics. `capabilities` reports whether recording can be attempted on this machine (narumi-recorder binary present and microphone permission not known to be denied; `permissions` gives the state from `narumi-recorder check`), permission_setup_in_progress, the active transports, and registry names of installed engines, providers and exporters. `recording` and `permissions` use the same permission snapshot. Set refresh_permissions=true to bypass the short permission cache after returning from macOS settings; while a permission action is in progress, the current cached report may be returned instead and permission_setup_in_progress remains true. This read-only tool never triggers a permission prompt. `diagnostics` reports resolved ffmpeg / ffprobe binaries, data and meetings roots, catalog path, recorder path and loaded contracts directory. Call with empty arguments first to detect the contract version. Contract major 5 adds explicit API transcription selection. The minutes_model_providers and transcription_model_providers capability arrays report implemented generation paths separately from connection readiness. transcription_model_providers is [openai-api] only for the resident streamable-http server and [] for other transports; ensemble generation remains unavailable. secure_transport describes required protection, never trusted bootstrap pins or tokens. On failure returns an error_envelope (isError=true) with code: internal.",
+  "description": "Return the narumi server identity, version, capabilities and diagnostics. `capabilities` reports whether recording can be attempted on this machine (narumi-recorder binary present and microphone permission not known to be denied; `permissions` gives the state from `narumi-recorder check`), permission_setup_in_progress, the active transports, and registry names of installed engines, providers and exporters. `recording` and `permissions` use the same permission snapshot. Set refresh_permissions=true to bypass the short permission cache after returning from macOS settings; while a permission action is in progress, the current cached report may be returned instead and permission_setup_in_progress remains true. This read-only tool never triggers a permission prompt. `diagnostics` reports resolved ffmpeg / ffprobe binaries, data and meetings roots, catalog path, recorder path and loaded contracts directory. Call with empty arguments first to detect the contract version. Contract major 5 adds explicit API transcription selection. The minutes_model_providers and transcription_model_providers capability arrays report implemented generation paths separately from connection readiness. transcription_model_providers is [openai-api] only for the resident streamable-http server and [] for other transports; ensemble generation remains unavailable. secure_transport describes required protection, never trusted bootstrap pins or tokens. On failure returns an error_envelope (isError=true) with code: internal. Contract major 6 adds minutes ensembles and local run/artifact reads. Required minutes_ensemble_limits reports text-only bounds: four generators, concurrency one, 64 generation attempts per run and reduction depth six. It does not establish execution availability: inspect workflow.ensemble_generation and validate all participant capabilities and authorization. A false flag on another transport must not be overridden by these limits.",
   "annotations": {
     "readOnlyHint": true,
     "destructiveHint": false,
@@ -66,7 +66,8 @@
           "minutes_model_providers",
           "export_destinations",
           "workflow",
-          "transcription_model_providers"
+          "transcription_model_providers",
+          "minutes_ensemble_limits"
         ],
         "properties": {
           "workflow": {
@@ -138,6 +139,9 @@
             },
             "uniqueItems": true,
             "description": "Implemented API transcription paths, independent of connection authentication and model readiness. The resident streamable-http server advertises [openai-api]; other execution modes advertise []. Clients must also check connection revision, API authentication, timestamp capability, expiry and api_ok."
+          },
+          "minutes_ensemble_limits": {
+            "$ref": "../defs/minutes_ensemble.json#/$defs/minutes_ensemble_limits"
           }
         },
         "additionalProperties": false,
@@ -282,9 +286,9 @@
     "output": [
       {
         "name": "narumi",
-        "server_version": "0.1.4",
+        "server_version": "0.6.0",
         "server_instance_id": "00000000-0000-4000-8000-000000000001",
-        "contract_version": "5.0.0",
+        "contract_version": "6.0.0",
         "secure_transport": {
           "mode": "pinned_tls",
           "tls_required": true,
@@ -333,7 +337,16 @@
           ],
           "transcription_model_providers": [
             "openai-api"
-          ]
+          ],
+          "minutes_ensemble_limits": {
+            "max_generators": 4,
+            "max_concurrency": 1,
+            "max_generation_attempts_per_run": 64,
+            "input_modalities": [
+              "text"
+            ],
+            "max_reduction_depth": 6
+          }
         },
         "diagnostics": {
           "ffmpeg": {
@@ -353,9 +366,9 @@
       },
       {
         "name": "narumi",
-        "server_version": "0.1.4",
+        "server_version": "0.6.0",
         "server_instance_id": "00000000-0000-4000-8000-000000000002",
-        "contract_version": "5.0.0",
+        "contract_version": "6.0.0",
         "secure_transport": {
           "mode": "stdio",
           "tls_required": true,
@@ -395,7 +408,16 @@
             "ollama",
             "openai-api"
           ],
-          "transcription_model_providers": []
+          "transcription_model_providers": [],
+          "minutes_ensemble_limits": {
+            "max_generators": 4,
+            "max_concurrency": 1,
+            "max_generation_attempts_per_run": 64,
+            "input_modalities": [
+              "text"
+            ],
+            "max_reduction_depth": 6
+          }
         },
         "diagnostics": {
           "ffmpeg": null,

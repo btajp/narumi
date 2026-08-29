@@ -1,0 +1,251 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "narumi:defs/processing_provenance.json",
+  "title": "narumi ensemble target, execution origin and safe error provenance",
+  "$comment": "Draft public target/origin/error shapes. Artifact generation observations and publication lineage are defined separately in processing_artifacts.json.",
+  "$defs": {
+    "processing_target_ref": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "node_id",
+        "call_id"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/processing_run_id"
+        },
+        "node_id": {
+          "$ref": "#/$defs/processing_node_id"
+        },
+        "call_id": {
+          "$ref": "#/$defs/processing_call_id"
+        }
+      },
+      "additionalProperties": false,
+      "description": "The run/node/call currently inspected or confirmed by the caller. This is not a historical execution-origin reference."
+    },
+    "processing_origin_ref": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "node_id",
+        "call_id",
+        "attempt_id",
+        "provider",
+        "connection_id",
+        "connection_revision",
+        "model_id"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/processing_run_id"
+        },
+        "node_id": {
+          "$ref": "#/$defs/processing_node_id"
+        },
+        "call_id": {
+          "$ref": "#/$defs/processing_call_id"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/processing_attempt_id"
+        },
+        "provider": {
+          "$ref": "#/$defs/minutes_model_provider"
+        },
+        "connection_id": {
+          "$ref": "#/$defs/provider_connection_id"
+        },
+        "connection_revision": {
+          "$ref": "#/$defs/provider_connection_revision"
+        },
+        "model_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "additionalProperties": false,
+      "description": "Historical execution identity and non-secret authorization provenance from the saved attempt. Preserve its original run, connection revision and model when a later run reuses or inspects that attempt. Never rewrite it to the current selection."
+    },
+    "processing_current_selection": {
+      "type": "object",
+      "required": [
+        "provider",
+        "connection_id",
+        "connection_revision",
+        "model_id"
+      ],
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/minutes_model_provider"
+        },
+        "connection_id": {
+          "$ref": "#/$defs/provider_connection_id"
+        },
+        "connection_revision": {
+          "$ref": "#/$defs/provider_connection_revision"
+        },
+        "model_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "additionalProperties": false,
+      "description": "Current planned selection for the target node, distinct from historical origin. It is a display projection, not a substitute for full ModelSelection/config authorization checks."
+    },
+    "processing_retry_attempt_summary": {
+      "type": "object",
+      "required": [
+        "attempt",
+        "outcome"
+      ],
+      "properties": {
+        "attempt": {
+          "$ref": "#/$defs/processing_origin_ref"
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "unknown",
+            "known_failed",
+            "succeeded"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "processing_retry_lineage": {
+      "type": "object",
+      "required": [
+        "origin_unknown",
+        "attempt_chain",
+        "resolved_by"
+      ],
+      "properties": {
+        "origin_unknown": {
+          "$ref": "#/$defs/processing_origin_ref"
+        },
+        "attempt_chain": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/processing_retry_attempt_summary"
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "resolved_by": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/processing_origin_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "description": "Closed confirmed-retry ancestry. attempt_chain[0].attempt equals origin_unknown and has outcome=unknown; attempt IDs are unique and ordered by retry_of ancestry. resolved_by is null unless the final chain item succeeded, and otherwise equals that final attempt. These cross-field rules are enforced by typed/server validation. A retry may use a different connection, but the original unknown and every intermediate origin remain unchanged. maxItems=64 is the lifetime limit for this same content-unknown barrier, separate from each run's 64-attempt budget. Reject attempt 65 without consuming proof, reserving run budget or sending; preserve the existing unknown and chain."
+    },
+    "processing_safe_error": {
+      "type": "object",
+      "required": [
+        "code",
+        "message",
+        "reason"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/error_code"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "additionalProperties": false,
+      "description": "Closed error assembled from trusted local code and bounded public messages. Never include upstream bodies, arbitrary provider diagnostics, secrets, raw requests or paths."
+    },
+    "minutes_outcome_unknown_details": {
+      "type": "object",
+      "required": [
+        "stage",
+        "reason",
+        "outcome_unknown",
+        "target",
+        "blocked_attempt_id",
+        "origin",
+        "current_selection",
+        "content_fingerprint",
+        "latest_attempt_outcome",
+        "attempts_used",
+        "attempt_limit",
+        "retry_attempts_used",
+        "retry_attempt_limit"
+      ],
+      "properties": {
+        "stage": {
+          "const": "generate"
+        },
+        "reason": {
+          "const": "minutes_outcome_unknown"
+        },
+        "outcome_unknown": {
+          "const": true
+        },
+        "target": {
+          "$ref": "#/$defs/processing_target_ref"
+        },
+        "blocked_attempt_id": {
+          "$ref": "#/$defs/processing_attempt_id"
+        },
+        "origin": {
+          "$ref": "#/$defs/processing_origin_ref"
+        },
+        "current_selection": {
+          "$ref": "#/$defs/processing_current_selection"
+        },
+        "content_fingerprint": {
+          "$ref": "#/$defs/processing_sha256"
+        },
+        "latest_attempt_outcome": {
+          "enum": [
+            "unknown",
+            "known_failed"
+          ]
+        },
+        "attempts_used": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        },
+        "attempt_limit": {
+          "const": 64
+        },
+        "retry_attempts_used": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64,
+          "description": "Lifetime attempts already recorded for this same content-unknown ancestry, including its origin. Distinct from the current run budget."
+        },
+        "retry_attempt_limit": {
+          "const": 64,
+          "description": "Lifetime limit for this same content-unknown ancestry, independent of attempt_limit for the current run."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Typed ensemble unknown-call recovery state. target identifies the current node; origin is recovered from the blocked attempt and may belong to an older run. attempts_used/attempt_limit are the current run budget; retry_attempts_used/retry_attempt_limit are the separate lifetime budget for this same content-unknown ancestry. The latest attempt can be a known failure while an earlier unknown barrier remains unresolved. Full current config and the exact target/blocked receipt must be rechecked before consuming one minutes_retry confirmation. At the lifetime limit, reject before proof consumption, run reservation or send and preserve the barrier. Do not infer service-side processing or billing stopped."
+    }
+  }
+}

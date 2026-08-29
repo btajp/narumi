@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "narumi:defs/processing_runs.json",
+  "title": "narumi minutes ensemble opaque processing identifiers",
+  "$comment": "Opaque identity primitives shared by the finalized ensemble run, provenance and artifact response shapes.",
+  "$defs": {
+    "processing_run_id": {
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^run-[0-9a-f]{32}$",
+      "description": "Opaque minutes ensemble run identifier. Never a job ID, arbitrary path or proof of a new external call."
+    },
+    "processing_slot_id": {
+      "type": "string",
+      "minLength": 69,
+      "maxLength": 69,
+      "pattern": "^slot-[0-9a-f]{64}$",
+      "description": "Opaque canonical generator slot. It represents semantic selection/duplicate identity and is not derived from a UI generator ID, label or array position."
+    },
+    "processing_node_id": {
+      "type": "string",
+      "minLength": 69,
+      "maxLength": 69,
+      "pattern": "^node-[0-9a-f]{64}$",
+      "description": "Opaque node identifier within the currently inspected ensemble run. Content fingerprints and attempt origins are separate fields."
+    },
+    "processing_call_id": {
+      "type": "string",
+      "minLength": 69,
+      "maxLength": 69,
+      "pattern": "^call-[0-9a-f]{64}$",
+      "description": "Opaque external-call identifier for the currently inspected node. Not a provider response ID or a promise that the service processed only one request."
+    },
+    "processing_attempt_id": {
+      "type": "string",
+      "minLength": 40,
+      "maxLength": 40,
+      "pattern": "^attempt-[0-9a-f]{32}$",
+      "description": "Opaque attempt identifier. Its saved record supplies the original execution provenance; callers must not substitute the current run as that origin."
+    },
+    "processing_artifact_id": {
+      "type": "string",
+      "minLength": 41,
+      "maxLength": 41,
+      "pattern": "^artifact-[0-9a-f]{32}$",
+      "description": "Opaque immutable artifact identifier. Read access also requires the owning meeting scope and membership or recorded reuse in the requested run."
+    },
+    "processing_runs_cursor": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "description": "Opaque URL-safe page cursor bound to the requested meeting, scope and stable created_at-descending/run_id order. Do not decode it into user-controlled paths. Invalid or mismatched cursors are rejected; scope is rechecked on every page."
+    },
+    "processing_sha256": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Lowercase SHA256 for validated content/configuration. This content fingerprint is distinct from opaque run/node/call/attempt/artifact identity and must not contain secret material."
+    }
+  }
+}

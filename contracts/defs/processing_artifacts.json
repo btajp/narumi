@@ -1,0 +1,686 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "narumi:defs/processing_artifacts.json",
+  "title": "narumi durable minutes ensemble artifact records",
+  "$defs": {
+    "processing_artifact_kind": {
+      "type": "string",
+      "enum": [
+        "source_index",
+        "source",
+        "draft_chunk",
+        "draft",
+        "synthesis"
+      ]
+    },
+    "processing_generation_usage": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "total_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "cached_input_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "cache_write_input_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "reasoning_output_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "additionalProperties": false,
+      "description": "Provider-confirmed token counters only. An empty provider usage object is normalized to null; missing counters are not inferred as zero."
+    },
+    "processing_generation_metadata": {
+      "type": "object",
+      "required": [
+        "requested_selection",
+        "effective_parameters",
+        "returned_model",
+        "usage",
+        "data_destination",
+        "cost_class",
+        "retry_lineage"
+      ],
+      "properties": {
+        "requested_selection": {
+          "$ref": "#/$defs/minutes_model_selection"
+        },
+        "effective_parameters": {
+          "type": "object",
+          "description": "Closed provider-specific parameters actually applied after bounded defaults. They use the same provider schema as requested_selection.parameters and never include credentials, endpoints, paths or private responses."
+        },
+        "returned_model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "Provider-confirmed returned model, or null when no safe model identifier was confirmed."
+        },
+        "usage": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/processing_generation_usage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data_destination": {
+          "type": "string",
+          "enum": [
+            "local",
+            "openai",
+            "anthropic"
+          ]
+        },
+        "cost_class": {
+          "type": "string",
+          "enum": [
+            "local",
+            "subscription",
+            "api"
+          ]
+        },
+        "retry_lineage": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/processing_retry_lineage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Required nullable confirmed-retry ancestry for this external-call artifact. The artifact origin remains the successful retry origin; lineage preserves the original unknown and every attempt."
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "requested_selection": {
+                "required": [
+                  "provider"
+                ],
+                "properties": {
+                  "provider": {
+                    "const": "codex-app-server"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "effective_parameters": {
+                "$ref": "#/$defs/minutes_model_parameters"
+              },
+              "data_destination": {
+                "const": "openai"
+              },
+              "cost_class": {
+                "const": "subscription"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "requested_selection": {
+                "required": [
+                  "provider"
+                ],
+                "properties": {
+                  "provider": {
+                    "const": "openai-api"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "effective_parameters": {
+                "$ref": "#/$defs/openai_minutes_model_parameters"
+              },
+              "data_destination": {
+                "const": "openai"
+              },
+              "cost_class": {
+                "const": "api"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "requested_selection": {
+                "required": [
+                  "provider"
+                ],
+                "properties": {
+                  "provider": {
+                    "const": "anthropic-api"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "effective_parameters": {
+                "$ref": "#/$defs/bounded_minutes_model_parameters"
+              },
+              "data_destination": {
+                "const": "anthropic"
+              },
+              "cost_class": {
+                "const": "api"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "requested_selection": {
+                "required": [
+                  "provider"
+                ],
+                "properties": {
+                  "provider": {
+                    "const": "ollama"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "effective_parameters": {
+                "$ref": "#/$defs/bounded_minutes_model_parameters"
+              },
+              "data_destination": {
+                "const": "local"
+              },
+              "cost_class": {
+                "const": "local"
+              }
+            }
+          }
+        }
+      ],
+      "description": "Safe observation of one completed provider generation. This records the requested selection, applied parameters and confirmed public response metadata, never the raw request/response, prompt, credential or private authorization snapshot."
+    },
+    "processing_artifact_header": {
+      "type": "object",
+      "required": [
+        "artifact_id",
+        "run_id",
+        "node_id",
+        "kind",
+        "body_sha256",
+        "source_artifact_ids",
+        "origin",
+        "generation",
+        "created_at"
+      ],
+      "properties": {
+        "artifact_id": {
+          "$ref": "#/$defs/processing_artifact_id"
+        },
+        "run_id": {
+          "$ref": "#/$defs/processing_run_id",
+          "description": "Original owning run. It is immutable and can differ from requested_run_id when the artifact is reused."
+        },
+        "node_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/processing_node_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/processing_artifact_kind"
+        },
+        "body_sha256": {
+          "$ref": "#/$defs/processing_sha256",
+          "description": "Integrity hash of the complete public payload. It is distinct from the canonical request hash and downstream content projection hash."
+        },
+        "source_artifact_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/processing_artifact_id"
+          },
+          "minItems": 0,
+          "maxItems": 64,
+          "uniqueItems": true
+        },
+        "origin": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/processing_origin_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "generation": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/processing_generation_metadata"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Direct generation observation. Deterministically derived artifacts use null and never synthesize provider metadata."
+        },
+        "created_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "additionalProperties": false
+    },
+    "processing_artifact_dependency_mapping": {
+      "type": "object",
+      "required": [
+        "origin_artifact_id",
+        "current_artifact_id",
+        "content_projection_sha256"
+      ],
+      "properties": {
+        "origin_artifact_id": {
+          "$ref": "#/$defs/processing_artifact_id"
+        },
+        "current_artifact_id": {
+          "$ref": "#/$defs/processing_artifact_id"
+        },
+        "content_projection_sha256": {
+          "$ref": "#/$defs/processing_sha256",
+          "description": "Hash of the stable downstream content projection. A changed response projection prevents reuse even when a canonical provider request was identical."
+        }
+      },
+      "additionalProperties": false
+    },
+    "processing_artifact_binding": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "artifact_id",
+        "reused",
+        "dependency_mappings",
+        "authorization_snapshot_id",
+        "retry_lineage"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/processing_run_id"
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/processing_artifact_id"
+        },
+        "reused": {
+          "type": "boolean"
+        },
+        "dependency_mappings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/processing_artifact_dependency_mapping"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "authorization_snapshot_id": {
+          "type": "string",
+          "minLength": 37,
+          "maxLength": 37,
+          "pattern": "^auth-[0-9a-f]{32}$",
+          "description": "Opaque public authorization snapshot identifier. The private snapshot and credentials are never returned."
+        },
+        "retry_lineage": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/processing_retry_lineage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Required nullable retry ancestry adopted by this public binding. It remains visible even when the successful retry used a different connection."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Current requested-run adoption of an immutable artifact. Only this public dependency closure is registered for reused read membership; raw provider responses and private authorization state are excluded."
+    },
+    "published_ensemble_generator": {
+      "type": "object",
+      "required": [
+        "generator_id",
+        "label",
+        "selection",
+        "artifact_id",
+        "reused"
+      ],
+      "properties": {
+        "generator_id": {
+          "$ref": "#/$defs/ensemble_generator_id"
+        },
+        "label": {
+          "$ref": "#/$defs/ensemble_generator_label"
+        },
+        "selection": {
+          "$ref": "#/$defs/minutes_model_selection"
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/processing_artifact_id"
+        },
+        "reused": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "published_ensemble_synthesizer": {
+      "type": "object",
+      "required": [
+        "selection",
+        "artifact_id",
+        "reused"
+      ],
+      "properties": {
+        "selection": {
+          "$ref": "#/$defs/minutes_model_selection"
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/processing_artifact_id"
+        },
+        "reused": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "published_minutes_ensemble_provenance": {
+      "type": "object",
+      "required": [
+        "kind",
+        "run_id",
+        "input_artifact_id",
+        "generators",
+        "synthesizer"
+      ],
+      "properties": {
+        "kind": {
+          "const": "ensemble"
+        },
+        "run_id": {
+          "$ref": "#/$defs/processing_run_id"
+        },
+        "input_artifact_id": {
+          "$ref": "#/$defs/processing_artifact_id"
+        },
+        "generators": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/published_ensemble_generator"
+          },
+          "minItems": 2,
+          "maxItems": 4,
+          "uniqueItems": true
+        },
+        "synthesizer": {
+          "$ref": "#/$defs/published_ensemble_synthesizer"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Immutable public selection/artifact snapshot for the published minutes version. Generator IDs must be unique. This snapshot shows adopted outputs; actual provider execution and historical connection revision are followed through artifact origin and generation metadata."
+    },
+    "processing_artifact_response": {
+      "type": "object",
+      "required": [
+        "requested_run_id",
+        "artifact",
+        "payload",
+        "binding",
+        "reused"
+      ],
+      "properties": {
+        "requested_run_id": {
+          "$ref": "#/$defs/processing_run_id"
+        },
+        "artifact": {
+          "$ref": "#/$defs/processing_artifact_header"
+        },
+        "payload": {},
+        "binding": {
+          "$ref": "#/$defs/processing_artifact_binding"
+        },
+        "reused": {
+          "type": "boolean",
+          "description": "Whether the requested run adopted an artifact originally produced for another run. Server validation requires this value to equal binding.reused."
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "artifact": {
+                "properties": {
+                  "kind": {
+                    "const": "source_index"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "artifact": {
+                "properties": {
+                  "origin": {
+                    "type": "null"
+                  },
+                  "generation": {
+                    "type": "null"
+                  }
+                }
+              },
+              "payload": {
+                "$ref": "#/$defs/ensemble_source_index_document"
+              },
+              "binding": {
+                "properties": {
+                  "retry_lineage": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "artifact": {
+                "properties": {
+                  "kind": {
+                    "const": "source"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "artifact": {
+                "properties": {
+                  "origin": {
+                    "type": "null"
+                  },
+                  "generation": {
+                    "type": "null"
+                  }
+                }
+              },
+              "payload": {
+                "$ref": "#/$defs/ensemble_source_document"
+              },
+              "binding": {
+                "properties": {
+                  "retry_lineage": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "artifact": {
+                "properties": {
+                  "kind": {
+                    "const": "draft_chunk"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "artifact": {
+                "properties": {
+                  "origin": {
+                    "$ref": "#/$defs/processing_origin_ref"
+                  },
+                  "generation": {
+                    "$ref": "#/$defs/processing_generation_metadata"
+                  }
+                }
+              },
+              "payload": {
+                "$ref": "#/$defs/ensemble_document"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "artifact": {
+                "properties": {
+                  "kind": {
+                    "const": "draft"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "artifact": {
+                "properties": {
+                  "origin": {
+                    "type": "null"
+                  },
+                  "generation": {
+                    "type": "null"
+                  }
+                }
+              },
+              "payload": {
+                "$ref": "#/$defs/ensemble_draft_document"
+              },
+              "binding": {
+                "properties": {
+                  "retry_lineage": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "artifact": {
+                "properties": {
+                  "kind": {
+                    "const": "synthesis"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "artifact": {
+                "properties": {
+                  "origin": {
+                    "$ref": "#/$defs/processing_origin_ref"
+                  },
+                  "generation": {
+                    "$ref": "#/$defs/processing_generation_metadata"
+                  }
+                }
+              },
+              "payload": {
+                "$ref": "#/$defs/ensemble_document"
+              }
+            }
+          }
+        }
+      ],
+      "description": "Artifact as adopted by requested_run_id. The server requires requested_run_id == binding.run_id, artifact.artifact_id == binding.artifact_id, reused == binding.reused and verified ownership/reuse membership; artifact.run_id remains its immutable original owner. For a generated external-call artifact, generation.retry_lineage and binding.retry_lineage are both null or exactly equal and also match the corresponding processing node. Kind, payload, origin and generation-nullability are validated together."
+    }
+  }
+}

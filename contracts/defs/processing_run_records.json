@@ -1,0 +1,427 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "narumi:defs/processing_run_records.json",
+  "title": "narumi durable minutes ensemble run and node records",
+  "$comment": "Draft public run/node shapes. State-dependent graph, membership and publication invariants are additionally enforced by typed/server validation.",
+  "$defs": {
+    "processing_run_status": {
+      "type": "string",
+      "enum": [
+        "prepared",
+        "running",
+        "blocked",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "interrupted"
+      ],
+      "description": "succeeded means the validated final version is published in the meeting manifest. A running run without an active execution-lease owner is recovered as interrupted if no pending call remains, or blocked with unknown nodes for unresolved pending calls; valid saved receipts are restored without resending. Volatile job disappearance is never proof of completion."
+    },
+    "processing_node_status": {
+      "type": "string",
+      "enum": [
+        "prepared",
+        "submitted",
+        "succeeded",
+        "reused",
+        "failed",
+        "unknown",
+        "cancelled"
+      ]
+    },
+    "processing_node_role": {
+      "type": "string",
+      "enum": [
+        "generator",
+        "synthesizer"
+      ]
+    },
+    "processing_node_phase": {
+      "type": "string",
+      "enum": [
+        "chunk",
+        "reduce",
+        "final"
+      ]
+    },
+    "processing_node": {
+      "type": "object",
+      "required": [
+        "node_id",
+        "role",
+        "generator_id",
+        "slot_id",
+        "phase",
+        "status",
+        "call_id",
+        "content_fingerprint",
+        "dependency_node_ids",
+        "artifact_id",
+        "origin",
+        "retry_lineage",
+        "reused",
+        "error"
+      ],
+      "properties": {
+        "node_id": {
+          "$ref": "#/$defs/processing_node_id"
+        },
+        "role": {
+          "$ref": "#/$defs/processing_node_role"
+        },
+        "generator_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ensemble_generator_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "slot_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/processing_slot_id"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Canonical generator slot for generator nodes, null for synthesizer nodes. It does not change when only current generator ID, label or UI order changes."
+        },
+        "phase": {
+          "$ref": "#/$defs/processing_node_phase"
+        },
+        "status": {
+          "$ref": "#/$defs/processing_node_status"
+        },
+        "call_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/processing_call_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "content_fingerprint": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/processing_sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dependency_node_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/processing_node_id"
+          },
+          "maxItems": 4096,
+          "uniqueItems": true
+        },
+        "artifact_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/processing_artifact_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "origin": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/processing_origin_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retry_lineage": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/processing_retry_lineage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Required nullable confirmed-retry ancestry for this node. null means no unknown-origin retry chain."
+        },
+        "reused": {
+          "type": "boolean"
+        },
+        "error": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/processing_safe_error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "description": "One planned text-ensemble node. Planned models come from the run ensemble snapshot, not a fabricated origin on an unexecuted node. Implementations validate graph membership, unique IDs, role/generator/slot association, status/artifact/origin/retry-lineage consistency and the 8192 aggregate-binding limit. A non-null node retry_lineage must equal the corresponding generated artifact and public binding lineage. An original unknown node stays unknown even when a later confirmed attempt succeeds; the resulting artifact keeps the successful retry origin and complete lineage. Reused output is not another independent provider execution."
+    },
+    "processing_canonical_slot": {
+      "type": "object",
+      "required": [
+        "slot_id",
+        "generator_id",
+        "canonical_ordinal",
+        "duplicate_ordinal",
+        "selection_scope_sha256",
+        "cache_epoch",
+        "draft_artifact_id"
+      ],
+      "properties": {
+        "slot_id": {
+          "$ref": "#/$defs/processing_slot_id"
+        },
+        "generator_id": {
+          "$ref": "#/$defs/ensemble_generator_id"
+        },
+        "canonical_ordinal": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "duplicate_ordinal": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "selection_scope_sha256": {
+          "$ref": "#/$defs/processing_sha256",
+          "description": "Hash of provider, connection_id and resolver content conditions. It excludes connection revision, generator ID, label and UI order."
+        },
+        "cache_epoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "draft_artifact_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/processing_artifact_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "description": "Current UI generator-to-canonical-slot/artifact projection. In the run array, slot_id, generator_id and canonical_ordinal are each unique; canonical ordinals are 0..n-1. Items are sorted by (selection_scope_sha256, cache_epoch, duplicate_ordinal), and duplicate ordinals within one scope+epoch are 0..k-1. Typed/server validation enforces these cross-item rules."
+    },
+    "processing_draft_artifact_binding": {
+      "type": "object",
+      "required": [
+        "generator_id",
+        "artifact_id"
+      ],
+      "properties": {
+        "generator_id": {
+          "$ref": "#/$defs/ensemble_generator_id"
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/processing_artifact_id"
+        }
+      },
+      "additionalProperties": false,
+      "description": "A generator draft artifact adopted by this run. Different generators may explicitly share a validated artifact; this is not evidence of two independent generations."
+    },
+    "processing_run_summary": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "kind",
+        "status",
+        "created_at",
+        "updated_at",
+        "generator_count",
+        "completed_generators",
+        "attempts_used",
+        "attempt_limit",
+        "published_version",
+        "blocked_calls"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/processing_run_id"
+        },
+        "kind": {
+          "const": "minutes_ensemble"
+        },
+        "status": {
+          "$ref": "#/$defs/processing_run_status"
+        },
+        "created_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "generator_count": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 4
+        },
+        "completed_generators": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4
+        },
+        "attempts_used": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        },
+        "attempt_limit": {
+          "const": 64
+        },
+        "published_version": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "blocked_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4096
+        }
+      },
+      "additionalProperties": false,
+      "description": "Bounded, lightweight list entry without node or artifact bodies. completed_generators counts validated adopted generator drafts and must not exceed generator_count. Counts describe this run, not billed requests or a cost estimate."
+    },
+    "processing_run": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "kind",
+        "status",
+        "ensemble",
+        "external_send_policy",
+        "input_artifact_id",
+        "configuration_sha256",
+        "canonical_slots",
+        "attempts_used",
+        "attempt_limit",
+        "nodes",
+        "draft_artifact_ids",
+        "synthesis_artifact_id",
+        "published_version",
+        "blocked",
+        "error",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/processing_run_id"
+        },
+        "kind": {
+          "const": "minutes_ensemble"
+        },
+        "status": {
+          "$ref": "#/$defs/processing_run_status"
+        },
+        "ensemble": {
+          "$ref": "#/$defs/minutes_ensemble_selection"
+        },
+        "external_send_policy": {
+          "$ref": "#/$defs/external_send_policy"
+        },
+        "input_artifact_id": {
+          "$ref": "#/$defs/processing_artifact_id"
+        },
+        "configuration_sha256": {
+          "$ref": "#/$defs/processing_sha256"
+        },
+        "canonical_slots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/processing_canonical_slot"
+          },
+          "minItems": 2,
+          "maxItems": 4,
+          "description": "Canonical semantic slots with their current generator/provenance projection. ID-only changes update this mapping and do not start another run or provider request."
+        },
+        "attempts_used": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        },
+        "attempt_limit": {
+          "const": 64
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/processing_node"
+          },
+          "maxItems": 4096
+        },
+        "draft_artifact_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/processing_draft_artifact_binding"
+          },
+          "maxItems": 8192
+        },
+        "synthesis_artifact_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/processing_artifact_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "published_version": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "blocked": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/minutes_outcome_unknown_details"
+          },
+          "maxItems": 4096
+        },
+        "error": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/processing_safe_error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "created_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Durable minutes-ensemble execution record. ensemble and policy are the fixed current-run authorization snapshot; historical calls retain separate origin. The semantic run/64-attempt identity excludes connection revision, generator IDs, labels and UI order: it uses the multiset of resolver content scopes with cache_epoch, deterministic duplicate ordinals and synthesizer content scope. Changes to excluded identities adopt canonical slots/artifacts without starting a new run or provider send, while current authorization is still revalidated. A read validates at most 4096 nodes and 8192 aggregate bindings, graph/artifact membership, unique current generator identity and publication truth. Partial successful drafts remain readable without a published final version. No synthetic runs are created for legacy single generation or ASR."
+    }
+  }
+}

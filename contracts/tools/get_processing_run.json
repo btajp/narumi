@@ -1,0 +1,306 @@
+{
+  "name": "get_processing_run",
+  "title": "Get processing run",
+  "description": "Read one bounded durable minutes-ensemble run using meeting_id, authorized scope and opaque run_id. Include partial successful work without treating it as published. The snapshot carries planned selections/policy and canonical generator slots; executed nodes keep separate historical origin and nullable confirmed-retry lineage. A successful retry may use a different connection without rewriting its original unknown ancestry. Volatile jobs and durable runs are distinct; no legacy single-generation or ASR run is fabricated. Without an active execution-lease owner, recover stale running as interrupted when no unresolved pending call remains, or blocked with unknown details otherwise. Restore valid receipts without resending and never infer completion from a missing job. Local read only; no filesystem path input. On failure return error_envelope (isError=true) with code not_found, scope_denied, invalid_argument or internal.",
+  "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "meeting_id": {
+        "$ref": "../defs/common.json#/$defs/meeting_id"
+      },
+      "scope": {
+        "$ref": "../defs/common.json#/$defs/scope"
+      },
+      "run_id": {
+        "$ref": "../defs/processing_runs.json#/$defs/processing_run_id"
+      }
+    },
+    "required": [
+      "meeting_id",
+      "run_id"
+    ],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": [
+      "meeting_id",
+      "run"
+    ],
+    "properties": {
+      "meeting_id": {
+        "$ref": "../defs/common.json#/$defs/meeting_id"
+      },
+      "run": {
+        "$ref": "../defs/processing_run_records.json#/$defs/processing_run"
+      }
+    },
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "run_id": "run-33333333333333333333333333333333"
+      },
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "scope": "cloudnative",
+        "run_id": "run-77777777777777777777777777777777"
+      }
+    ],
+    "output": [
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "run": {
+          "run_id": "run-33333333333333333333333333333333",
+          "kind": "minutes_ensemble",
+          "status": "blocked",
+          "ensemble": {
+            "generators": [
+              {
+                "id": "gen-11111111111111111111111111111111",
+                "label": "OpenAI案",
+                "selection": {
+                  "provider": "openai-api",
+                  "connection_id": "conn-111122223333",
+                  "connection_revision": 1,
+                  "model_id": "fixture-openai-api-text-model",
+                  "parameters": {
+                    "max_tokens": 4096
+                  },
+                  "cache_epoch": 0
+                }
+              },
+              {
+                "id": "gen-22222222222222222222222222222222",
+                "label": "Anthropic案",
+                "selection": {
+                  "provider": "anthropic-api",
+                  "connection_id": "conn-444455556666",
+                  "connection_revision": 1,
+                  "model_id": "fixture-anthropic-api-text-model",
+                  "parameters": {
+                    "max_tokens": 4096
+                  },
+                  "cache_epoch": 0
+                }
+              }
+            ],
+            "synthesizer": {
+              "provider": "codex-app-server",
+              "connection_id": "conn-fedcba987654",
+              "connection_revision": 1,
+              "model_id": "fixture-text-model",
+              "parameters": {
+                "reasoning_effort": "high"
+              },
+              "cache_epoch": 0
+            }
+          },
+          "external_send_policy": "api_ok",
+          "input_artifact_id": "artifact-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "configuration_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "canonical_slots": [
+            {
+              "slot_id": "slot-1111111111111111111111111111111111111111111111111111111111111111",
+              "generator_id": "gen-11111111111111111111111111111111",
+              "canonical_ordinal": 0,
+              "duplicate_ordinal": 0,
+              "selection_scope_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+              "cache_epoch": 0,
+              "draft_artifact_id": "artifact-cccccccccccccccccccccccccccccccc"
+            },
+            {
+              "slot_id": "slot-2222222222222222222222222222222222222222222222222222222222222222",
+              "generator_id": "gen-22222222222222222222222222222222",
+              "canonical_ordinal": 1,
+              "duplicate_ordinal": 0,
+              "selection_scope_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+              "cache_epoch": 0,
+              "draft_artifact_id": null
+            }
+          ],
+          "attempts_used": 3,
+          "attempt_limit": 64,
+          "nodes": [
+            {
+              "node_id": "node-4444444444444444444444444444444444444444444444444444444444444444",
+              "role": "generator",
+              "generator_id": "gen-11111111111111111111111111111111",
+              "phase": "final",
+              "status": "succeeded",
+              "call_id": "call-7777777777777777777777777777777777777777777777777777777777777777",
+              "content_fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "dependency_node_ids": [],
+              "artifact_id": "artifact-cccccccccccccccccccccccccccccccc",
+              "origin": {
+                "run_id": "run-33333333333333333333333333333333",
+                "node_id": "node-4444444444444444444444444444444444444444444444444444444444444444",
+                "call_id": "call-7777777777777777777777777777777777777777777777777777777777777777",
+                "attempt_id": "attempt-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "provider": "openai-api",
+                "connection_id": "conn-111122223333",
+                "connection_revision": 1,
+                "model_id": "fixture-openai-api-text-model"
+              },
+              "reused": false,
+              "error": null,
+              "slot_id": "slot-1111111111111111111111111111111111111111111111111111111111111111",
+              "retry_lineage": {
+                "origin_unknown": {
+                  "run_id": "run-77777777777777777777777777777777",
+                  "node_id": "node-3333333333333333333333333333333333333333333333333333333333333333",
+                  "call_id": "call-6666666666666666666666666666666666666666666666666666666666666666",
+                  "attempt_id": "attempt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "provider": "anthropic-api",
+                  "connection_id": "conn-444455556666",
+                  "connection_revision": 1,
+                  "model_id": "fixture-anthropic-api-text-model"
+                },
+                "attempt_chain": [
+                  {
+                    "attempt": {
+                      "run_id": "run-77777777777777777777777777777777",
+                      "node_id": "node-3333333333333333333333333333333333333333333333333333333333333333",
+                      "call_id": "call-6666666666666666666666666666666666666666666666666666666666666666",
+                      "attempt_id": "attempt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "provider": "anthropic-api",
+                      "connection_id": "conn-444455556666",
+                      "connection_revision": 1,
+                      "model_id": "fixture-anthropic-api-text-model"
+                    },
+                    "outcome": "unknown"
+                  },
+                  {
+                    "attempt": {
+                      "run_id": "run-33333333333333333333333333333333",
+                      "node_id": "node-4444444444444444444444444444444444444444444444444444444444444444",
+                      "call_id": "call-7777777777777777777777777777777777777777777777777777777777777777",
+                      "attempt_id": "attempt-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                      "provider": "openai-api",
+                      "connection_id": "conn-111122223333",
+                      "connection_revision": 1,
+                      "model_id": "fixture-openai-api-text-model"
+                    },
+                    "outcome": "succeeded"
+                  }
+                ],
+                "resolved_by": {
+                  "run_id": "run-33333333333333333333333333333333",
+                  "node_id": "node-4444444444444444444444444444444444444444444444444444444444444444",
+                  "call_id": "call-7777777777777777777777777777777777777777777777777777777777777777",
+                  "attempt_id": "attempt-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "provider": "openai-api",
+                  "connection_id": "conn-111122223333",
+                  "connection_revision": 1,
+                  "model_id": "fixture-openai-api-text-model"
+                }
+              }
+            },
+            {
+              "node_id": "node-5555555555555555555555555555555555555555555555555555555555555555",
+              "role": "generator",
+              "generator_id": "gen-22222222222222222222222222222222",
+              "phase": "final",
+              "status": "unknown",
+              "call_id": "call-8888888888888888888888888888888888888888888888888888888888888888",
+              "content_fingerprint": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "dependency_node_ids": [],
+              "artifact_id": null,
+              "origin": {
+                "run_id": "run-33333333333333333333333333333333",
+                "node_id": "node-5555555555555555555555555555555555555555555555555555555555555555",
+                "call_id": "call-8888888888888888888888888888888888888888888888888888888888888888",
+                "attempt_id": "attempt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "provider": "anthropic-api",
+                "connection_id": "conn-444455556666",
+                "connection_revision": 1,
+                "model_id": "fixture-anthropic-api-text-model"
+              },
+              "reused": false,
+              "error": {
+                "code": "engine_unavailable",
+                "message": "Minutes generation outcome is unknown; explicit call confirmation is required.",
+                "reason": "minutes_outcome_unknown"
+              },
+              "slot_id": "slot-2222222222222222222222222222222222222222222222222222222222222222",
+              "retry_lineage": null
+            },
+            {
+              "node_id": "node-6666666666666666666666666666666666666666666666666666666666666666",
+              "role": "synthesizer",
+              "generator_id": null,
+              "phase": "final",
+              "status": "prepared",
+              "call_id": null,
+              "content_fingerprint": null,
+              "dependency_node_ids": [
+                "node-4444444444444444444444444444444444444444444444444444444444444444",
+                "node-5555555555555555555555555555555555555555555555555555555555555555"
+              ],
+              "artifact_id": null,
+              "origin": null,
+              "reused": false,
+              "error": null,
+              "slot_id": null,
+              "retry_lineage": null
+            }
+          ],
+          "draft_artifact_ids": [
+            {
+              "generator_id": "gen-11111111111111111111111111111111",
+              "artifact_id": "artifact-cccccccccccccccccccccccccccccccc"
+            }
+          ],
+          "synthesis_artifact_id": null,
+          "published_version": null,
+          "blocked": [
+            {
+              "stage": "generate",
+              "reason": "minutes_outcome_unknown",
+              "outcome_unknown": true,
+              "target": {
+                "run_id": "run-33333333333333333333333333333333",
+                "node_id": "node-5555555555555555555555555555555555555555555555555555555555555555",
+                "call_id": "call-8888888888888888888888888888888888888888888888888888888888888888"
+              },
+              "blocked_attempt_id": "attempt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "origin": {
+                "run_id": "run-33333333333333333333333333333333",
+                "node_id": "node-5555555555555555555555555555555555555555555555555555555555555555",
+                "call_id": "call-8888888888888888888888888888888888888888888888888888888888888888",
+                "attempt_id": "attempt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "provider": "anthropic-api",
+                "connection_id": "conn-444455556666",
+                "connection_revision": 1,
+                "model_id": "fixture-anthropic-api-text-model"
+              },
+              "current_selection": {
+                "provider": "anthropic-api",
+                "connection_id": "conn-444455556666",
+                "connection_revision": 1,
+                "model_id": "fixture-anthropic-api-text-model"
+              },
+              "content_fingerprint": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "latest_attempt_outcome": "unknown",
+              "attempts_used": 3,
+              "attempt_limit": 64,
+              "retry_attempts_used": 1,
+              "retry_attempt_limit": 64
+            }
+          ],
+          "error": null,
+          "created_at": "2026-08-29T08:00:00Z",
+          "updated_at": "2026-08-29T08:02:00Z"
+        }
+      }
+    ]
+  }
+}

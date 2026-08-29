@@ -425,7 +425,7 @@
         },
         "ensemble_generation": {
           "type": "boolean",
-          "description": "Independent drafts followed by synthesis are implemented."
+          "description": "True only after the complete text-ensemble execution/read/retry/publication path is implemented and verified for this transport. Limits alone do not imply availability. All participant capabilities and authorization must still be validated."
         }
       },
       "additionalProperties": false
