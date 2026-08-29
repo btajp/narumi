@@ -61,6 +61,9 @@ def get_server_info(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
         "minutes_model_providers": (
             list(MINUTES_MODEL_PROVIDERS) if "streamable-http" in ctx.transports else []
         ),
+        "transcription_model_providers": (
+            ["openai-api"] if "streamable-http" in ctx.transports else []
+        ),
     }
     if permissions is not None:
         capabilities["permissions"] = permissions

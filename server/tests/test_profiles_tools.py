@@ -8,8 +8,10 @@ from typing import Any
 
 import pytest
 from conftest import PerCallClient, call, fake_process_meeting, wait_job
+from narumi import profiles_io
 from narumi.bundle import Bundle
 from narumi.errors import InvalidArgumentError
+from narumi.models import MeetingConfig
 from narumi_server.context import ServerContext
 from test_surface_tools import write_silence_wav  # shared helper (rootdir is on sys.path)
 
@@ -111,6 +113,71 @@ async def test_set_profile_validation(client: PerCallClient, ctx: ServerContext)
     assert destination["error"]["details"]["unknown"] == ["nope"]
     # nothing was persisted by the rejected calls
     assert (await call(client, "get_profile", {"name": "bad"}))["error"]["code"] == "not_found"
+
+
+async def test_profile_cas_merges_only_the_confirmed_snapshot(
+    client: PerCallClient, ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
+):
+    expected = MeetingConfig(transcription_engine="fake", language="ja", self_name="confirmed")
+    transient = expected.model_copy(update={"language": "en", "self_name": "intervening"})
+    ctx.profiles.set("confirmed", config=expected)
+    original_peek = ctx.profiles.peek
+
+    def transient_snapshot(name: str):
+        ctx.profiles.set(name, config=transient)
+        snapshot = original_peek(name)
+        ctx.profiles.set(name, config=expected)
+        return snapshot
+
+    monkeypatch.setattr(ctx.profiles, "peek", transient_snapshot)
+    response = await call(
+        client,
+        "set_profile",
+        {
+            "name": "confirmed",
+            "expected_config": expected.model_dump(mode="json"),
+            "config": {"vocab_hints": ["new term"]},
+            "request_id": rid(),
+        },
+    )
+    confirmed_update = expected.model_copy(update={"vocab_hints": ["new term"]})
+    assert response["profile"]["config"] == confirmed_update.model_dump(mode="json")
+    assert ctx.profiles.get("confirmed").config == confirmed_update
+
+
+async def test_profile_post_publication_failure_requires_readback(
+    client: PerCallClient, ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
+):
+    expected = MeetingConfig(transcription_engine="fake", language="ja")
+    ctx.profiles.set("confirmed", config=expected)
+    original_sync = profiles_io.os.fsync
+    sync_count = 0
+
+    def fail_directory_sync(descriptor: int) -> None:
+        nonlocal sync_count
+        sync_count += 1
+        if sync_count == 2:
+            raise OSError("synthetic directory sync failure")
+        original_sync(descriptor)
+
+    monkeypatch.setattr(profiles_io.os, "fsync", fail_directory_sync)
+    response = await call(
+        client,
+        "set_profile",
+        {
+            "name": "confirmed",
+            "expected_config": expected.model_dump(mode="json"),
+            "config": {"language": "en"},
+            "request_id": rid(),
+        },
+    )
+    assert response["error"]["code"] == "configuration_conflict"
+    assert response["error"]["details"] == {
+        "reason": "profile_save_outcome_unknown",
+        "outcome_unknown": True,
+    }
+    actual = await call(client, "get_profile", {"name": "confirmed"})
+    assert actual["profile"]["config"]["language"] == "en"
 
 
 # ---------------------------------------------------------------------------- profile defaults

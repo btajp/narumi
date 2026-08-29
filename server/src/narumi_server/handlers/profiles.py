@@ -40,8 +40,16 @@ def get_profile(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
 
 def set_profile(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
     name = args["name"]
-    current = ctx.profiles.peek(name)
-    base = current.config if current is not None else MeetingConfig()
+    expected = (
+        MeetingConfig.model_validate(args["expected_config"]) if "expected_config" in args else None
+    )
+    if expected is not None:
+        # Merge from the exact confirmed snapshot, not a transient read that could
+        # differ even if the save-time comparison subsequently succeeds.
+        base = expected
+    else:
+        current = ctx.profiles.peek(name)
+        base = current.config if current is not None else MeetingConfig()
     config = config_from_mapping(base, args.get("config"))
     destinations = args.get("export_destinations")
     if destinations is not None:
@@ -58,6 +66,7 @@ def set_profile(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
         profile = ctx.profiles.set(
             name,
             config=config,
+            expected_config=expected,
             scope=args.get("scope", UNSET),
             engagement=args.get("engagement", UNSET),
             export_destinations=destinations,

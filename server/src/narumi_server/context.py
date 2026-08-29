@@ -52,6 +52,7 @@ class ServerContext:
     provider_metadata_client: MetadataClient | None = field(default=None, repr=False)
     provider_codex_backend: Any | None = field(default=None, repr=False)
     provider_http_backend: Any | None = field(default=None, repr=False)
+    provider_audio_backend: Any | None = field(default=None, repr=False)
     transports: list[str] = field(default_factory=list)
     validate_output: bool = False
     handlers: Mapping[str, Handler] = field(default_factory=lambda: dict(HANDLERS))
@@ -74,6 +75,7 @@ class ServerContext:
                 metadata_client=self.provider_metadata_client,
                 codex_backend=self.provider_codex_backend,
                 http_backend=self.provider_http_backend,
+                audio_backend=self.provider_audio_backend,
                 recover="streamable-http" in self.transports,
                 contracts=self.contracts,
                 server_instance_id=self.server_instance_id,
@@ -95,9 +97,9 @@ class ServerContext:
         """
         try:
             for profile in self.profiles.list():
-                selected = profile.config.minutes_model
-                if selected is not None and selected.connection_id == connection_id:
-                    return True
+                for selected in (profile.config.minutes_model, profile.config.transcription_model):
+                    if selected is not None and selected.connection_id == connection_id:
+                        return True
             for folder in self.meetings_root.iterdir():
                 if not folder.is_dir():
                     continue
@@ -107,9 +109,12 @@ class ServerContext:
                     # A meeting may have been moved to trash after the directory listing.
                     continue
                 manifest = Manifest.model_validate_json(contents)
-                selected = manifest.config.minutes_model
-                if selected is not None and selected.connection_id == connection_id:
-                    return True
+                for selected in (
+                    manifest.config.minutes_model,
+                    manifest.config.transcription_model,
+                ):
+                    if selected is not None and selected.connection_id == connection_id:
+                        return True
         except (OSError, ValueError, NarumiError):
             raise BusyError("Saved model references could not be verified") from None
         return False
@@ -175,6 +180,7 @@ def build_context(
     provider_metadata_client: MetadataClient | None = None,
     provider_codex_backend: Any | None = None,
     provider_http_backend: Any | None = None,
+    provider_audio_backend: Any | None = None,
     server_instance_id: str | None = None,
 ) -> ServerContext:
     """Assemble a :class:`ServerContext` from settings and the environment.
@@ -205,6 +211,7 @@ def build_context(
         provider_metadata_client=provider_metadata_client,
         provider_codex_backend=provider_codex_backend,
         provider_http_backend=provider_http_backend,
+        provider_audio_backend=provider_audio_backend,
         server_instance_id=server_instance_id if server_instance_id is not None else str(uuid4()),
         transports=list(transports),
         validate_output=(
