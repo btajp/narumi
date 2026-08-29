@@ -263,11 +263,21 @@ usageは6種類の任意counterを1件以上持ち、空のprovider usageはnull
 runは2〜4件のcanonical slotを持ち、現在のgenerator IDと採用draftをsemantic slotへ対応付ける。
 slotはselection scope hash、cache epoch、duplicate ordinalの順で固定し、ID・label・UI順序だけの変更は同じslotを採用する。
 同じartifactを共有するslotはsynthesizerへ1件だけ渡し、別artifactでも同じprojectionならprojectionとwire duplicate ordinalで正規化する。
+runのstatus=succeededは公開済みversionとsynthesis artifactを必須にし、blockedは空、run errorはnullにする。
+status=blockedは1件以上のtyped blocked callを必須にする。nodeのsucceeded/reusedはartifactを必須にし、
+succeededはreused=false、reused statusはreused=trueと一致させる。決定的な派生artifactのorigin=nullは正当なため禁止しない。
+
+未解決の同一content fingerprintはblocked recordを1件だけ公開する。blocked_attempt_idはbarrierのcursor attempt、
+targetはcursor attemptを所有するrun/node/call、latest_attempt_outcomeはcursorの保存状態と一致させる。
+barrier key・cursor receipt・call・node・後続lineageの全attemptが同じfingerprintを持つことをtyped storage/serverで検査する。
 
 結果不明callを確認付きで再試行した場合は、node・外部callのgeneration・公開bindingにrequired nullableなretry lineageを返す。
 lineageは最初のunknown origin、最大64件のattempt/outcome鎖、最後の成功attemptを保持する。
 別接続で成功しても元のunknownを上書きせず、成果物originは実際に成功した再送先を示す。
-未再試行はnull。先頭一致、attempt ID一意、retry ancestry順、末尾成功とresolved_byの一致を型とserverで検査する。
+鎖のi>0は直前attemptの直接retryとし、privateなretry_of edgeは公開しない。Schemaは成功outcomeを最大1件、
+resolved_by=nullなら0件、nonnullなら1件に制約する。未再試行はnull。先頭一致、attempt ID一意、private edge、
+末尾成功attemptとresolved_byの同値はtyped storage/serverで検査する。生成artifactのlineageがnonnullならresolved_byもnonnullとし、
+artifact originとの同値をtyped storage/serverで検査する。node・artifact generation・bindingのlineageも同値でなければならない。
 この64件は同一content unknown barrierの生涯上限で、各runの64試行とは別に数える。
 65件目は確認proofを消費せず、run予算を予約せず、送信0件で拒否し、元のunknown/chainを保持する。
 安全なnode error reasonは`minutes_retry_limit_exceeded`。別contentの再試行枠は消費しない。

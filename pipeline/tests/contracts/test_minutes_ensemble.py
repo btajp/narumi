@@ -6,6 +6,8 @@ from copy import deepcopy
 from typing import Any
 
 import pytest
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 from narumi.contracts import ContractSet, load_contracts
 from narumi.errors import ContractMismatchError, InvalidArgumentError
 from narumi.minutes_ensemble import MinutesEnsembleSelection, MinutesRetry
@@ -610,3 +612,144 @@ def test_processing_reads_require_slots_and_nullable_retry_lineage(
     )
     with pytest.raises(ContractMismatchError):
         contracts.validate_output("get_processing_artifact", derived)
+
+
+def test_retry_lineage_schema_bounds_success_and_keeps_retry_edges_private(
+    contracts: ContractSet,
+) -> None:
+    generated = deepcopy(contracts["get_processing_artifact"].output_examples[0])
+    lineage = generated["artifact"]["generation"]["retry_lineage"]
+    validator = Draft202012Validator(contracts.schema_for_def("processing_retry_lineage"))
+    validator.validate(lineage)
+
+    duplicate_success = deepcopy(lineage)
+    duplicate_success["attempt_chain"].append(deepcopy(duplicate_success["attempt_chain"][-1]))
+    duplicate_success["attempt_chain"][-1]["attempt"]["attempt_id"] = "attempt-" + "c" * 32
+    with pytest.raises(JsonSchemaValidationError):
+        validator.validate(duplicate_success)
+
+    unresolved_success = deepcopy(lineage)
+    unresolved_success["resolved_by"] = None
+    with pytest.raises(JsonSchemaValidationError):
+        validator.validate(unresolved_success)
+
+    resolved_without_success = deepcopy(lineage)
+    resolved_without_success["attempt_chain"][-1]["outcome"] = "known_failed"
+    with pytest.raises(JsonSchemaValidationError):
+        validator.validate(resolved_without_success)
+
+    wrong_first_outcome = deepcopy(lineage)
+    wrong_first_outcome["attempt_chain"][0]["outcome"] = "known_failed"
+    with pytest.raises(JsonSchemaValidationError):
+        validator.validate(wrong_first_outcome)
+
+    public_retry_edge = deepcopy(lineage)
+    public_retry_edge["attempt_chain"][1]["retry_of_attempt_id"] = lineage["attempt_chain"][0][
+        "attempt"
+    ]["attempt_id"]
+    with pytest.raises(JsonSchemaValidationError):
+        validator.validate(public_retry_edge)
+
+
+def test_generated_artifact_retry_lineage_must_be_resolved(
+    contracts: ContractSet,
+) -> None:
+    generated = deepcopy(contracts["get_processing_artifact"].output_examples[0])
+    unresolved = deepcopy(generated["artifact"]["generation"]["retry_lineage"])
+    unresolved["attempt_chain"][-1]["outcome"] = "known_failed"
+    unresolved["resolved_by"] = None
+    Draft202012Validator(contracts.schema_for_def("processing_retry_lineage")).validate(unresolved)
+
+    generated["artifact"]["generation"]["retry_lineage"] = unresolved
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("get_processing_artifact", generated)
+
+
+def test_processing_run_status_requires_publication_or_blocked_details(
+    contracts: ContractSet,
+) -> None:
+    blocked = deepcopy(contracts["get_processing_run"].output_examples[0])
+    contracts.validate_output("get_processing_run", blocked)
+
+    missing_block = deepcopy(blocked)
+    missing_block["run"]["blocked"] = []
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("get_processing_run", missing_block)
+
+    succeeded = deepcopy(blocked)
+    succeeded["run"].update(
+        status="succeeded",
+        synthesis_artifact_id="artifact-" + "f" * 32,
+        published_version=1,
+        blocked=[],
+        error=None,
+    )
+    contracts.validate_output("get_processing_run", succeeded)
+
+    invalid_values = (
+        ("synthesis_artifact_id", None),
+        ("published_version", None),
+        ("blocked", deepcopy(blocked["run"]["blocked"])),
+        ("error", deepcopy(blocked["run"]["nodes"][1]["error"])),
+    )
+    for field, value in invalid_values:
+        invalid = deepcopy(succeeded)
+        invalid["run"][field] = value
+        with pytest.raises(ContractMismatchError):
+            contracts.validate_output("get_processing_run", invalid)
+
+
+def test_processing_node_status_matches_artifact_and_reuse_flag(
+    contracts: ContractSet,
+) -> None:
+    output = deepcopy(contracts["get_processing_run"].output_examples[0])
+    succeeded = output["run"]["nodes"][0]
+    assert succeeded["status"] == "succeeded"
+    assert succeeded["artifact_id"] is not None
+    assert succeeded["reused"] is False
+
+    missing_artifact = deepcopy(output)
+    missing_artifact["run"]["nodes"][0]["artifact_id"] = None
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("get_processing_run", missing_artifact)
+
+    wrong_success_reuse = deepcopy(output)
+    wrong_success_reuse["run"]["nodes"][0]["reused"] = True
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("get_processing_run", wrong_success_reuse)
+
+    reused = deepcopy(output)
+    reused_node = reused["run"]["nodes"][0]
+    reused_node.update(status="reused", reused=True, origin=None, retry_lineage=None)
+    contracts.validate_output("get_processing_run", reused)
+
+    wrong_reused_flag = deepcopy(reused)
+    wrong_reused_flag["run"]["nodes"][0]["reused"] = False
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("get_processing_run", wrong_reused_flag)
+
+    reused_without_artifact = deepcopy(reused)
+    reused_without_artifact["run"]["nodes"][0]["artifact_id"] = None
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("get_processing_run", reused_without_artifact)
+
+    reused_nonterminal = deepcopy(output)
+    reused_nonterminal["run"]["nodes"][2]["reused"] = True
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("get_processing_run", reused_nonterminal)
+
+
+def test_processing_runtime_lineage_invariants_are_normative(contracts: ContractSet) -> None:
+    lineage_description = contracts.schema_for_def("processing_retry_lineage")["description"]
+    assert "directly retries item i-1" in lineage_description
+    assert "private durable retry_of" in lineage_description
+    assert "final chain item whose attempt equals resolved_by" in lineage_description
+
+    blocked_description = contracts.schema_for_def("minutes_outcome_unknown_details")["description"]
+    assert "exactly one public blocked record" in blocked_description
+    assert "blocked_attempt_id is the barrier cursor attempt" in blocked_description
+    assert "target is that cursor attempt's owning run/node/call" in blocked_description
+    assert "same content fingerprint" in blocked_description
+
+    artifact_description = contracts.schema_for_def("processing_artifact_header")["description"]
+    assert "origin must equal retry_lineage.resolved_by" in artifact_description

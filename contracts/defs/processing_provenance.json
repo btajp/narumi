@@ -114,7 +114,8 @@
           ]
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "description": "One public attempt observation in a retry lineage. The private retry_of edge is deliberately omitted; typed storage proves that every item after index 0 directly retries the immediately preceding attempt."
     },
     "processing_retry_lineage": {
       "type": "object",
@@ -132,6 +133,30 @@
           "items": {
             "$ref": "#/$defs/processing_retry_attempt_summary"
           },
+          "prefixItems": [
+            {
+              "properties": {
+                "outcome": {
+                  "const": "unknown"
+                }
+              },
+              "required": [
+                "outcome"
+              ]
+            }
+          ],
+          "contains": {
+            "properties": {
+              "outcome": {
+                "const": "succeeded"
+              }
+            },
+            "required": [
+              "outcome"
+            ]
+          },
+          "minContains": 0,
+          "maxContains": 1,
           "minItems": 1,
           "maxItems": 64
         },
@@ -147,7 +172,71 @@
         }
       },
       "additionalProperties": false,
-      "description": "Closed confirmed-retry ancestry. attempt_chain[0].attempt equals origin_unknown and has outcome=unknown; attempt IDs are unique and ordered by retry_of ancestry. resolved_by is null unless the final chain item succeeded, and otherwise equals that final attempt. These cross-field rules are enforced by typed/server validation. A retry may use a different connection, but the original unknown and every intermediate origin remain unchanged. maxItems=64 is the lifetime limit for this same content-unknown barrier, separate from each run's 64-attempt budget. Reject attempt 65 without consuming proof, reserving run budget or sending; preserve the existing unknown and chain."
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "resolved_by": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "resolved_by"
+            ]
+          },
+          "then": {
+            "properties": {
+              "attempt_chain": {
+                "contains": {
+                  "properties": {
+                    "outcome": {
+                      "const": "succeeded"
+                    }
+                  },
+                  "required": [
+                    "outcome"
+                  ]
+                },
+                "minContains": 0,
+                "maxContains": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "resolved_by": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            },
+            "required": [
+              "resolved_by"
+            ]
+          },
+          "then": {
+            "properties": {
+              "attempt_chain": {
+                "contains": {
+                  "properties": {
+                    "outcome": {
+                      "const": "succeeded"
+                    }
+                  },
+                  "required": [
+                    "outcome"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              }
+            }
+          }
+        }
+      ],
+      "description": "Closed confirmed-retry ancestry. attempt_chain[0].attempt equals origin_unknown and has outcome=unknown. Every item i>0 directly retries item i-1 in private durable retry_of state; retry edges are intentionally absent from this public projection. The schema permits at most one succeeded outcome, requires none when resolved_by is null and exactly one when resolved_by is non-null. Typed/server validation additionally enforces unique attempt IDs, the direct private edge chain, origin_unknown equality, and that the sole success is the final chain item whose attempt equals resolved_by. A retry may use a different connection, but the original unknown and every intermediate origin remain unchanged. maxItems=64 is the lifetime limit for this same content-unknown barrier, separate from each run's 64-attempt budget. Reject attempt 65 without consuming proof, reserving run budget or sending; preserve the existing unknown and chain."
     },
     "processing_safe_error": {
       "type": "object",
@@ -245,7 +334,7 @@
         }
       },
       "additionalProperties": false,
-      "description": "Typed ensemble unknown-call recovery state. target identifies the current node; origin is recovered from the blocked attempt and may belong to an older run. attempts_used/attempt_limit are the current run budget; retry_attempts_used/retry_attempt_limit are the separate lifetime budget for this same content-unknown ancestry. The latest attempt can be a known failure while an earlier unknown barrier remains unresolved. Full current config and the exact target/blocked receipt must be rechecked before consuming one minutes_retry confirmation. At the lifetime limit, reject before proof consumption, run reservation or send and preserve the barrier. Do not infer service-side processing or billing stopped."
+      "description": "Typed ensemble unknown-call recovery state. One unresolved content_fingerprint has exactly one public blocked record. blocked_attempt_id is the barrier cursor attempt; target is that cursor attempt's owning run/node/call; latest_attempt_outcome is the cursor attempt's current durable state. origin is recovered from the first unknown attempt and may belong to an older run. Typed/server validation requires the barrier key, cursor attempt receipt, cursor call and target node to carry the same content fingerprint, and requires every attempt exposed later through its retry lineage to retain that fingerprint. attempts_used/attempt_limit are the current run budget; retry_attempts_used/retry_attempt_limit are the separate lifetime budget for this same content-unknown ancestry. The cursor can be a known failure while the earlier unknown barrier remains unresolved. Full current config and the exact target/blocked receipt must be rechecked before consuming one minutes_retry confirmation. At the lifetime limit, reject before proof consumption, run reservation or send and preserve the barrier. Do not infer service-side processing or billing stopped."
     }
   }
 }

@@ -234,9 +234,37 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "retry_lineage": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            },
+            "required": [
+              "retry_lineage"
+            ]
+          },
+          "then": {
+            "properties": {
+              "retry_lineage": {
+                "properties": {
+                  "resolved_by": {
+                    "$ref": "#/$defs/processing_origin_ref"
+                  }
+                },
+                "required": [
+                  "resolved_by"
+                ]
+              }
+            }
+          }
         }
       ],
-      "description": "Safe observation of one completed provider generation. This records the requested selection, applied parameters and confirmed public response metadata, never the raw request/response, prompt, credential or private authorization snapshot."
+      "description": "Safe observation of one completed provider generation. A non-null retry_lineage must be resolved by a successful attempt; typed/server validation requires the generated artifact origin to equal retry_lineage.resolved_by. This records the requested selection, applied parameters and confirmed public response metadata, never the raw request/response, prompt, credential or private authorization snapshot."
     },
     "processing_artifact_header": {
       "type": "object",
@@ -310,7 +338,8 @@
           "$ref": "#/$defs/timestamp"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "description": "Immutable public artifact identity and safe generation header. For a directly generated external-call artifact, non-null generation.retry_lineage is resolved and origin must equal retry_lineage.resolved_by; equality is enforced by typed/server validation because JSON Schema cannot compare sibling object values."
     },
     "processing_artifact_dependency_mapping": {
       "type": "object",
