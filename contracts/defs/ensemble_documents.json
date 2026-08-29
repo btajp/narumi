@@ -36,8 +36,16 @@
         },
         "segment_id": {
           "type": "string",
-          "minLength": 1,
-          "maxLength": 512
+          "maxLength": 512,
+          "oneOf": [
+            {
+              "pattern": "^segment-[0-9a-f]{64}$"
+            },
+            {
+              "pattern": "^(?:m-[0-9]+|merged-segment-[0-9]+)$"
+            }
+          ],
+          "description": "Closed public identifier only: either an opaque segment SHA-256 label or the legacy m-N / merged-segment-N semantic form. Never expose a raw path, URI, credential, token or arbitrary caller label."
         },
         "segment_text_sha256": {
           "$ref": "#/$defs/processing_sha256"
@@ -46,15 +54,16 @@
           "type": "array",
           "items": {
             "type": "string",
-            "minLength": 1,
-            "maxLength": 512
+            "maxLength": 512,
+            "pattern": "^(?:merged|mic|system|own-mic|own-system|ext-ctx-[0-9a-f]{8,32}|source-[0-9a-f]{64})$"
           },
           "minItems": 0,
-          "maxItems": 256
+          "maxItems": 256,
+          "description": "Closed public source labels only. Values are known semantic labels, bounded opaque context labels or opaque source SHA-256 labels; raw paths, URIs, credentials and tokens are forbidden."
         }
       },
       "additionalProperties": false,
-      "description": "Stable binding to one validated merged-transcript segment. Source strings are public meeting-source labels, never paths, credentials or provider responses."
+      "description": "Stable public binding to one validated merged-transcript segment. Identifiers are closed semantic labels or opaque hashes only, never paths, credentials, tokens, arbitrary caller labels or provider responses."
     },
     "ensemble_evidence": {
       "type": "object",
