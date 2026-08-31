@@ -1,7 +1,7 @@
 {
   "name": "import_recording",
   "title": "Import recording",
-  "description": "Create a session bundle from existing recording files (e.g. a Zoom local recording) instead of live capture. At least one of `mic_path` / `system_path` is required (a Zoom recording with everyone in one file is imported as system); `screen_path` optionally adds a video track. All paths must be absolute paths of regular files. With copy=true (default) the files are copied into the bundle; copy=false hard-links them (same volume required) to avoid duplicating large files. `started_at` sets the recording start used for the meeting_id and timeline; when omitted the server derives it from the oldest input file's modification time. `profile` names a saved profile (see list_profiles) whose config, scope, engagement and export_destinations are applied as defaults — explicit `scope` / `engagement` / `config` keys win; when omitted the default profile is applied. With auto_process=true (default) a `process` job is enqueued and its job_id returned; poll it with get_job_status. `request_id` is the client-generated idempotency key: repeating the call returns the original result without importing twice. On failure returns an error_envelope (isError=true) with code: not_found (an input path does not exist), invalid_argument (relative path, not a regular file, neither mic_path nor system_path given, unknown profile, bad config, copy=false across volumes), policy_violation (config selects an engine / provider not allowed by its external_send_policy — nothing is silently substituted), engine_unavailable (config names an engine / provider not registered on this server), internal.",
+  "description": "Create a session bundle from existing recording files (e.g. a Zoom local recording) instead of live capture. At least one of `mic_path` / `system_path` is required (a Zoom recording with everyone in one file is imported as system); `screen_path` optionally adds a video track. All paths must be absolute paths of regular files. With copy=true (default) the files are copied into the bundle; copy=false hard-links them (same volume required) to avoid duplicating large files. `started_at` sets the recording start used for the meeting_id and timeline; when omitted the server derives it from the oldest input file's modification time. `profile` names a saved profile (see list_profiles) whose config, scope, engagement and export_destinations are applied as defaults — explicit `scope` / `engagement` / `config` keys win; when omitted the default profile is applied. With auto_process=true (default) a `process` job is enqueued and its job_id returned; poll it with get_job_status. `request_id` is the client-generated idempotency key: repeating the call returns the original result without importing twice. On failure returns an error_envelope (isError=true) with code: not_found (an input path does not exist), invalid_argument (relative path, not a regular file, neither mic_path nor system_path given, unknown profile, bad config, copy=false across volumes), policy_violation (config selects an engine / provider not allowed by its external_send_policy — nothing is silently substituted), engine_unavailable (config names an engine / provider not registered on this server), internal. transcription_model is a separate nullable API transcription override: omit to retain it, null to restore the saved transcription_engine without changing that engine. Only openai-api with whisper-1 or gpt-4o-transcribe-diarize is supported, using an enabled matching-revision API-key connection, verified timestamp capabilities and api_ok. The shared language must be auto or a real lowercase two-letter ISO 639-1 code; auto omits the API language field. parameters is closed and empty: no prompt, speaker references or Responses API options. Global vocab_hints are not sent to API transcription and remain available to integration. Saving this selection does not send audio. Microphone and system audio are sent separately only during explicitly enabled processing, with possible API charges. Automatic processing uses the accepted effective config snapshot and validates it before execution. It never carries a transcription_retry confirmation and cannot retransmit outcome-unknown audio chunks.",
   "annotations": {
     "readOnlyHint": false,
     "destructiveHint": false,
@@ -69,17 +69,39 @@
         "description": "Enqueue a `process` job right after importing (default true). Set false to only import; call regenerate later to process.",
         "default": true
       },
-      "request_id": { "$ref": "../defs/common.json#/$defs/request_id" }
+      "request_id": {
+        "$ref": "../defs/common.json#/$defs/request_id"
+      }
     },
-    "required": ["meeting_name", "request_id"],
-    "anyOf": [{ "required": ["mic_path"] }, { "required": ["system_path"] }],
+    "required": [
+      "meeting_name",
+      "request_id"
+    ],
+    "anyOf": [
+      {
+        "required": [
+          "mic_path"
+        ]
+      },
+      {
+        "required": [
+          "system_path"
+        ]
+      }
+    ],
     "additionalProperties": false
   },
   "outputSchema": {
     "type": "object",
-    "required": ["meeting_id", "bundle_path", "tracks"],
+    "required": [
+      "meeting_id",
+      "bundle_path",
+      "tracks"
+    ],
     "properties": {
-      "meeting_id": { "$ref": "../defs/common.json#/$defs/meeting_id" },
+      "meeting_id": {
+        "$ref": "../defs/common.json#/$defs/meeting_id"
+      },
       "bundle_path": {
         "type": "string",
         "description": "Absolute path of the session bundle directory (<NARUMI_HOME>/meetings/<meeting_id>).",
@@ -88,7 +110,9 @@
       "tracks": {
         "type": "object",
         "description": "Track name (screen / mic / system) → imported file status (path relative to bundle_path, sha256, size, duration).",
-        "additionalProperties": { "$ref": "../defs/common.json#/$defs/track_status" }
+        "additionalProperties": {
+          "$ref": "../defs/common.json#/$defs/track_status"
+        }
       },
       "job_id": {
         "$ref": "../defs/common.json#/$defs/job_id",
@@ -113,10 +137,38 @@
         "engagement": "acme-onboarding",
         "scope": "cloudnative",
         "profile": "customer-meetings",
-        "config": { "language": "ja", "self_name": "岡村" },
+        "config": {
+          "language": "ja",
+          "self_name": "岡村"
+        },
         "copy": false,
         "auto_process": false,
         "request_id": "bb22cc33-dd44-4e55-9f66-001122334455"
+      },
+      {
+        "meeting_name": "Zoom 顧客定例（録画取り込み）",
+        "system_path": "/Users/me/Documents/Zoom/2026-08-25 10.00.00 顧客定例/audio_only.m4a",
+        "request_id": "asr-import_recording-request",
+        "config": {
+          "transcription_engine": "auto",
+          "transcription_model": {
+            "provider": "openai-api",
+            "connection_id": "conn-111122223333",
+            "connection_revision": 1,
+            "model_id": "whisper-1",
+            "parameters": {},
+            "cache_epoch": 0
+          },
+          "diarization_engine": "none",
+          "llm_provider": "none",
+          "minutes_model": null,
+          "external_send_policy": "api_ok",
+          "language": "auto",
+          "self_name": null,
+          "vocab_hints": [
+            "narumi"
+          ]
+        }
       }
     ],
     "output": [

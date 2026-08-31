@@ -12,7 +12,7 @@
         "openai-api",
         "ollama"
       ],
-      "description": "Supported connection adapters. Explicit text minutes generation supports Codex App Server, Anthropic API, OpenAI API and verified local Ollama; Claude Agent SDK generation is not available."
+      "description": "Supported connection adapters. Explicit text minutes generation supports Codex App Server, Anthropic API, OpenAI API and verified local Ollama; Claude Agent SDK generation is not available. OpenAI API also supports the explicit transcription_model override for verified timestamp-capable audio models."
     },
     "provider_role": {
       "type": "string",
@@ -122,7 +122,10 @@
           ]
         },
         "version": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "minLength": 1,
           "maxLength": 128
         },
@@ -144,7 +147,10 @@
           "description": "Approved host shown before download; null for a bundled resource. No arbitrary download URL is accepted."
         },
         "sha256": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "pattern": "^[0-9a-f]{64}$"
         },
         "license": {
@@ -157,9 +163,36 @@
       "description": "Fixed catalog resource for an installed-runtime check, bundled preparation or approved download. Unknown installed-runtime metadata is null; downloads require a known digest and destination.",
       "allOf": [
         {
-          "if": { "properties": { "source": { "const": "approved_download" } }, "required": ["source"] },
-          "then": { "properties": { "sha256": { "type": "string" }, "download_host": { "type": "string" }, "version": { "type": "string" } } },
-          "else": { "properties": { "download_host": { "type": "null" } } }
+          "if": {
+            "properties": {
+              "source": {
+                "const": "approved_download"
+              }
+            },
+            "required": [
+              "source"
+            ]
+          },
+          "then": {
+            "properties": {
+              "sha256": {
+                "type": "string"
+              },
+              "download_host": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "download_host": {
+                "type": "null"
+              }
+            }
+          }
         }
       ]
     },
@@ -281,11 +314,34 @@
       "allOf": [
         {
           "if": {
-            "properties": { "provider_id": { "const": "openai-api" } },
-            "required": ["provider_id"]
+            "properties": {
+              "provider_id": {
+                "const": "openai-api"
+              }
+            },
+            "required": [
+              "provider_id"
+            ]
           },
           "then": {
-            "properties": { "auth_methods": { "const": ["api_key"] }, "roles": { "const": ["llm"] } }
+            "properties": {
+              "auth_methods": {
+                "const": [
+                  "api_key"
+                ]
+              },
+              "roles": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "items": {
+                  "enum": [
+                    "llm",
+                    "transcription"
+                  ]
+                }
+              }
+            }
           }
         },
         {
@@ -310,14 +366,37 @@
           },
           "else": {
             "if": {
-              "properties": { "provider_id": { "const": "codex-app-server" } },
-              "required": ["provider_id"]
+              "properties": {
+                "provider_id": {
+                  "const": "codex-app-server"
+                }
+              },
+              "required": [
+                "provider_id"
+              ]
             },
             "then": {
-              "properties": { "auth_methods": { "const": ["chatgpt"] }, "roles": { "const": ["llm"] } }
+              "properties": {
+                "auth_methods": {
+                  "const": [
+                    "chatgpt"
+                  ]
+                },
+                "roles": {
+                  "const": [
+                    "llm"
+                  ]
+                }
+              }
             },
             "else": {
-              "properties": { "auth_methods": { "const": ["api_key"] } }
+              "properties": {
+                "auth_methods": {
+                  "const": [
+                    "api_key"
+                  ]
+                }
+              }
             }
           }
         }
@@ -342,7 +421,7 @@
         },
         "stage_model_selection": {
           "type": "boolean",
-          "description": "Explicit model selection and execution are implemented for text minutes only. Supported adapters are listed in capabilities.minutes_model_providers; other stages keep llm_provider. This flag does not imply ensemble or all-stage model selection."
+          "description": "Explicit selection is implemented for text minutes and API transcription, as listed in capabilities.minutes_model_providers and transcription_model_providers. Other stages retain their existing engine/provider settings. This flag does not imply ensemble or all-stage selection."
         },
         "ensemble_generation": {
           "type": "boolean",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import json
 import math
+import re
 import time
 import urllib.error
 import urllib.request
@@ -18,11 +19,20 @@ from narumi.providers.metadata.deadline import (
     RequestDeadline,
 )
 from narumi.providers.metadata.tls import tls_context
-from narumi.providers.metadata.validation import check_public_payload, invalid_metadata
+from narumi.providers.metadata.validation import (
+    MAX_PUBLIC_PAYLOAD_NODES,
+    check_public_payload,
+    invalid_metadata,
+)
 
 MAX_RESPONSE_BYTES = 1_048_576
 MAX_GENERATION_RESPONSE_BYTES = 8_388_608
+MAX_MULTIPART_REQUEST_BYTES = 24_000_000 + 65_536
 DEFAULT_TIMEOUT = 10.0
+_OUTCOME_RESPONSE_KINDS = {"generation", "transcription"}
+_TRANSCRIPTION_KNOWN_REFUSALS = {400, 401, 403, 413, 429}
+_MULTIPART_CONTENT_TYPE = re.compile(r"multipart/form-data; boundary=([A-Za-z0-9_-]{1,70})\Z")
+_HEADER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]*\Z")
 _METADATA_REASONS = {
     "invalid_metadata",
     "redirect_rejected",
@@ -47,7 +57,7 @@ def _unknown_outcome() -> EngineUnavailableError:
 
 
 def _cancelled(deadline: RequestDeadline, *, response_kind: str) -> CancelledError:
-    if response_kind == "generation" and deadline.request_started:
+    if response_kind in _OUTCOME_RESPONSE_KINDS and deadline.request_started:
         return CancelledError(
             "Provider generation was cancelled after transmission; outcome is unknown",
             details={"reason": "provider_generation_outcome_unknown", "outcome_unknown": True},
@@ -67,6 +77,48 @@ def _response_secrets(headers: dict[str, str]) -> tuple[str, ...]:
             if len(parts) == 2 and parts[0].lower() == "bearer":
                 secrets.append(parts[1].strip())
     return tuple(secrets)
+
+
+def _multipart_headers(
+    method: str, headers: dict[str, str] | None, body: bytes, response_kind: str
+) -> dict[str, str]:
+    """Validate the fixed raw upload framing before any transport can start."""
+    if (
+        method != "POST"
+        or response_kind != "transcription"
+        or type(body) is not bytes
+        or not 0 < len(body) <= MAX_MULTIPART_REQUEST_BYTES
+        or (headers is not None and not isinstance(headers, dict))
+    ):
+        raise invalid_metadata("invalid_http_options")
+    normalized: dict[str, str] = {}
+    for name, value in (headers or {}).items():
+        if (
+            not isinstance(name, str)
+            or _HEADER_NAME.fullmatch(name) is None
+            or not isinstance(value, str)
+            or not value.isascii()
+            or any(ord(char) < 32 or ord(char) > 126 for char in value)
+            or name.lower() in normalized
+        ):
+            raise invalid_metadata("invalid_http_options")
+        normalized[name.lower()] = value
+    content_type = _MULTIPART_CONTENT_TYPE.fullmatch(normalized.get("content-type", ""))
+    if (
+        content_type is None
+        or "transfer-encoding" in normalized
+        or normalized.get("content-length", str(len(body))) != str(len(body))
+    ):
+        raise invalid_metadata("invalid_http_options")
+    boundary = content_type.group(1).encode("ascii")
+    if not body.startswith(b"--" + boundary + b"\r\n") or not body.endswith(
+        b"\r\n--" + boundary + b"--\r\n"
+    ):
+        raise invalid_metadata("invalid_http_options")
+    normalized.setdefault("accept", "application/json")
+    normalized.setdefault("accept-encoding", "identity")
+    normalized["content-length"] = str(len(body))
+    return normalized
 
 
 class RejectRedirects(urllib.request.HTTPRedirectHandler):
@@ -113,24 +165,36 @@ class JSONHTTPClient:
         *,
         headers: dict[str, str] | None = None,
         payload: dict[str, Any] | None = None,
+        raw_body: bytes | None = None,
         timeout: float = DEFAULT_TIMEOUT,
-        response_kind: Literal["metadata", "generation"] = "metadata",
+        response_kind: Literal["metadata", "generation", "transcription"] = "metadata",
         should_cancel: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         if (
             not math.isfinite(timeout)
             or timeout <= 0
-            or response_kind not in {"metadata", "generation"}
+            or response_kind not in {"metadata", "generation", "transcription"}
+            or (raw_body is not None and payload is not None)
+            or (response_kind == "transcription" and raw_body is None)
         ):
             raise invalid_metadata("invalid_http_options")
         limit = MAX_RESPONSE_BYTES if response_kind == "metadata" else MAX_GENERATION_RESPONSE_BYTES
-        request_headers = {"Accept": "application/json", "Accept-Encoding": "identity"}
-        request_headers.update(headers or {})
-        if payload is not None:
-            request_headers["Content-Type"] = "application/json"
-        data = json.dumps(payload).encode("utf-8") if payload is not None else None
+        if raw_body is not None:
+            request_headers = _multipart_headers(method, headers, raw_body, response_kind)
+            data = raw_body
+        else:
+            request_headers = {"Accept": "application/json", "Accept-Encoding": "identity"}
+            request_headers.update(headers or {})
+            if payload is not None:
+                request_headers["Content-Type"] = "application/json"
+            data = json.dumps(payload).encode("utf-8") if payload is not None else None
         request = urllib.request.Request(url, data=data, headers=request_headers, method=method)
-        deadline = RequestDeadline(timeout, monotonic=self._monotonic, should_cancel=should_cancel)
+        deadline = RequestDeadline(
+            timeout,
+            monotonic=self._monotonic,
+            should_cancel=should_cancel,
+            interruptible_write=response_kind == "transcription",
+        )
         request.narumi_deadline = deadline
         secrets = _response_secrets(request_headers)
         try:
@@ -165,7 +229,12 @@ class JSONHTTPClient:
                 # Ollama's deprecated token context is unused and may contain
                 # more items than the metadata object-count bound permits.
                 body.pop("context", None)
-            check_public_payload(body, secrets=secrets, reject_credentials=False)
+            check_public_payload(
+                body,
+                secrets=secrets,
+                reject_credentials=False,
+                max_nodes=MAX_PUBLIC_PAYLOAD_NODES if response_kind == "transcription" else 20_000,
+            )
             deadline.remaining()
             return body
         except urllib.error.HTTPError as exc:
@@ -180,7 +249,7 @@ class JSONHTTPClient:
         except Exception as exc:
             if deadline.cancelled:
                 raise _cancelled(deadline, response_kind=response_kind) from None
-            if response_kind == "generation" and deadline.request_started:
+            if response_kind in _OUTCOME_RESPONSE_KINDS and deadline.request_started:
                 raise _unknown_outcome() from None
             reason = "invalid_metadata"
             if isinstance(exc, (urllib.error.URLError, http.client.HTTPException, OSError)):
@@ -221,7 +290,7 @@ class JSONHTTPClient:
     @staticmethod
     def _status_error(status: int, *, response_kind: str = "metadata") -> None:
         if type(status) is not int or not 100 <= status <= 599:
-            if response_kind == "generation":
+            if response_kind in _OUTCOME_RESPONSE_KINDS:
                 raise _unknown_outcome() from None
             raise invalid_metadata() from None
         if status in {401, 403}:
@@ -230,9 +299,11 @@ class JSONHTTPClient:
             ) from None
         if response_kind == "generation" and not 400 <= status < 500:
             raise _unknown_outcome() from None
+        if response_kind == "transcription" and status not in _TRANSCRIPTION_KNOWN_REFUSALS:
+            raise _unknown_outcome() from None
         raise EngineUnavailableError(
             "Provider generation request failed"
-            if response_kind == "generation"
+            if response_kind in _OUTCOME_RESPONSE_KINDS
             else "Provider metadata request failed",
             details={"reason": "metadata_http_error", "status": status},
         ) from None

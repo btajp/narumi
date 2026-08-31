@@ -132,7 +132,8 @@
             "provider_id": "openai-api",
             "display_name": "OpenAI API",
             "roles": [
-              "llm"
+              "llm",
+              "transcription"
             ],
             "auth_methods": [
               "api_key"

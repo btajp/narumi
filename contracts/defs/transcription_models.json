@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "narumi:defs/transcription_models.json",
+  "title": "narumi API transcription selection and retry definitions",
+  "$defs": {
+    "transcription_model_provider": {
+      "type": "string",
+      "const": "openai-api",
+      "description": "Implemented API transcription adapter. Availability of this adapter does not imply a connection or model is ready."
+    },
+    "transcription_model_id": {
+      "type": "string",
+      "enum": ["whisper-1", "gpt-4o-transcribe-diarize"],
+      "description": "Explicit timestamp-capable OpenAI transcription model. Other audio models may be displayed as unsupported but cannot be selected."
+    },
+    "api_transcription_language": {
+      "oneOf": [
+        { "const": "auto" },
+        { "type": "string", "minLength": 2, "maxLength": 2, "pattern": "^[a-z]{2}$" }
+      ],
+      "description": "The shared meeting language used by API transcription. auto omits the API language field. Otherwise require a real lowercase two-letter ISO 639-1 code; membership is validated by the implementation before sending."
+    },
+    "transcription_model_parameters": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false,
+      "default": {},
+      "description": "No custom API transcription parameters are supported. prompt, vocabulary hints, speaker names/reference audio, response format, language, runtime overrides, credentials and Responses API options are rejected. The adapter fixes its model-specific wire parameters."
+    },
+    "transcription_model_selection": {
+      "type": "object",
+      "required": ["provider", "connection_id", "connection_revision", "model_id"],
+      "properties": {
+        "provider": { "$ref": "#/$defs/transcription_model_provider" },
+        "connection_id": { "$ref": "#/$defs/provider_connection_id" },
+        "connection_revision": { "$ref": "#/$defs/provider_connection_revision" },
+        "model_id": { "$ref": "#/$defs/transcription_model_id" },
+        "parameters": { "$ref": "#/$defs/transcription_model_parameters" },
+        "cache_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Attempt authorization epoch. Increasing it alone never authorizes retransmission of an unknown chunk and never resends a verified successful chunk. A matching transcription_retry confirmation is also required for one unknown chunk."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Explicit API transcription override requiring api_ok, an enabled matching-revision API-key connection, verified model timestamp capabilities and an unexpired model. Keep transcription_engine unchanged as the local selection and use this override only while non-null. Audio is sent separately for microphone and system tracks, with possible API charges. Saving or listing this selection does not send audio. Initial API transcription sends no vocabulary prompt; shared vocab_hints remain available to transcript integration."
+    },
+    "transcription_model": {
+      "oneOf": [
+        { "$ref": "#/$defs/transcription_model_selection" },
+        { "type": "null" }
+      ],
+      "default": null,
+      "description": "Nullable transcription-only model override. Omitted updates retain the saved selection; null clears it and restores the saved transcription_engine. Missing in existing saved configs means null and preserves local transcription behavior."
+    },
+    "transcription_fingerprint": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Lowercase SHA256 fingerprint of the confirmed transcription plan or chunk. Not a credential, arbitrary path or model-generated value."
+    },
+    "transcription_retry": {
+      "type": "object",
+      "required": ["input_fingerprint", "chunk_fingerprint", "blocked_epoch"],
+      "properties": {
+        "input_fingerprint": { "$ref": "#/$defs/transcription_fingerprint" },
+        "chunk_fingerprint": { "$ref": "#/$defs/transcription_fingerprint" },
+        "blocked_epoch": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false,
+      "description": "One explicit retransmission confirmation for an outcome-unknown chunk, never a saved config field. Before any audio request the server must match both fingerprints and the latest blocked epoch against the current plan and ledger, require selected cache_epoch > blocked_epoch, and reject stale confirmation without sending. The pending attempt consumes this confirmation atomically; a further unknown outcome needs a new confirmation. Successful chunks are reused and other unknown chunks are not automatically resent."
+    },
+    "transcription_outcome_unknown_details": {
+      "type": "object",
+      "required": [
+        "stage", "reason", "outcome_unknown", "input_fingerprint", "chunk_fingerprint",
+        "blocked_epoch", "track", "chunk_index", "chunk_count", "completed_chunks",
+        "start_sample", "end_sample", "sample_rate"
+      ],
+      "properties": {
+        "stage": { "const": "transcribe" },
+        "reason": { "const": "transcription_outcome_unknown" },
+        "outcome_unknown": { "const": true },
+        "input_fingerprint": { "$ref": "#/$defs/transcription_fingerprint" },
+        "chunk_fingerprint": { "$ref": "#/$defs/transcription_fingerprint" },
+        "blocked_epoch": { "type": "integer", "minimum": 0 },
+        "track": { "type": "string", "enum": ["mic", "system"] },
+        "chunk_index": {
+          "type": "integer", "minimum": 0, "maximum": 143,
+          "description": "Zero-based index in the ordered microphone-then-system transcription plan. Must be less than chunk_count."
+        },
+        "chunk_count": { "type": "integer", "minimum": 1, "maximum": 144 },
+        "completed_chunks": {
+          "type": "integer", "minimum": 0, "maximum": 144,
+          "description": "Number of verified successful chunks in the current plan, not an API processing or billing count. Must not exceed chunk_count."
+        },
+        "start_sample": { "type": "integer", "minimum": 0, "maximum": 1382399999 },
+        "end_sample": { "type": "integer", "minimum": 1, "maximum": 1382400000 },
+        "sample_rate": { "const": 16000 },
+        "provider": { "$ref": "#/$defs/transcription_model_provider" },
+        "model_id": { "$ref": "#/$defs/transcription_model_id" },
+        "connection_id": { "$ref": "#/$defs/provider_connection_id" },
+        "connection_revision": { "$ref": "#/$defs/provider_connection_revision" }
+      },
+      "additionalProperties": false,
+      "description": "Safe, typed recovery information for an API transcription request whose outcome is unknown. Construct only from validated local plan/ledger fields; never include upstream error bodies, transcripts, credentials or paths. Sample bounds are track-relative half-open intervals; implementation also validates start < end, chunk length <= 9600000, indices/counts and total audio <= 24 hours at 16000 Hz. Limits of 144 chunks and 24 hours are application send limits, not cost or API-attempt guarantees. Cancellation after sending cannot guarantee server-side processing or billing stopped."
+    }
+  }
+}

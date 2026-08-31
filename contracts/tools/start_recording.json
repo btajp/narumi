@@ -1,7 +1,7 @@
 {
   "name": "start_recording",
   "title": "Start recording",
-  "description": "Start recording a new meeting and create its session bundle. The screen, the microphone and the system audio are captured as separate track files (the first layer of speaker separation). Only one recording can run at a time. `profile` names a saved profile (see list_profiles / set_profile) applied as defaults for config, scope, engagement and automatic export destinations — explicit arguments and config keys win; omitted = the default profile. `request_id` is the client-generated idempotency key: repeating the call with the same request_id returns the original result instead of starting a second recording. Returns the new meeting_id, the absolute bundle path and the track files (relative to the bundle). On failure returns an error_envelope (isError=true) with code: busy (a recording is already running), recorder_unavailable (narumi-recorder binary missing, or screen / microphone permission denied), policy_violation (`config` selects an engine or provider not allowed by its external_send_policy — nothing is silently substituted), engine_unavailable (`config` names an engine / provider not registered on this server), invalid_argument (unknown profile, bad config), internal.",
+  "description": "Start recording a new meeting and create its session bundle. The screen, the microphone and the system audio are captured as separate track files (the first layer of speaker separation). Only one recording can run at a time. `profile` names a saved profile (see list_profiles / set_profile) applied as defaults for config, scope, engagement and automatic export destinations — explicit arguments and config keys win; omitted = the default profile. `request_id` is the client-generated idempotency key: repeating the call with the same request_id returns the original result instead of starting a second recording. Returns the new meeting_id, the absolute bundle path and the track files (relative to the bundle). On failure returns an error_envelope (isError=true) with code: busy (a recording is already running), recorder_unavailable (narumi-recorder binary missing, or screen / microphone permission denied), policy_violation (`config` selects an engine or provider not allowed by its external_send_policy — nothing is silently substituted), engine_unavailable (`config` names an engine / provider not registered on this server), invalid_argument (unknown profile, bad config), internal. transcription_model is a separate nullable API transcription override: omit to retain it, null to restore the saved transcription_engine without changing that engine. Only openai-api with whisper-1 or gpt-4o-transcribe-diarize is supported, using an enabled matching-revision API-key connection, verified timestamp capabilities and api_ok. The shared language must be auto or a real lowercase two-letter ISO 639-1 code; auto omits the API language field. parameters is closed and empty: no prompt, speaker references or Responses API options. Global vocab_hints are not sent to API transcription and remain available to integration. Saving this selection does not send audio. Microphone and system audio are sent separately only during explicitly enabled processing, with possible API charges. Automatic processing uses the accepted effective config snapshot and validates it before execution. It never carries a transcription_retry confirmation and cannot retransmit outcome-unknown audio chunks.",
   "annotations": {
     "readOnlyHint": false,
     "destructiveHint": false,
@@ -37,16 +37,27 @@
         "$ref": "../defs/common.json#/$defs/meeting_config",
         "description": "Per-meeting processing config overrides. Omitted keys take the profile defaults. Can be changed later with set_meeting_config."
       },
-      "request_id": { "$ref": "../defs/common.json#/$defs/request_id" }
+      "request_id": {
+        "$ref": "../defs/common.json#/$defs/request_id"
+      }
     },
-    "required": ["request_id"],
+    "required": [
+      "request_id"
+    ],
     "additionalProperties": false
   },
   "outputSchema": {
     "type": "object",
-    "required": ["meeting_id", "started_at", "bundle_path", "tracks"],
+    "required": [
+      "meeting_id",
+      "started_at",
+      "bundle_path",
+      "tracks"
+    ],
     "properties": {
-      "meeting_id": { "$ref": "../defs/common.json#/$defs/meeting_id" },
+      "meeting_id": {
+        "$ref": "../defs/common.json#/$defs/meeting_id"
+      },
       "started_at": {
         "$ref": "../defs/common.json#/$defs/timestamp",
         "description": "UTC time the recorder reported that capture began."
@@ -59,7 +70,10 @@
       "tracks": {
         "type": "object",
         "description": "Track name (screen / mic / system) → file path relative to bundle_path (e.g. tracks/mic.m4a).",
-        "additionalProperties": { "type": "string", "minLength": 1 }
+        "additionalProperties": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "additionalProperties": false
@@ -81,9 +95,35 @@
           "external_send_policy": "local_only",
           "language": "ja",
           "self_name": "岡村",
-          "vocab_hints": ["gaia-library", "narumi"]
+          "vocab_hints": [
+            "gaia-library",
+            "narumi"
+          ]
         },
         "request_id": "2c8f7d3a-5b1e-4f6a-9c0d-7e8f9a0b1c2d"
+      },
+      {
+        "request_id": "asr-start_recording-request",
+        "config": {
+          "transcription_engine": "auto",
+          "transcription_model": {
+            "provider": "openai-api",
+            "connection_id": "conn-111122223333",
+            "connection_revision": 1,
+            "model_id": "whisper-1",
+            "parameters": {},
+            "cache_epoch": 0
+          },
+          "diarization_engine": "none",
+          "llm_provider": "none",
+          "minutes_model": null,
+          "external_send_policy": "api_ok",
+          "language": "auto",
+          "self_name": null,
+          "vocab_hints": [
+            "narumi"
+          ]
+        }
       }
     ],
     "output": [

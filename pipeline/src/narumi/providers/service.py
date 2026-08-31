@@ -47,6 +47,7 @@ class ProviderService:
         connection_referenced: Callable[[str], bool] | None = None,
         codex_backend: Any | None = None,
         http_backend: Any | None = None,
+        audio_backend: Any | None = None,
         recover: bool = True,
     ) -> None:
         self.root = Path(root).expanduser()
@@ -63,6 +64,8 @@ class ProviderService:
         self._codex_lock = threading.Lock()
         self._http_backend = http_backend
         self._http_lock = threading.Lock()
+        self._audio_backend = audio_backend
+        self._audio_lock = threading.Lock()
         self.auth_executor = auth_executor or ThreadPoolExecutor(
             max_workers=3,
             thread_name_prefix="narumi-provider-auth",
@@ -111,6 +114,18 @@ class ProviderService:
 
                 self._http_backend = HTTPMinutesBackend(metadata=self.metadata)
             return self._http_backend
+
+    @property
+    def audio_backend(self) -> Any:
+        """Construct the audio adapter without reading credentials or sending audio."""
+        with self._audio_lock:
+            if self.closed.is_set():
+                raise NarumiError("Provider service is closed")
+            if self._audio_backend is None:
+                from narumi.providers.audio_transcription import AudioTranscriptionBackend
+
+                self._audio_backend = AudioTranscriptionBackend()
+            return self._audio_backend
 
     def list_providers(self, args: Mapping[str, Any] | None = None) -> dict[str, Any]:
         self.validate("list_providers", args)

@@ -2,7 +2,7 @@ import Foundation
 
 /// Keeps job-producing requests unresolved until their outcome is confirmed. A lost
 /// response is recovered with the original idempotency key and exact argument bytes,
-/// except synchronous exports that need manual recovery to avoid repeated remote writes.
+/// except explicit audio retries and synchronous exports, which require manual recovery.
 public struct DesktopJobRequestState: Equatable, Sendable {
     public struct Request: Equatable, Sendable {
         public let requestID: String
@@ -17,6 +17,12 @@ public struct DesktopJobRequestState: Equatable, Sendable {
 
         public var canAutomaticallyRetry: Bool {
             if tool == ToolCatalog.prepareProviderRuntime { return false }
+            if tool == ToolCatalog.regenerate {
+                guard let values = try? JSONSerialization.jsonObject(with: arguments) as? [String: Any] else { return false }
+                // A cancelled one-use audio confirmation must never be sent later by recovery.
+                // Presence is enough to block replay, including malformed/null retry values.
+                if values.keys.contains("transcription_retry") { return false }
+            }
             guard tool == ToolCatalog.exportMinutes else { return true }
             // The server caches successes, not failures. A synchronous exporter may
             // have written remotely before failing; only queued exports are replayed.
@@ -53,6 +59,25 @@ public struct DesktopJobRequestState: Equatable, Sendable {
         pending.contains {
             $0.request.requestID == requestID && $0.inFlight == nil && !$0.request.canAutomaticallyRetry
         }
+    }
+
+    public var manualTranscriptionRequests: [Request] {
+        pending.filter { $0.inFlight == nil && Self.isTranscriptionRetry($0.request) }.map(\.request)
+    }
+
+    public func hasTranscriptionRequest(requestID: String) -> Bool {
+        pending.contains { $0.request.requestID == requestID && Self.isTranscriptionRetry($0.request) }
+    }
+
+    /// Only the explicit recovery screen may start this attempt, using the unchanged RAM record.
+    public mutating func beginManualTranscriptionRecovery(_ request: Request) -> Token? {
+        guard Self.isTranscriptionRetry(request), let index = pending.firstIndex(where: {
+            $0.request == request && $0.inFlight == nil
+        }) else { return nil }
+        let token = nextToken(for: request.requestID)
+        pending[index].inFlight = token
+        pending[index].isRetry = true
+        return token
     }
 
     public mutating func begin(_ request: Request) -> Token? {
@@ -132,6 +157,12 @@ public struct DesktopJobRequestState: Equatable, Sendable {
         return Token(requestID: requestID, revision: revision)
     }
 
+    private static func isTranscriptionRetry(_ request: Request) -> Bool {
+        guard request.tool == ToolCatalog.regenerate,
+            let values = try? JSONSerialization.jsonObject(with: request.arguments) as? [String: Any] else { return false }
+        return values.keys.contains("transcription_retry")
+    }
+
     private static func isPreflightRejection(_ code: String?, tool: String) -> Bool {
         guard let code else { return false }
         switch tool {
@@ -140,7 +171,7 @@ public struct DesktopJobRequestState: Equatable, Sendable {
                 "engine_unavailable", "authentication_required"].contains(code)
         case ToolCatalog.regenerate:
             return ["invalid_argument", "not_found", "busy", "scope_denied", "policy_violation",
-                "engine_unavailable"].contains(code)
+                "engine_unavailable", "configuration_conflict", "authentication_required", "model_unavailable"].contains(code)
         case ToolCatalog.importRecording:
             return ["invalid_argument", "not_found", "busy", "policy_violation", "engine_unavailable"].contains(code)
         case ToolCatalog.registerContext, ToolCatalog.exportMinutes:

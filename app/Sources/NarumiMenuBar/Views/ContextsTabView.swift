@@ -107,6 +107,9 @@ struct ContextsTabView: View {
             Toggle("登録後に議事録を再生成する", isOn: $form.autoRegenerate)
                 .toggleStyle(.checkbox)
             if form.autoRegenerate, let config = model.detail?.config {
+                if config.transcriptionModel != nil {
+                    TranscriptionGenerationDisclosure(config: config, catalog: model.transcriptionModelCatalog)
+                }
                 MinutesGenerationDisclosure(
                     config: config, catalog: model.minutesModelCatalog, includesNewContext: true)
             }
@@ -136,9 +139,7 @@ struct ContextsTabView: View {
     private var regenerationBlocked: Bool {
         guard form.autoRegenerate else { return false }
         guard let detail = model.detail, detail.meeting.meetingID == model.selectedMeetingID else { return true }
-        guard detail.config.minutesModel != nil else { return false }
-        return model.minutesModelCatalog.isLoading
-            || model.minutesModelCatalog.validationMessage(for: ProcessingConfigurationForm(config: detail.config)) != nil
+        return model.generationValidationMessage(config: detail.config) != nil
     }
 
     private func chooseFile() {

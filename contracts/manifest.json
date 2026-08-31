@@ -1,9 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "name": "narumi",
-  "contract_version": "4.0.0",
-  "description": "narumi MCP tool contracts v4. OpenAI API connection support and explicit text minutes model selection for Codex App Server, Anthropic API, local Ollama and OpenAI API. Existing llm_provider stages remain unchanged. ASR, ensemble and Claude Agent SDK generation are outside this addition. Shared types live in defs/*.json.",
-  "defs": ["defs/common.json", "defs/providers.json", "defs/provider_connections.json", "defs/provider_models.json"],
+  "contract_version": "5.0.0",
+  "description": "narumi MCP tool contracts v5. Adds explicit OpenAI API transcription selection with timestamp-capable models, bounded sequential audio chunks and single-chunk recovery confirmation. Existing local transcription and text minutes selections remain available. Ensemble, speaker reference audio and forced retransmission of successful chunks are excluded. Shared types live in defs/*.json.",
+  "defs": ["defs/common.json", "defs/providers.json", "defs/provider_connections.json", "defs/provider_models.json", "defs/transcription_models.json"],
   "tools": [
     "get_server_info",
     "configure_recording_permission",

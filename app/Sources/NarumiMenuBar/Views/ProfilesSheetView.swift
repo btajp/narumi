@@ -103,7 +103,8 @@ struct ProfilesSheetView: View {
                     }
                     ProcessingConfigurationFields(
                         form: binding.processing, capabilities: capabilities,
-                        catalog: model.minutesModelCatalog, isProfile: true)
+                        catalog: model.minutesModelCatalog, transcriptionCatalog: model.transcriptionModelCatalog,
+                        isProfile: true)
                     TextField("既定 scope（任意）", text: binding.scope)
                     TextField("既定 engagement（任意）", text: binding.engagement)
                 }
@@ -168,9 +169,7 @@ struct ProfilesSheetView: View {
                     }
                 }
                 .disabled(saving || loadingProfile || binding.wrappedValue.name.trimmingCharacters(in: .whitespaces).isEmpty
-                    || (binding.wrappedValue.processing.minutesModel.mode == .selected
-                        && (model.minutesModelCatalog.isLoading
-                            || model.minutesModelCatalog.validationMessage(for: binding.wrappedValue.processing) != nil)))
+                    || model.configurationValidationMessage(for: binding.wrappedValue.processing) != nil)
                 .keyboardShortcut(.defaultAction)
             }
             .padding(10)

@@ -42,7 +42,7 @@ struct MinutesGenerationDisclosure: View {
                 Text(includesNewContext
                      ? "処理する内容: 文字起こし・話者名・会議名・議事録に使うコンテキストのテキスト（今回登録する内容を含む）。"
                      : "処理する内容: 文字起こし・話者名・会議名・議事録に使うコンテキストのテキスト。")
-                Text("この議事録生成には音声・動画・画像を渡しません。他の工程には従来の設定を適用します。")
+                Text("このテキスト議事録の工程には音声・動画・画像を渡しません。音声認識には別の音声認識設定、発話統合などには従来の設定を適用します。")
                     .foregroundStyle(.secondary)
                 if selection.provider == "openai-api" || selection.provider == "anthropic-api" {
                     Text("取消しても、サービス側の処理や課金の停止は保証できません。送信後に結果が不明になっても自動再送せず、新しい試行では API 利用料が重複する場合があります。")

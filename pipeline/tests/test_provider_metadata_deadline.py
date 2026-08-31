@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import socket
+import ssl
 import threading
 import time
 from contextlib import contextmanager
@@ -417,8 +418,8 @@ def test_real_urllib_marks_generation_unknown_only_when_http_write_may_have_star
 
 
 @contextmanager
-def local_http_server(reply):
-    """A loopback-only peer records complete requests and serves synthetic bytes."""
+def local_http_server(reply, *, read_body=True):
+    """Record loopback requests; a stalled upload can opt out of reading its body."""
     requests, failures = [], []
     stop = threading.Event()
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -450,7 +451,7 @@ def local_http_server(reply):
                         for line in head.split(b"\r\n")
                         if line.lower().startswith(b"content-length:")
                     )
-                    while len(body) < length:
+                    while read_body and len(body) < length:
                         part = connection.recv(length - len(body))
                         if not part:
                             raise AssertionError("fixture missing request body")
@@ -654,3 +655,89 @@ def test_real_generation_redirect_never_forwards_credentials(monkeypatch):
     response, body_file = retained_responses[0]
     assert response.closed and response.fp is None
     assert body_file.closed
+
+
+class PartialWriteSocket:
+    def __init__(self, actions):
+        self.actions, self.calls = list(actions), []
+        self.accepted = bytearray()
+        self.timeout, self.closed = 3, False
+
+    def gettimeout(self):
+        return self.timeout
+
+    def settimeout(self, value):
+        self.timeout = value
+
+    def setblocking(self, value):
+        assert value is False
+
+    def send(self, data):
+        self.calls.append(bytes(data))
+        action = self.actions.pop(0) if self.actions else len(data)
+        if isinstance(action, Exception):
+            raise action
+        self.accepted.extend(data[:action])
+        return action
+
+    def shutdown(self, how):
+        self.closed = True
+
+    def close(self):
+        self.closed = True
+
+
+def test_interruptible_tls_write_keeps_the_same_suffix_across_want_read_and_write(monkeypatch):
+    connection = PartialWriteSocket([3, ssl.SSLWantWriteError(), ssl.SSLWantReadError(), 2])
+    waits = []
+
+    def ready(readers, writers, errors, timeout):
+        waits.append((readers, writers, timeout))
+        return readers, writers, []
+
+    monkeypatch.setattr(deadline_module.select, "select", ready)
+    guard = RequestDeadline(3, interruptible_write=True)
+    guard.track(connection)
+    request = deadline_module._HTTPConnection("127.0.0.1", deadline=guard)
+    request.sock = connection
+    payload = b"fixture multipart body"
+    try:
+        request.send(payload)
+        assert bytes(connection.accepted) == payload
+        assert connection.calls == [payload, payload[3:], payload[3:], payload[3:], payload[5:]]
+        assert waits == [([], [connection], 0.1), ([connection], [], 0.1)]
+        assert connection.timeout > 0.1 and guard.request_started
+    finally:
+        guard.close()
+    assert connection.closed
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_interruptible_write_poll_enforces_cancellation_and_absolute_deadline(monkeypatch, cancel):
+    clock = Clock()
+    monkeypatch.setattr(deadline_module.threading, "Timer", clock.timer)
+    connection = PartialWriteSocket([BlockingIOError(), BlockingIOError()])
+
+    def not_ready(readers, writers, errors, timeout):
+        clock.advance(timeout)
+        return [], [], []
+
+    monkeypatch.setattr(deadline_module.select, "select", not_ready)
+    guard = RequestDeadline(
+        30 if cancel else 0.2,
+        monotonic=clock,
+        interruptible_write=True,
+        should_cancel=(lambda: clock.value >= 0.2) if cancel else None,
+    )
+    request = deadline_module._HTTPConnection("127.0.0.1", deadline=guard)
+    request.sock = connection
+    guard.track(connection)
+    guard.start()
+    try:
+        with pytest.raises(RequestCancelled if cancel else TimeoutError):
+            request.send(b"fixture multipart body")
+        assert clock.value <= 0.21 and guard.request_started
+        assert connection.closed and not connection.accepted
+        assert len(connection.calls) == 2
+    finally:
+        guard.close()

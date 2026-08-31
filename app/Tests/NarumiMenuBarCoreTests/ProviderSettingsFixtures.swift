@@ -40,22 +40,27 @@ enum ProviderSettingsFixtures {
             checkedAt: timestamp, activeAuth: activeAuth, lastGenerationState: connection.lastGenerationState)
     }
 
-    static func resource() -> ProviderRuntimeResource {
+    static func resource(
+        version: String? = nil, source: ProviderRuntimeResourceSource = .installed,
+        sha256: String? = nil
+    ) -> ProviderRuntimeResource {
         ProviderRuntimeResource(
             resourceID: "fixture-runtime", displayName: "Installed fixture runtime", kind: .runtime,
-            version: nil, source: .installed, downloadHost: nil, sha256: nil, license: "Fixture license")
+            version: version, source: source, downloadHost: nil, sha256: sha256,
+            license: "Fixture license")
     }
 
     static func provider(
         providerID: ProviderID = .anthropicAPI, state: ProviderRuntimeState = .ready,
-        activeSetup: ProviderSetupOperation? = nil, lastSetup: ProviderSetupOperation? = nil
+        activeSetup: ProviderSetupOperation? = nil, lastSetup: ProviderSetupOperation? = nil,
+        resource: ProviderRuntimeResource = ProviderSettingsFixtures.resource()
     ) -> ProviderDescriptor {
         ProviderDescriptor(
             providerID: providerID, displayName: ProviderDisplay.name(providerID), roles: [.llm],
             authMethods: [providerID.supportedAuthMethod], availability: .unverified,
             reason: "adapter_capability_verification_required",
             runtime: ProviderRuntime(
-                state: state, version: nil, catalogRevision: "fixture-v1", resources: [resource()],
+                state: state, version: nil, catalogRevision: "fixture-v1", resources: [resource],
                 activeSetup: activeSetup, lastSetup: lastSetup))
     }
 

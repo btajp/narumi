@@ -100,7 +100,8 @@ final class DesktopJobRequestStateTests: XCTestCase {
         (ToolCatalog.prepareProviderRuntime,
             ["invalid_argument", "not_found", "configuration_conflict", "busy", "engine_unavailable", "authentication_required"]),
         (ToolCatalog.regenerate,
-            ["invalid_argument", "not_found", "busy", "scope_denied", "policy_violation", "engine_unavailable"]),
+            ["invalid_argument", "not_found", "busy", "scope_denied", "policy_violation", "engine_unavailable",
+                "configuration_conflict", "authentication_required", "model_unavailable"]),
         (ToolCatalog.importRecording,
             ["invalid_argument", "not_found", "busy", "policy_violation", "engine_unavailable"]),
         (ToolCatalog.registerContext, ["invalid_argument", "not_found", "busy", "scope_denied"]),
@@ -112,7 +113,7 @@ final class DesktopJobRequestStateTests: XCTestCase {
         "invalid_argument", "not_found", "busy", "scope_denied", "policy_violation", "engine_unavailable",
         "contract_mismatch", "cancelled", "recorder_unavailable", "internal",
         "permission_denied", "scope_mismatch", "unknown_code", nil,
-        "configuration_conflict", "authentication_required",
+        "configuration_conflict", "authentication_required", "model_unavailable",
     ]
 
     func testFirstFailureUsesTheToolSpecificContractPreflightTable() throws {
@@ -155,7 +156,7 @@ final class DesktopJobRequestStateTests: XCTestCase {
     }
 
     func testDefinitiveRegenerateRejectionsReleaseRecordingAndUpdateGates() throws {
-        for code in ["scope_denied", "policy_violation", "engine_unavailable"] {
+        for code in ["scope_denied", "policy_violation", "engine_unavailable", "configuration_conflict", "authentication_required", "model_unavailable"] {
             var requests = DesktopJobRequestState()
             var session = DesktopSessionState()
             session.connectionChanged(to: .running(pid: 123))
@@ -234,6 +235,80 @@ final class DesktopJobRequestStateTests: XCTestCase {
                 requestID: "export-1", tool: ToolCatalog.exportMinutes, arguments: Data(arguments.utf8))
             XCTAssertEqual(request.canAutomaticallyRetry, expected, arguments)
         }
+    }
+
+    func testExplicitASRRetryRemainsUnknownWithoutAutomaticReplay() throws {
+        let original = DesktopJobRequestState.Request(
+            requestID: "audio-1", tool: ToolCatalog.regenerate,
+            arguments: Data(#"{"request_id":"audio-1","transcription_retry":{"blocked_epoch":0}}"#.utf8))
+        var state = DesktopJobRequestState()
+        XCTAssertFalse(original.canAutomaticallyRetry)
+        let token = try XCTUnwrap(state.begin(original))
+        XCTAssertTrue(state.finishFailure(token, errorCode: nil))
+        for _ in 0..<20 {
+            state.invalidateRetries()
+            XCTAssertNil(state.beginRetry())
+        }
+        XCTAssertTrue(state.requiresManualRecovery(requestID: "audio-1"))
+        XCTAssertEqual(state.pendingCount, 1)
+        XCTAssertEqual(state.uncertainCount, 1)
+    }
+
+    func testASRRetryPresenceAndMalformedArgumentsFailClosedButMinutesRecoveryRemains() {
+        let cases: [(String, Bool)] = [
+            ("{}", true),
+            (#"{"expected_config":{"minutes_model":{"provider":"codex-app-server"}}}"#, true),
+            (#"{"expected_config":{"transcription_model":{"provider":"openai-api"}}}"#, true),
+            (#"{"transcription_retry":{}}"#, false),
+            (#"{"transcription_retry":null}"#, false),
+            (#"{"transcription_retry":false}"#, false),
+            ("[]", false), ("invalid JSON", false),
+        ]
+        for (arguments, allowed) in cases {
+            let request = DesktopJobRequestState.Request(
+                requestID: "request-1", tool: ToolCatalog.regenerate, arguments: Data(arguments.utf8))
+            XCTAssertEqual(request.canAutomaticallyRetry, allowed, arguments)
+        }
+    }
+
+    func testDefinitiveASRRetryPreflightFailureDoesNotLeaveAManualBlock() throws {
+        for code in ["configuration_conflict", "authentication_required", "model_unavailable"] {
+            var state = DesktopJobRequestState()
+            let request = DesktopJobRequestState.Request(
+                requestID: "audio-1", tool: ToolCatalog.regenerate,
+                arguments: Data(#"{"request_id":"audio-1","transcription_retry":{}}"#.utf8))
+            let token = try XCTUnwrap(state.begin(request))
+            XCTAssertTrue(state.finishFailure(token, errorCode: code))
+            XCTAssertFalse(state.requiresManualRecovery(requestID: "audio-1"))
+            XCTAssertEqual(state.pendingCount, 0)
+            XCTAssertNil(state.beginRetry())
+        }
+    }
+
+    func testManualASRAcceptanceRecoveryRequiresOriginalBytesAndRetainsReplayUncertainty() throws {
+        let original = DesktopJobRequestState.Request(
+            requestID: "audio-1", tool: ToolCatalog.regenerate,
+            arguments: Data(#"{"request_id":"audio-1","transcription_retry":{}}"#.utf8))
+        var state = DesktopJobRequestState()
+        let initial = try XCTUnwrap(state.begin(original))
+        XCTAssertTrue(state.hasTranscriptionRequest(requestID: original.requestID))
+        XCTAssertTrue(state.manualTranscriptionRequests.isEmpty)
+        state.markUncertain(initial)
+        XCTAssertEqual(state.manualTranscriptionRequests, [original])
+        let changed = DesktopJobRequestState.Request(
+            requestID: original.requestID, tool: original.tool, arguments: Data(#"{"transcription_retry":null}"#.utf8))
+        XCTAssertNil(state.beginManualTranscriptionRecovery(changed))
+        let manual = try XCTUnwrap(state.beginManualTranscriptionRecovery(original))
+        XCTAssertNil(state.beginManualTranscriptionRecovery(original))
+        XCTAssertTrue(state.manualTranscriptionRequests.isEmpty)
+        XCTAssertTrue(state.finishFailure(manual, errorCode: "configuration_conflict"))
+        XCTAssertTrue(state.requiresManualRecovery(requestID: original.requestID))
+        XCTAssertNil(state.beginRetry())
+        let secondManual = try XCTUnwrap(state.beginManualTranscriptionRecovery(original))
+        XCTAssertTrue(state.confirm(secondManual))
+        XCTAssertFalse(state.hasTranscriptionRequest(requestID: original.requestID))
+        XCTAssertTrue(state.manualTranscriptionRequests.isEmpty)
+        XCTAssertEqual(state.pendingCount, 0)
     }
 
     func testUnknownProviderSetupStaysPendingWithoutAutomaticReplay() throws {

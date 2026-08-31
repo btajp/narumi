@@ -111,7 +111,15 @@ class MinutesResolver:
             yield {}
             return
         with self.service.store.transaction() as document:
-            yield copy.deepcopy(self._selection(config, document).params)
+            yield self.validate_in_transaction(config, document)
+
+    def validate_in_transaction(
+        self, config: MeetingConfig, document: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Validate with the caller's provider transaction while atomically saving config."""
+        if config.minutes_model is None:
+            return {}
+        return copy.deepcopy(self._selection(config, document).params)
 
     def validate(self, config: MeetingConfig) -> dict[str, Any]:
         with self.validated(config) as params:

@@ -28,6 +28,7 @@ from narumi.errors import (
 )
 from narumi.export import get_exporter
 from narumi.models import MeetingConfig
+from narumi.transcription_selection import TranscriptionRetry
 
 from narumi_server.handlers.common import (
     check_expected_config,
@@ -182,14 +183,21 @@ def enqueue_process(ctx: ServerContext, meeting_id: str, *, force: bool = False)
                 force=force,
                 progress=progress,
                 gaia_client_factory=ctx.gaia.client,
-                **_minutes_kwargs(ctx, bundle, progress, expected_config),
+                **_selected_kwargs(ctx, bundle, progress, expected_config),
             ),
         )
 
     return ctx.jobs.submit("process", meeting_id, run)
 
 
-def enqueue_regenerate(ctx: ServerContext, meeting_id: str, *, force: bool, reason: str) -> str:
+def enqueue_regenerate(
+    ctx: ServerContext,
+    meeting_id: str,
+    *,
+    force: bool,
+    reason: str,
+    transcription_retry: TranscriptionRetry | None = None,
+) -> str:
     """Enqueue the ``regenerate`` job: ``narumi.pipeline.refresh_meeting``.
 
     Deterministic stages run idempotently (only when they never ran or their params changed —
@@ -197,6 +205,7 @@ def enqueue_regenerate(ctx: ServerContext, meeting_id: str, *, force: bool, reas
     vocab_hints change), then alignment → integrate → generate (forced when ``force``).
     """
     expected_config = find_bundle(ctx, meeting_id).manifest.config.model_copy(deep=True)
+    retry = transcription_retry.model_copy(deep=True) if transcription_retry is not None else None
 
     def run(progress: JobProgress) -> dict[str, Any]:
         return run_pipeline_job(
@@ -209,14 +218,15 @@ def enqueue_regenerate(ctx: ServerContext, meeting_id: str, *, force: bool, reas
                 reason=reason,
                 job_id=progress.job_id,
                 gaia_client_factory=ctx.gaia.client,
-                **_minutes_kwargs(ctx, bundle, progress, expected_config),
+                **_selected_kwargs(ctx, bundle, progress, expected_config),
+                **({"transcription_retry": retry} if retry is not None else {}),
             ),
         )
 
     return ctx.jobs.submit("regenerate", meeting_id, run)
 
 
-def _minutes_kwargs(
+def _selected_kwargs(
     ctx: ServerContext, bundle: Bundle, progress: JobProgress, expected_config: MeetingConfig
 ) -> dict[str, Any]:
     """Bind explicit selections to this server and its cooperative cancellation flag.
@@ -226,19 +236,25 @@ def _minutes_kwargs(
     """
     config = bundle.manifest.config
     if (
-        config.minutes_model is not None or expected_config.minutes_model is not None
+        config.minutes_model is not None
+        or expected_config.minutes_model is not None
+        or config.transcription_model is not None
+        or expected_config.transcription_model is not None
     ) and config != expected_config:
         raise ConfigurationConflictError("The meeting configuration changed after job acceptance")
-    if config.minutes_model is None:
+    if config.minutes_model is None and config.transcription_model is None:
         return {}
     with validated_config(ctx, config):
         pass
     from narumi.providers.generation import MinutesResolver
+    from narumi.providers.transcription import TranscriptionResolver
 
-    return {
-        "minutes_resolver": MinutesResolver(ctx.providers),
-        "should_cancel": lambda: progress.cancelled,
-    }
+    kwargs: dict[str, Any] = {"should_cancel": lambda: progress.cancelled}
+    if config.minutes_model is not None:
+        kwargs["minutes_resolver"] = MinutesResolver(ctx.providers)
+    if config.transcription_model is not None:
+        kwargs["transcription_resolver"] = TranscriptionResolver(ctx.providers)
+    return kwargs
 
 
 def perform_export(
@@ -307,17 +323,26 @@ def regenerate(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
     with locked_bundle(
         ctx, args["meeting_id"], scope=args.get("scope"), purpose="regenerate"
     ) as bundle:
-        if bundle.manifest.config.minutes_model is not None and args.get("force", False):
+        if (
+            bundle.manifest.config.minutes_model is not None
+            or bundle.manifest.config.transcription_model is not None
+        ) and args.get("force", False):
             raise InvalidArgumentError(
-                "Force regeneration is unavailable for connected minutes; start a new cache epoch"
+                "Force regeneration is unavailable for selected models; confirm a new attempt"
             )
         check_expected_config(bundle.manifest.config, args)
+        retry: TranscriptionRetry | None = None
+        if "transcription_retry" in args:
+            if bundle.manifest.config.transcription_model is None:
+                raise InvalidArgumentError("An API transcription selection is required for retry")
+            retry = TranscriptionRetry.model_validate(args["transcription_retry"])
         with validated_config(ctx, bundle.manifest.config):
             job_id = enqueue_regenerate(
                 ctx,
                 bundle.meeting_id,
                 force=bool(args.get("force", False)),
                 reason=args.get("reason") or "regenerate",
+                **({"transcription_retry": retry} if retry is not None else {}),
             )
         return {"job_id": job_id, "meeting_id": bundle.meeting_id}
 

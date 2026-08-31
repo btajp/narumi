@@ -23,6 +23,7 @@ import uvicorn
 from click.testing import CliRunner, Result
 from conftest import make_recorded_bundle
 from narumi.contracts import ContractSet, load_contracts
+from narumi.models import MeetingConfig
 from narumi_server import cli_tools
 from narumi_server.app import ToolOutcome, build_server
 from narumi_server.cli_input import NullOption, SecretStdinOption
@@ -211,6 +212,95 @@ def test_boolean_flag_pair_and_omission(cli: click.Group, dispatched: dict[str, 
         ["--in-process", "import-recording", "--meeting-name", "取り込み", "--mic-path", "/x.m4a"],
     )
     assert "copy" not in dispatched["args"]  # omitted option → contract default applies serverside
+
+
+def test_transcription_selection_and_cas_are_json_objects(
+    cli: click.Group, contracts: ContractSet, monkeypatch: pytest.MonkeyPatch
+):
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def capture(_state, tool, arguments):
+        contracts.validate_input(tool, arguments)
+        calls.append((tool, arguments))
+        return {"ok": True}, False
+
+    monkeypatch.setattr(cli_tools, "_call", capture)
+    selection = {
+        "provider": "openai-api",
+        "connection_id": "conn-0123456789ab",
+        "connection_revision": 1,
+        "model_id": "whisper-1",
+        "parameters": {},
+        "cache_epoch": 0,
+    }
+    expected = MeetingConfig().model_dump(mode="json")
+    result = invoke(
+        cli,
+        [
+            "set-meeting-config",
+            "--meeting-id",
+            MEETING_A,
+            "--transcription-model",
+            json.dumps(selection),
+            "--external-send-policy",
+            "api_ok",
+            "--expected-config",
+            json.dumps(expected),
+        ],
+    )
+    assert result.exit_code == 0, result.stderr
+    assert calls[-1][0] == "set_meeting_config"
+    assert calls[-1][1]["transcription_model"] == selection
+    assert calls[-1][1]["expected_config"] == expected
+    cleared = invoke(
+        cli, ["set-meeting-config", "--meeting-id", MEETING_A, "--clear-transcription-model"]
+    )
+    assert cleared.exit_code == 0, cleared.stderr
+    assert calls[-1][1]["transcription_model"] is None
+    omitted = invoke(cli, ["set-meeting-config", "--meeting-id", MEETING_A, "--language", "ja"])
+    assert omitted.exit_code == 0, omitted.stderr
+    assert "transcription_model" not in calls[-1][1]
+
+
+def test_transcription_retry_and_expected_config_are_forwarded_together(
+    cli: click.Group, contracts: ContractSet, monkeypatch: pytest.MonkeyPatch
+):
+    calls: list[dict[str, Any]] = []
+
+    def capture(_state, tool, arguments):
+        assert tool == "regenerate"
+        contracts.validate_input(tool, arguments)
+        calls.append(arguments)
+        return {"ok": True}, False
+
+    monkeypatch.setattr(cli_tools, "_call", capture)
+    expected = MeetingConfig(
+        transcription_model={
+            "provider": "openai-api",
+            "connection_id": "conn-0123456789ab",
+            "connection_revision": 1,
+            "model_id": "whisper-1",
+            "cache_epoch": 1,
+        },
+        external_send_policy="api_ok",
+    ).model_dump(mode="json")
+    retry = {"input_fingerprint": "a" * 64, "chunk_fingerprint": "b" * 64, "blocked_epoch": 0}
+    result = invoke(
+        cli,
+        [
+            "regenerate",
+            "--meeting-id",
+            MEETING_A,
+            "--expected-config",
+            json.dumps(expected),
+            "--transcription-retry",
+            json.dumps(retry),
+        ],
+    )
+    assert result.exit_code == 0, result.stderr
+    assert calls[0]["expected_config"] == expected
+    assert calls[0]["transcription_retry"] == retry
+    assert "force" not in calls[0]
 
 
 # ---------------------------------------------------------------------------- in-process execution

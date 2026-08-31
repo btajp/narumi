@@ -302,6 +302,62 @@ final class ContractModelsTests: XCTestCase {
         XCTAssertEqual(known.message, "fixture validation message")
     }
 
+    func testASROutcomeEvidenceSurvivesOnlyStrictDecoding() throws {
+        let evidence = try TranscriptionOutcomeUnknownDetails(
+            inputFingerprint: String(repeating: "a", count: 64), chunkFingerprint: String(repeating: "b", count: 64),
+            blockedEpoch: 2, track: .system, chunkIndex: 1, chunkCount: 3, completedChunks: 1,
+            startSample: 9_600_000, endSample: 19_200_000)
+        let details = try JSONSerialization.jsonObject(with: JSONEncoder().encode(evidence))
+        let encoded = try JSONSerialization.data(withJSONObject: [
+            "code": "engine_unavailable", "message": "untrusted-upstream-text", "details": details,
+        ])
+        let error = try JSONDecoder().decode(ToolErrorInfo.self, from: encoded)
+        XCTAssertEqual(error.transcriptionOutcome, evidence)
+        XCTAssertTrue(error.message.contains("音声認識"))
+        XCTAssertTrue(error.message.contains("不明区間を再送"))
+        let roundTrip = try JSONEncoder().encode(error)
+        XCTAssertFalse(String(decoding: roundTrip, as: UTF8.self).contains("untrusted-upstream-text"))
+        XCTAssertEqual(try JSONDecoder().decode(ToolErrorInfo.self, from: roundTrip), error)
+
+        let incomplete = try JSONDecoder().decode(ToolErrorInfo.self, from: Data(
+            #"{"code":"engine_unavailable","message":"untrusted-upstream-text","details":{"stage":"transcribe","reason":"transcription_outcome_unknown","outcome_unknown":true}}"#.utf8))
+        XCTAssertNil(incomplete.transcriptionOutcome)
+        XCTAssertTrue(incomplete.message.contains("音声認識"))
+        XCTAssertFalse(incomplete.message.contains("議事録生成"))
+    }
+
+    func testUnknownProfileSaveDoesNotSuggestMinutesRetry() throws {
+        let error = try JSONDecoder().decode(ToolErrorInfo.self, from: Data(
+            #"{"code":"configuration_conflict","message":"untrusted","details":{"reason":"profile_save_outcome_unknown","outcome_unknown":true,"path":"untrusted"}}"#.utf8))
+        XCTAssertTrue(error.message.contains("プロファイルが保存された可能性"))
+        XCTAssertTrue(error.message.contains("選び直して"))
+        XCTAssertFalse(error.message.contains("議事録"))
+        XCTAssertNil(error.transcriptionOutcome)
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(error), as: UTF8.self).contains("untrusted"))
+    }
+
+    func testASRCapabilityIsExplicitAndRestrictedToContractFiveHTTP() throws {
+        var info = try XCTUnwrap(try decodeAll(ServerInfo.self, tool: "get_server_info").first)
+        for version in ["2.0.0", "3.0.0", "4.0.0", "5.0.0-rc.1", "6.0.0"] {
+            XCTAssertTrue(info.capabilities.supportedTranscriptionModelProviders(contractVersion: version).isEmpty, version)
+        }
+        XCTAssertEqual(info.capabilities.supportedTranscriptionModelProviders(contractVersion: "5.0.0"), ["openai-api"])
+        info.capabilities.transcriptionModelProviders = ["openai-api", "codex-app-server", "unknown"]
+        XCTAssertEqual(info.capabilities.supportedTranscriptionModelProviders(contractVersion: "5.0.0"), ["openai-api"])
+        info.capabilities.transports = ["stdio"]
+        XCTAssertTrue(info.capabilities.supportedTranscriptionModelProviders(contractVersion: "5.0.0").isEmpty)
+
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(info)) as? [String: Any])
+        var capabilities = try XCTUnwrap(object["capabilities"] as? [String: Any])
+        capabilities.removeValue(forKey: "transcription_model_providers")
+        object["capabilities"] = capabilities
+        let legacy = try JSONDecoder().decode(ServerInfo.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertNil(legacy.capabilities.transcriptionModelProviders)
+        capabilities["transcription_model_providers"] = NSNull()
+        object["capabilities"] = capabilities
+        XCTAssertThrowsError(try JSONDecoder().decode(ServerInfo.self, from: JSONSerialization.data(withJSONObject: object)))
+    }
+
     func testGetServerInfo() throws {
         let infos = try decodeAll(ServerInfo.self, tool: "get_server_info")
         XCTAssertEqual(infos.count, 2)
@@ -313,6 +369,7 @@ final class ContractModelsTests: XCTestCase {
         XCTAssertEqual(http.capabilities.workflow?.providerModels, true)
         XCTAssertEqual(http.capabilities.workflow?.stageModelSelection, true)
         XCTAssertEqual(Set(http.capabilities.minutesModelProviders ?? []), Set(MinutesModelSelection.providers))
+        XCTAssertEqual(http.capabilities.transcriptionModelProviders, ["openai-api"])
         XCTAssertEqual(http.capabilities.workflow?.ensembleGeneration, false)
         XCTAssertEqual(http.secureTransport?.mode, "pinned_tls")
         XCTAssertEqual(http.secureTransport?.tlsRequired, true)
@@ -321,6 +378,7 @@ final class ContractModelsTests: XCTestCase {
         XCTAssertEqual(http.diagnostics.ffmpeg?.version, "7.1.1")
         XCTAssertEqual(http.diagnostics.recorderPath, "/Applications/narumi.app/Contents/MacOS/narumi-recorder")
         let stdio = infos[1]
+        XCTAssertEqual(stdio.capabilities.transcriptionModelProviders, [])
         XCTAssertEqual(stdio.serverInstanceID, "00000000-0000-4000-8000-000000000002")
         XCTAssertFalse(stdio.capabilities.recording)
         XCTAssertFalse(stdio.capabilities.permissionSetupInProgress)

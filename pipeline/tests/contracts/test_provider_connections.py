@@ -173,7 +173,9 @@ def test_openai_public_connection_and_runtime_metadata(contracts: ContractSet) -
         contracts.validate_output("set_provider_connection", {"connection": connection})
 
     descriptor = deepcopy(contracts["list_providers"].output_examples[0]["providers"][0])
-    descriptor.update(provider_id="openai-api", auth_methods=["api_key"])
+    descriptor.update(
+        provider_id="openai-api", auth_methods=["api_key"], roles=["llm", "transcription"]
+    )
     contracts.validate_output("list_providers", {"providers": [descriptor]})
     descriptor["auth_methods"] = ["chatgpt"]
     with pytest.raises(ContractMismatchError):
@@ -572,11 +574,13 @@ def test_server_metadata_requires_workflow_and_transport_disclosure(
         contracts.validate_output("get_server_info", payload)
 
 
-def test_server_metadata_declares_explicit_minutes_providers(contracts: ContractSet) -> None:
+def test_server_metadata_requires_exact_resident_minutes_providers(contracts: ContractSet) -> None:
     payload = deepcopy(contracts["get_server_info"].output_examples[0])
     contracts.validate_output("get_server_info", payload)
     payload["capabilities"]["minutes_model_providers"] = []
-    contracts.validate_output("get_server_info", payload)
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("get_server_info", payload)
+    payload = deepcopy(contracts["get_server_info"].output_examples[0])
     del payload["capabilities"]["minutes_model_providers"]
     with pytest.raises(ContractMismatchError):
         contracts.validate_output("get_server_info", payload)

@@ -52,6 +52,7 @@ actor MCPClient {
     let jobRequestObserver: JobRequestObserver?
     var jobRequestPublication: UInt64 = 0
     var unpublishedJobIDs: [String: UInt64] = [:]
+    var operationSessionGeneration: UInt64 { permissionSession.generation }
 
     init(
         config: ServerConfig, clientVersion: String, jobRequestObserver: JobRequestObserver? = nil,
@@ -111,6 +112,7 @@ actor MCPClient {
         if name != ToolCatalog.getServerInfo, permissionSession.contractVersion == nil {
             _ = try await performToolCall(ToolCatalog.getServerInfo, arguments: [:], confidential: false)
         }
+        try Task.checkCancellation()
         let params: JSONNode = .object(["name": .string(name), "arguments": .object(arguments)])
         let result: JSONNode
         var responseGeneration = permissionSession.generation
@@ -153,10 +155,24 @@ actor MCPClient {
             structuredContent: structured, text: text, isError: isError,
             sessionGeneration: responseGeneration == permissionSession.generation ? responseGeneration : nil)
         if isError {
-            let message = MCPClient.errorMessage(from: callResult)
+            var message = MCPClient.errorMessage(from: callResult)
             let code = MCPHTTPTransport.confidentialErrorCode(structured?["error"]?["code"]?.stringValue)
-            throw MCPClientError.tool(message: message, payload: .object([
-                "error": .object(["code": .string(code), "message": .string(message)])]))
+            var safeError: [String: JSONNode] = ["code": .string(code)]
+            if !confidential, let details = structured?["error"]?["details"] {
+                message = ToolErrorInfo.generationOutcomeMessage(
+                    reason: details["reason"]?.stringValue,
+                    unknown: details["outcome_unknown"]?.boolValue == true,
+                    stage: details["stage"]?.stringValue) ?? message
+                // Preserve only the closed, bounded evidence needed for explicit ASR review.
+                // Untrusted error text, arbitrary details and confidential-tool payloads stay redacted.
+                if let data = try? details.serialized(),
+                    let outcome = try? JSONDecoder().decode(TranscriptionOutcomeUnknownDetails.self, from: data),
+                    let encoded = try? JSONEncoder().encode(outcome), let safeDetails = try? JSONNode.parse(encoded) {
+                    safeError["details"] = safeDetails
+                }
+            }
+            safeError["message"] = .string(message)
+            throw MCPClientError.tool(message: message, payload: .object(["error": .object(safeError)]))
         }
         if name == ToolCatalog.getServerInfo {
             guard structured?["server_instance_id"]?.stringValue == bootstrap?.serverInstanceID else {

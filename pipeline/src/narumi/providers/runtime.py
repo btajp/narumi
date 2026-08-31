@@ -67,7 +67,15 @@ class RuntimePreparation:
             runtime = self._current(provider_id, document)
             if runtime["state"] != "ready":
                 availability = "not_prepared"
-                reason = runtime.get("reason") or "runtime_preparation_required"
+                resource = runtime["resources"][0]
+                if (
+                    provider_id == "codex-app-server"
+                    and resource["source"] == "bundled"
+                    and resource["version"] is None
+                ):
+                    reason = "bundled_runtime_unavailable"
+                else:
+                    reason = runtime.get("reason") or "runtime_preparation_required"
             elif provider_id == "claude-agent-sdk":
                 availability, reason = "unverified", "sdk_execution_isolation_unverified"
             elif provider_id == "ollama":
@@ -78,7 +86,7 @@ class RuntimePreparation:
                 {
                     "provider_id": provider_id,
                     "display_name": display_name,
-                    "roles": ["llm"],
+                    "roles": ["llm", "transcription"] if provider_id == "openai-api" else ["llm"],
                     "auth_methods": [AUTH_METHODS[provider_id]],
                     "availability": availability,
                     "reason": reason,
@@ -241,11 +249,18 @@ class RuntimePreparation:
             raise CancelledError("Provider preparation was cancelled") from None
         except Exception:
             state = "not_prepared" if resource["version"] is None else "failed"
-            reason = (
-                "runtime_dependency_missing"
-                if resource["version"] is None
-                else "runtime_preparation_failed"
-            )
+            if (
+                provider_id == "codex-app-server"
+                and resource["source"] == "bundled"
+                and resource["version"] is None
+            ):
+                reason = "bundled_runtime_unavailable"
+            else:
+                reason = (
+                    "runtime_dependency_missing"
+                    if resource["version"] is None
+                    else "runtime_preparation_failed"
+                )
             self._finish(provider_id, job_id, "failed", state, reason)
             raise EngineUnavailableError("Provider runtime preparation failed") from None
         finally:

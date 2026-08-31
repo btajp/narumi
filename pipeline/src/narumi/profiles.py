@@ -14,15 +14,21 @@ running server's registries belong to the server handlers.
 from __future__ import annotations
 
 import json
-import threading
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated, Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
-from narumi.errors import ErrorCode, InvalidArgumentError, NarumiError, NotFoundError
+from narumi.errors import (
+    ConfigurationConflictError,
+    ErrorCode,
+    InvalidArgumentError,
+    NarumiError,
+    NotFoundError,
+)
 from narumi.models import MeetingConfig
+from narumi.profiles_io import replace_file, write_lock
 
 DEFAULT_PROFILE: Final = "default"
 PROFILES_FILE: Final = "profiles.json"
@@ -87,7 +93,6 @@ class ProfileStore:
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
-        self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ reads
     @property
@@ -127,6 +132,7 @@ class ProfileStore:
         name: str,
         *,
         config: MeetingConfig | None = None,
+        expected_config: MeetingConfig | None = None,
         scope: str | None | _Unset = UNSET,
         engagement: str | None | _Unset = UNSET,
         export_destinations: Sequence[str] | None = None,
@@ -137,10 +143,14 @@ class ProfileStore:
         ``config`` replaces the stored config wholesale (callers merge beforehand);
         ``scope`` / ``engagement`` accept ``None`` to clear; ``export_destinations`` replaces
         the stored list. ``make_default=True`` makes this the default profile.
+        ``expected_config`` compares the previous effective config under the write lock;
+        a new profile starts from the built-in config defaults.
         """
-        with self._lock:
+        with write_lock(self.path):
             store = self._load()
             stored = store.profiles.get(name, _StoredProfile())
+            if expected_config is not None and stored.config != expected_config:
+                raise ConfigurationConflictError("The profile configuration changed; reload it")
             data: dict[str, Any] = {
                 "config": stored.config if config is None else config,
                 "scope": stored.scope if isinstance(scope, _Unset) else scope,
@@ -167,7 +177,7 @@ class ProfileStore:
 
     def delete(self, name: str) -> None:
         """Delete a profile; the built-in ``default`` and the current default are undeletable."""
-        with self._lock:
+        with write_lock(self.path):
             store = self._load()
             if name == DEFAULT_PROFILE:
                 raise InvalidArgumentError(
@@ -232,7 +242,9 @@ class ProfileStore:
         return store
 
     def _save(self, store: _StoreFile) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".json.tmp")
-        tmp.write_text(store.model_dump_json(indent=2) + "\n", encoding="utf-8")
-        tmp.replace(self.path)
+        try:
+            replace_file(self.path, store.model_dump_json(indent=2) + "\n")
+        except OSError:
+            raise NarumiError(
+                "Profile settings could not be saved", code=ErrorCode.INTERNAL
+            ) from None

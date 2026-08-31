@@ -13,6 +13,7 @@ import subprocess
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,12 +21,23 @@ from narumi.errors import CancelledError
 from narumi.providers._acl import ensure_no_extended_allow_acl
 from narumi.providers._io import _open_directory, _open_regular
 from narumi.providers.codex._rpc import unavailable
+from narumi.providers.codex._runtime_lock import CODEX_RUNTIME_LOCK
 from narumi.providers.secrets import _trusted_directory_tree
 
-SUPPORTED_VERSION = "0.150.1"
+SUPPORTED_VERSION = CODEX_RUNTIME_LOCK["version"]
+BUNDLED_CODEX_SHA256 = CODEX_RUNTIME_LOCK["binary"]["sha256"]
+BUNDLED_CODEX_RELATIVE_PATH = Path(CODEX_RUNTIME_LOCK["binary"]["path"])
+_BUNDLED_CODEX_MANIFEST = CODEX_RUNTIME_LOCK
 RESOURCE_ID = "codex-app-server-0-150-1"
 MAX_BINARY_BYTES = 512 * 1024 * 1024
 _MAGIC = {b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\x7fELF"}
+
+
+@dataclass(frozen=True)
+class _Candidate:
+    path: Path
+    sha256: str
+    source: str
 
 
 def installed_candidates() -> list[tuple[Path, Path]]:
@@ -85,6 +97,27 @@ def _open_binary(path: Path) -> int:
         raise
 
 
+def _open_locked_resource(path: Path, expected_size: int) -> int:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid not in {0, os.geteuid()}
+            or metadata.st_mode & 0o022
+            or metadata.st_mode & (stat.S_ISUID | stat.S_ISGID)
+            or metadata.st_nlink != 1
+            or metadata.st_size != expected_size
+            or not 0 < expected_size <= 16 * 1024
+        ):
+            raise OSError("untrusted bundled resource")
+        ensure_no_extended_allow_acl(descriptor)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def _digest(descriptor: int) -> str:
     before = os.fstat(descriptor)
     digest = hashlib.sha256()
@@ -129,13 +162,102 @@ def _read_metadata(path: Path) -> dict[str, Any] | None:
         os.close(descriptor)
 
 
+def _bundled_runtime_anchor() -> tuple[Path, Path] | None:
+    configured = os.environ.get("NARUMI_CONTRACTS_DIR")
+    if not configured:
+        return None
+    contracts = Path(configured)
+    if not contracts.is_absolute() or ".." in contracts.parts or len(contracts.parents) < 4:
+        return None
+    bundle = contracts.parents[3]
+    expected = bundle / "Contents" / "Resources" / "runtime" / "contracts"
+    if contracts != expected or bundle.suffix != ".app":
+        return None
+    return bundle, contracts
+
+
+def _bundled_runtime_root() -> Path | None:
+    """Derive only the trusted runtime belonging to the bundle's contracts."""
+    anchor = _bundled_runtime_anchor()
+    if anchor is None:
+        return None
+    bundle, contracts = anchor
+    if not _trusted_directory_tree(bundle, contracts):
+        return None
+    try:
+        if _read_metadata(contracts / "manifest.json") is None:
+            return None
+    except (OSError, ValueError):
+        return None
+    return contracts.parent
+
+
+def _bundled_resources_match(runtime: Path) -> bool:
+    license_metadata = _BUNDLED_CODEX_MANIFEST["license"]
+    resources = (
+        (license_metadata["path"], license_metadata["sha256"], license_metadata["size"]),
+        (
+            license_metadata["notice_path"],
+            license_metadata["notice_sha256"],
+            license_metadata["notice_size"],
+        ),
+    )
+    for relative, expected_sha256, expected_size in resources:
+        path = runtime / relative
+        if not _trusted_directory_tree(runtime, path.parent):
+            return False
+        try:
+            descriptor = _open_locked_resource(path, expected_size)
+            try:
+                if _digest(descriptor) != expected_sha256:
+                    return False
+            finally:
+                os.close(descriptor)
+        except (OSError, ValueError):
+            return False
+    return True
+
+
 class CodexRuntime:
     def __init__(self, root: Path) -> None:
         self.root = Path(os.path.abspath(root))
         self.directory = self.root / "providers/runtime/codex-app-server" / SUPPORTED_VERSION
         self.executable = self.directory / "codex"
 
-    def _candidate(self) -> tuple[Path, str] | None:
+    @staticmethod
+    def _bundled_mode() -> bool:
+        return _bundled_runtime_anchor() is not None
+
+    def _candidate(self) -> _Candidate | None:
+        if self._bundled_mode():
+            runtime = _bundled_runtime_root()
+            if runtime is None:
+                return None
+            try:
+                manifest = _read_metadata(runtime / "manifest.json")
+            except (OSError, ValueError):
+                return None
+            if manifest is None or manifest.get("codex") != _BUNDLED_CODEX_MANIFEST:
+                return None
+            if not _bundled_resources_match(runtime):
+                return None
+            path = runtime / BUNDLED_CODEX_RELATIVE_PATH
+            if not _trusted_directory_tree(runtime, path.parent):
+                return None
+            try:
+                descriptor = _open_binary(path)
+                try:
+                    if os.fstat(descriptor).st_size != _BUNDLED_CODEX_MANIFEST["binary"]["size"]:
+                        return None
+                    digest = _digest(descriptor)
+                finally:
+                    os.close(descriptor)
+            except (OSError, ValueError):
+                return None
+            if digest != BUNDLED_CODEX_SHA256:
+                return None
+            return _Candidate(path, digest, "bundled")
+
         candidates = [(self.directory, self.executable), *installed_candidates()]
         for root, path in candidates:
             if not _trusted_directory_tree(root, path.parent):
@@ -155,7 +277,7 @@ class CodexRuntime:
                         self.directory / "verification.json"
                     ) != {"version": SUPPORTED_VERSION, "sha256": digest}:
                         continue
-                    return path, digest
+                    return _Candidate(path, digest, "installed")
                 finally:
                     os.close(descriptor)
             except (OSError, ValueError):
@@ -166,22 +288,33 @@ class CodexRuntime:
         candidate = self._candidate()
         return {
             "resource_id": RESOURCE_ID,
-            "display_name": "Codex App Server 0.150.1 installed binary verification",
+            "display_name": "Codex App Server 0.150.1 binary verification",
             "kind": "runtime",
             "version": SUPPORTED_VERSION if candidate else None,
-            "source": "installed",
+            "source": candidate.source
+            if candidate
+            else ("bundled" if self._bundled_mode() else "installed"),
             "download_host": None,
-            "sha256": candidate[1] if candidate else None,
+            "sha256": candidate.sha256 if candidate else None,
             "license": "Apache-2.0",
         }
 
     def prepare(self, resource: dict[str, Any], progress: Any) -> None:
-        progress("inspect_installed_codex", 0.2)
+        bundled = self._bundled_mode()
+        progress("inspect_bundled_codex" if bundled else "inspect_installed_codex", 0.2)
         if resource != self.resource() or resource["sha256"] is None:
-            raise unavailable("codex_installed_runtime_unavailable")
+            raise unavailable(
+                "codex_bundled_runtime_unavailable"
+                if bundled
+                else "codex_installed_runtime_unavailable"
+            )
         candidate = self._candidate()
         if candidate is None:
-            raise unavailable("codex_installed_runtime_unavailable")
+            raise unavailable(
+                "codex_bundled_runtime_unavailable"
+                if bundled
+                else "codex_installed_runtime_unavailable"
+            )
         try:
             directory = _open_directory(self.directory, trusted_root=self.root)
         except OSError:
@@ -196,7 +329,7 @@ class CodexRuntime:
                 self.directory / "verification-state",
                 self.directory / "verification-tmp",
             )
-            source = _open_binary(candidate[0])
+            source = _open_binary(candidate.path)
             target = _open_regular(directory, temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             try:
                 if _digest(source) != resource["sha256"]:

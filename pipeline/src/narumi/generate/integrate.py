@@ -33,6 +33,11 @@ from narumi.bundle import Bundle, StageResult
 from narumi.diarize.layer3 import LAYER_SCREEN, NameSuggestion, load_layer3_names
 from narumi.diarize.layer4 import LAYER_EXTERNAL, build_layer4
 from narumi.errors import InvalidArgumentError, NotFoundError
+from narumi.generate.asr_speakers import (
+    append_asr_evidence,
+    build_asr_turns,
+    matching_asr_turns,
+)
 from narumi.generate.cache import CACHE_PATH, IntegrateCache, interval_fingerprint
 from narumi.generate.prompts import render_prompt
 from narumi.generate.speakers import assign_by_overlap, overlap
@@ -127,6 +132,10 @@ def integrate(
     a label still unresolved after ``self_name`` and layer 4 takes its layer-3 suggestion, with
     layer-3 evidence. Layer 4 (real names printed by external tools) outranks layer 3 (names
     read off pixels).
+
+    API diarize labels are independent anonymous evidence. They only refine an unresolved
+    ``other`` when exactly one candidate overlaps, after the explicitly selected layer 2.
+    Multiple candidates remain unresolved; microphone identity and real names retain priority.
     """
     index = _segment_index(transcripts)
     reference = str(alignment.params.get("reference") or REFERENCE_SOURCE)
@@ -142,9 +151,10 @@ def integrate(
         for turn in d.turns
     ]
     layer2 = [turn for d in diarizations if d.layer == 2 for turn in d.turns]
+    asr_turns = build_asr_turns(transcripts, alignment.offsets)
     layer4 = _layer4_turns(transcripts, diarizations, alignment.offsets)
     tracks = {sid: t.track for sid, t in transcripts.items()}
-    all_turns = [*layer1, *layer2, *layer4]
+    all_turns = [*layer1, *layer2, *asr_turns, *layer4]
 
     rows: list[dict[str, Any]] = []
     reused = 0
@@ -176,7 +186,7 @@ def integrate(
         for draft in sorted(drafts, key=lambda d: (d.start, d.end, d.columns)):
             if not draft.text:
                 continue
-            label = _draft_label(draft, tracks, layer1, layer2)
+            label = _draft_label(draft, tracks, layer1, layer2, asr_turns)
             sources = [
                 seg_id
                 for seg_id, _ in sorted(
@@ -208,8 +218,16 @@ def integrate(
         if segment.speaker_label is not None and segment.speaker_label not in labels_seen:
             labels_seen.append(segment.speaker_label)
 
-    speaker_map = build_speaker_map(labels_seen, config, diarizations)
-    _apply_speaker_names(segments, speaker_map, layer4, layer3_names or {})
+    asr_labels = {turn.speaker for turn in asr_turns}
+    speaker_map = build_speaker_map(labels_seen, config, diarizations, asr_labels=asr_labels)
+    append_asr_evidence(segments, speaker_map, index, asr_turns)
+    names = dict(layer3_names or {})
+    if SPEAKER_OTHER in names:
+        # Refining the anonymous system label must preserve an existing screen-name mapping.
+        for turn in asr_turns:
+            if tracks.get(turn.source_id) == "system":
+                names.setdefault(turn.speaker, names[SPEAKER_OTHER])
+    _apply_speaker_names(segments, speaker_map, layer4, names)
 
     return MergedTranscript(
         segments=segments,
@@ -307,10 +325,15 @@ def _apply_speaker_names(
 
 
 def build_speaker_map(
-    labels: list[str], config: MeetingConfig, diarizations: list[Diarization]
+    labels: list[str],
+    config: MeetingConfig,
+    diarizations: list[Diarization],
+    *,
+    asr_labels: set[str] | None = None,
 ) -> SpeakerMap:
     """``me`` → self_name (confidence 1.0 when known); every other label stays unresolved."""
     layer2_engines = [d.engine for d in diarizations if d.layer == 2]
+    layer2_labels = {turn.speaker for d in diarizations if d.layer == 2 for turn in d.turns}
     speakers: dict[str, SpeakerEntry] = {}
     for label in sorted(labels, key=_label_order):
         if label == SPEAKER_ME:
@@ -325,6 +348,10 @@ def build_speaker_map(
                 confidence=0.0,
                 evidence=[SpeakerEvidence(layer=1, detail="system track (own-system)")],
             )
+        elif asr_labels and label in asr_labels and label not in layer2_labels:
+            # ASR evidence is attached from the contributing source, not attributed to an
+            # explicitly selected layer-2 engine that did not produce this label.
+            speakers[label] = SpeakerEntry()
         else:
             detail = ", ".join(f"{e.name} {e.version}" for e in layer2_engines) or "layer2"
             speakers[label] = SpeakerEntry(
@@ -447,6 +474,7 @@ def _draft_label(
     tracks: dict[str, str | None],
     layer1: list[Turn],
     layer2: list[Turn],
+    asr_turns: list[Turn],
 ) -> str | None:
     own_tracks = {tracks.get(sid) for sid in draft.columns if tracks.get(sid)}
     if len(draft.columns) == 1 and own_tracks:
@@ -464,6 +492,14 @@ def _draft_label(
         refined = assign_by_overlap(draft.start, draft.end, layer2)
         if refined is not None:
             label = refined
+    if label == SPEAKER_OTHER:
+        candidates = {
+            turn.speaker
+            for turn in matching_asr_turns(draft.start, draft.end, draft.columns, asr_turns)
+        }
+        # Anonymous ASR labels carry no majority vote across people or chunk namespaces.
+        if len(candidates) == 1:
+            label = next(iter(candidates))
     return label
 
 

@@ -410,7 +410,8 @@ final class MinutesModelFormTests: XCTestCase {
         capabilities.minutesModelProviders = ["openai-api", "ollama", "claude-agent-sdk", "unknown"]
         XCTAssertEqual(capabilities.supportedMinutesModelProviders(contractVersion: "4.0.0"), ["openai-api", "ollama"])
         XCTAssertEqual(capabilities.supportedMinutesModelProviders(contractVersion: "3.0.0"), ["codex-app-server"])
-        XCTAssertTrue(capabilities.supportedMinutesModelProviders(contractVersion: "5.0.0").isEmpty)
+        XCTAssertEqual(capabilities.supportedMinutesModelProviders(contractVersion: "5.0.0"), ["openai-api", "ollama"])
+        XCTAssertTrue(capabilities.supportedMinutesModelProviders(contractVersion: "6.0.0").isEmpty)
         capabilities.workflow?.stageModelSelection = false
         XCTAssertTrue(capabilities.supportedMinutesModelProviders(contractVersion: "4.0.0").isEmpty)
         let form = ProcessingConfigurationForm(config: MeetingConfig(minutesModel: MinutesModelSelection(

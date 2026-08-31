@@ -15,11 +15,18 @@ extension MCPClient {
         let request = DesktopJobRequestState.Request(
             requestID: requestID, tool: name, arguments: try JSONNode.object(arguments).serialized())
         guard let token = jobRequests.begin(request) else {
+            guard !jobRequests.hasTranscriptionRequest(requestID: requestID) else {
+                throw MCPClientError.tool(message: Self.uncertainMessage(tool: ToolCatalog.regenerate), payload: nil)
+            }
             return try await performToolCall(name, arguments: arguments, confidential: confidential)
         }
         await publishJobRequestState()
         do {
             let result = try await performToolCall(name, arguments: arguments, confidential: confidential)
+            if jobRequests.hasTranscriptionRequest(requestID: requestID),
+                !Self.validTranscriptionReceipt(result, meetingID: arguments["meeting_id"]?.stringValue) {
+                throw MCPClientError.protocolError("音声再送の受付応答が元の会議と一致しません。")
+            }
             await finishJobRequest(token, tool: name, result: result)
             if jobRequests.requiresManualRecovery(requestID: requestID) {
                 throw MCPClientError.tool(message: Self.uncertainMessage(tool: name), payload: nil)
@@ -76,6 +83,43 @@ extension MCPClient {
         }
     }
 
+    /// Returns only validated, immutable RAM records. No server request is sent by this lookup.
+    func pendingTranscriptionRequests() -> [TranscriptionRequestRecovery] {
+        jobRequests.manualTranscriptionRequests.compactMap { try? TranscriptionRequestRecovery(request: $0) }
+    }
+
+    /// One explicit replay of the original request. No epoch, proof or request ID is created here.
+    func recoverTranscriptionRequest(_ request: TranscriptionRequestRecovery) async throws -> ToolCallResult {
+        try Task.checkCancellation()
+        let generation = operationSessionGeneration
+        guard pendingTranscriptionRequests().contains(request),
+            case .object(let arguments) = try JSONNode.parse(request.arguments),
+            let token = jobRequests.beginManualTranscriptionRecovery(.init(
+                requestID: request.requestID, tool: ToolCatalog.regenerate, arguments: request.arguments)) else {
+            throw MCPClientError.tool(message: "元の受付不明要求を確認できません。現在の状態を読み直してください。", payload: nil)
+        }
+        await publishJobRequestState()
+        do {
+            try Task.checkCancellation()
+            let result = try await performToolCall(
+                ToolCatalog.regenerate, arguments: arguments, confidential: false,
+                expectedSessionGeneration: generation)
+            guard Self.validTranscriptionReceipt(result, meetingID: request.meetingID) else {
+                throw MCPClientError.protocolError("音声再送の受付応答が元の会議と一致しません。")
+            }
+            await finishJobRequest(token, tool: ToolCatalog.regenerate, result: result)
+            guard !jobRequests.hasTranscriptionRequest(requestID: request.requestID) else {
+                throw MCPClientError.tool(message: Self.uncertainMessage(tool: ToolCatalog.regenerate), payload: nil)
+            }
+            return result
+        } catch {
+            // A replay rejection cannot prove that the original request was never accepted.
+            jobRequests.finishFailure(token, errorCode: Self.toolErrorCode(error))
+            await publishJobRequestState()
+            throw MCPClientError.tool(message: Self.uncertainMessage(tool: ToolCatalog.regenerate), payload: nil)
+        }
+    }
+
     private func finishJobRequest(
         _ token: DesktopJobRequestState.Token, tool: String, result: ToolCallResult
     ) async {
@@ -115,9 +159,18 @@ extension MCPClient {
         return payload?["error"]?["code"]?.stringValue
     }
 
+    private static func validTranscriptionReceipt(_ result: ToolCallResult, meetingID: String?) -> Bool {
+        guard let meetingID, result.structuredContent?["meeting_id"]?.stringValue == meetingID,
+            let jobID = result.structuredContent?["job_id"]?.stringValue else { return false }
+        return jobID.range(of: #"\Ajob-[0-9a-f]{12,32}\z"#, options: .regularExpression) != nil
+    }
+
     private static func uncertainMessage(tool: String) -> String {
         if tool == ToolCatalog.prepareProviderRuntime {
             return "プロバイダ準備の受付結果を確認できません。自動再送せず、接続設定画面から元のジョブを再確認します。"
+        }
+        if tool == ToolCatalog.regenerate {
+            return "音声認識の再送要求の受付結果を確認できません。自動で再送せず、録画開始と更新を保留しています。処理や API 課金が始まっている可能性があるため、ジョブの状態を確認してください。"
         }
         return "エクスポート結果を確認できません。重複送信を避けるため自動再送はせず、録画開始と更新を保留しています。送信先の状態を確認してください。"
     }

@@ -25,6 +25,9 @@ final class MainWindowModel: ObservableObject {
     let client: NarumiClient
     let providerSettings: ProviderSettingsStore
     let minutesModelCatalog: MinutesModelCatalogStore
+    let transcriptionModelCatalog: TranscriptionModelCatalogStore
+    let transcriptionRetry: TranscriptionRetryStore
+    let transcriptionRequestRecovery: TranscriptionRequestRecoveryStore
     var hostActions = HostActions()
 
     // MARK: Sidebar
@@ -35,7 +38,14 @@ final class MainWindowModel: ObservableObject {
     @Published var transcriptSearchEnabled = false
     @Published var meetings: [MeetingSummary] = []
     @Published var searchHits: [SearchHit] = []
-    @Published var selectedMeetingID: String?
+    @Published var selectedMeetingID: String? {
+        didSet {
+            if oldValue != selectedMeetingID {
+                transcriptionRetry.invalidate()
+                transcriptionRequestRecovery.invalidate()
+            }
+        }
+    }
     @Published var lastRefreshError: String?
 
     // MARK: Recording banner
@@ -49,7 +59,16 @@ final class MainWindowModel: ObservableObject {
     // MARK: Detail
 
     @Published var selectedTab: DetailTab = .minutes
-    @Published var detail: MeetingDetail?
+    @Published var detail: MeetingDetail? {
+        didSet {
+            if oldValue?.meeting.meetingID != detail?.meeting.meetingID
+                || oldValue?.meeting.scope != detail?.meeting.scope
+                || oldValue?.config != detail?.config || oldValue?.recording != detail?.recording {
+                transcriptionRetry.invalidate()
+                transcriptionRequestRecovery.invalidate()
+            }
+        }
+    }
     @Published var minutes: Minutes?
     @Published var selectedMinutesVersion: Int?
     @Published var minutesUnavailable: String?
@@ -63,6 +82,14 @@ final class MainWindowModel: ObservableObject {
         didSet {
             minutesModelCatalog.setSupportedProviders(
                 serverInfo?.capabilities.supportedMinutesModelProviders(contractVersion: serverInfo?.contractVersion) ?? [])
+            transcriptionModelCatalog.setSupportedProviders(
+                serverInfo?.capabilities.supportedTranscriptionModelProviders(contractVersion: serverInfo?.contractVersion) ?? [])
+            if transcriptionModelCatalog.supportedProviders.isEmpty {
+                transcriptionRetry.invalidate()
+                transcriptionRequestRecovery.invalidate()
+            } else {
+                Task { await transcriptionRequestRecovery.reload() }
+            }
         }
     }
     @Published var exportDestinations: [ExportDestinationInfo] = []
@@ -72,9 +99,12 @@ final class MainWindowModel: ObservableObject {
     // MARK: Jobs
 
     @Published var jobs: [Job] = []
-    @Published var unresolvedJobRequestCount = 0
+    @Published var unresolvedJobRequestCount = 0 {
+        didSet { Task { await transcriptionRequestRecovery.reload() } }
+    }
     var jobState = DesktopJobState()
     var pendingJobRequests = 0
+    var configurationSaveGeneration: UInt64 = 0
 
     // MARK: Feedback / sheets
 
@@ -89,6 +119,9 @@ final class MainWindowModel: ObservableObject {
         self.client = client
         providerSettings = ProviderSettingsStore(client: client)
         minutesModelCatalog = MinutesModelCatalogStore(client: client)
+        transcriptionModelCatalog = TranscriptionModelCatalogStore(client: client)
+        transcriptionRetry = TranscriptionRetryStore(client: client)
+        transcriptionRequestRecovery = TranscriptionRequestRecoveryStore(client: client)
     }
 
     // MARK: Polling lifecycle (owned by the window controller)
@@ -109,6 +142,9 @@ final class MainWindowModel: ObservableObject {
             readyRefreshTask = nil
             jobState.invalidateRefresh()
             minutesModelCatalog.invalidate()
+            transcriptionModelCatalog.invalidate()
+            transcriptionRetry.invalidate()
+            transcriptionRequestRecovery.invalidate()
             loadedServerGeneration = nil
             serverInfo = nil
             profilesList = nil
@@ -150,6 +186,8 @@ final class MainWindowModel: ObservableObject {
     func stopPolling() {
         pollTask?.cancel()
         pollTask = nil
+        transcriptionRetry.invalidate()
+        transcriptionRequestRecovery.invalidate()
     }
 
     var scopeValues: [String] { NarumiFormat.parseScopeInput(scopeText) }
@@ -394,6 +432,16 @@ final class MainWindowModel: ObservableObject {
         guard let meetingID = selectedMeetingID, expectedMeetingID == nil || expectedMeetingID == meetingID else {
             return
         }
+        guard let detail, detail.meeting.meetingID == meetingID,
+            expectedConfig == nil || detail.config == expectedConfig,
+            !detail.config.requiresGenerationConfirmation || expectedConfig != nil else {
+            alert = AlertContent(title: "再生成を開始できません", message: "確認後に会議設定が変わりました。現在の設定で送信内容を再確認してください。")
+            return
+        }
+        if let message = generationValidationMessage(config: detail.config) {
+            alert = AlertContent(title: "再生成を開始できません", message: message)
+            return
+        }
         beginJobRequest()
         defer { endJobRequest() }
         do {
@@ -474,6 +522,18 @@ final class MainWindowModel: ObservableObject {
     ) async -> Bool {
         guard let meetingID = selectedMeetingID, expectedMeetingID == nil || expectedMeetingID == meetingID else {
             return false
+        }
+        if form.autoRegenerate {
+            guard let detail, detail.meeting.meetingID == meetingID,
+                expectedConfig == nil || detail.config == expectedConfig,
+                !detail.config.requiresGenerationConfirmation || expectedConfig != nil else {
+                alert = AlertContent(title: "コンテキストを登録できません", message: "確認後に会議設定が変わりました。現在の設定で送信内容を再確認してください。")
+                return false
+            }
+            if let message = generationValidationMessage(config: detail.config) {
+                alert = AlertContent(title: "コンテキストを登録できません", message: message)
+                return false
+            }
         }
         let payload: NarumiClient.ContextPayload
         switch form.mode {

@@ -185,7 +185,7 @@ def validated_config(ctx: ServerContext, config: MeetingConfig) -> Iterator[None
     or profile lock, so the provider transaction cannot invert that lock order.
     """
     check_config_policy(config)
-    if config.minutes_model is None:
+    if config.minutes_model is None and config.transcription_model is None:
         yield
         return
     if "streamable-http" not in ctx.transports or ctx.providers is None:
@@ -193,8 +193,15 @@ def validated_config(ctx: ServerContext, config: MeetingConfig) -> Iterator[None
             "Model selections require the authenticated resident server"
         )
     from narumi.providers.generation import MinutesResolver
+    from narumi.providers.transcription import TranscriptionResolver
 
-    with MinutesResolver(ctx.providers).validated(config):
+    # Both selections must remain valid through the same atomic save. Provider-store
+    # transactions cannot be nested, including when the connection is shared.
+    with ctx.providers.store.transaction() as document:
+        if config.minutes_model is not None:
+            MinutesResolver(ctx.providers).validate_in_transaction(config, document)
+        if config.transcription_model is not None:
+            TranscriptionResolver(ctx.providers).validate_in_transaction(config, document)
         yield
 
 
@@ -203,7 +210,9 @@ def check_expected_config(
 ) -> None:
     """Reject a generation request made for a stale displayed meeting configuration."""
     if "expected_config" not in args:
-        if generation and config.minutes_model is not None:
+        if generation and (
+            config.minutes_model is not None or config.transcription_model is not None
+        ):
             raise ConfigurationConflictError("Reload the meeting configuration before generating")
         return
     expected = MeetingConfig.model_validate(args["expected_config"])

@@ -74,53 +74,68 @@ struct MinutesTabView: View {
     }
 
     private var regeneratePopover: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("議事録を再生成").font(.headline)
-            if let confirmedConfig {
-                MinutesGenerationDisclosure(config: confirmedConfig, catalog: model.minutesModelCatalog)
-            }
-            if confirmedConfig?.minutesModel != nil {
-                Text("同じ入力・選択では保存済み結果を再利用します。結果不明の送信を新しく試すには、会議設定で試行番号を増やして保存してください。")
-                    .font(.caption).foregroundStyle(.secondary)
-                Button("会議設定を開く") {
-                    showRegeneratePopover = false
-                    model.selectedTab = .settings
-                }
-            } else {
-                Toggle("強制再生成（入力が同じでも新しい版を作る）", isOn: $regenerateForce)
-                    .toggleStyle(.checkbox)
-            }
-            TextField("理由（任意。manifest に記録されます）", text: $regenerateReason)
-                .textFieldStyle(.roundedBorder)
-            HStack {
-                Spacer()
-                Button("再生成を開始") {
-                    let config = confirmedConfig
-                    let meetingID = confirmedMeetingID
-                    let force = config?.minutesModel == nil && regenerateForce
-                    showRegeneratePopover = false
-                    Task {
-                        await model.regenerate(
-                            force: force, reason: regenerateReason, expectedConfig: config,
-                            expectedMeetingID: meetingID)
-                        regenerateReason = ""
-                        regenerateForce = false
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("議事録を再生成").font(.headline)
+                if let confirmedConfig {
+                    if confirmedConfig.transcriptionModel != nil {
+                        TranscriptionGenerationDisclosure(config: confirmedConfig, catalog: model.transcriptionModelCatalog)
+                        Divider()
                     }
+                    MinutesGenerationDisclosure(config: confirmedConfig, catalog: model.minutesModelCatalog)
                 }
-                .disabled(regenerationBlocked)
-                .keyboardShortcut(.defaultAction)
+                if confirmedConfig?.requiresGenerationConfirmation == true {
+                    if confirmedConfig?.minutesModel != nil {
+                        Text("議事録は同じ入力・選択の保存済み結果を再利用します。議事録生成の結果不明を新しく試す場合は、会議設定で試行番号の変更を確認して保存してください。")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Button("会議設定を開く") {
+                            showRegeneratePopover = false
+                            model.selectedTab = .settings
+                        }
+                    }
+                    if confirmedConfig?.transcriptionModel != nil {
+                        Text("API 音声認識の成功区間は再利用します。結果不明の区間はこの操作では再送せず、文字起こしタブで「不明区間を再送」の個別確認が必要です。")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Button("文字起こしタブを開く") {
+                            showRegeneratePopover = false
+                            model.selectedTab = .transcript
+                        }
+                    }
+                } else {
+                    Toggle("強制再生成（入力が同じでも新しい版を作る）", isOn: $regenerateForce)
+                        .toggleStyle(.checkbox)
+                }
+                TextField("理由（任意。manifest に記録されます）", text: $regenerateReason)
+                    .textFieldStyle(.roundedBorder)
+                HStack {
+                    Spacer()
+                    Button("再生成を開始") {
+                        let config = confirmedConfig
+                        let meetingID = confirmedMeetingID
+                        let force = config?.requiresGenerationConfirmation != true && regenerateForce
+                        showRegeneratePopover = false
+                        Task {
+                            await model.regenerate(
+                                force: force, reason: regenerateReason, expectedConfig: config,
+                                expectedMeetingID: meetingID)
+                            regenerateReason = ""
+                            regenerateForce = false
+                        }
+                    }
+                    .disabled(regenerationBlocked)
+                    .keyboardShortcut(.defaultAction)
+                }
             }
+            .padding(12)
         }
-        .padding(12)
-        .frame(width: 480)
+        .frame(width: 540)
+        .frame(maxHeight: 650)
     }
 
     private var regenerationBlocked: Bool {
         guard let confirmedConfig, let confirmedMeetingID,
-            confirmedMeetingID == model.selectedMeetingID else { return true }
-        guard confirmedConfig.minutesModel != nil else { return false }
-        return model.minutesModelCatalog.isLoading
-            || model.minutesModelCatalog.validationMessage(for: ProcessingConfigurationForm(config: confirmedConfig)) != nil
+            confirmedMeetingID == model.selectedMeetingID, model.detail?.config == confirmedConfig else { return true }
+        return model.generationValidationMessage(config: confirmedConfig) != nil
     }
 
     @ViewBuilder

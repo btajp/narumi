@@ -77,7 +77,7 @@ public enum RecordingPermissionContract {
         let components = core.split(separator: ".", omittingEmptySubsequences: false)
         guard components.count == 3,
             components.allSatisfy(isVersionNumber),
-            let major = Int(components[0]), (2...4).contains(major),
+            let major = Int(components[0]), (2...5).contains(major),
             let minor = Int(components[1]),
             let patch = Int(components[2])
         else { return false }

@@ -4,6 +4,26 @@ import XCTest
 
 @MainActor
 final class ProviderSettingsRecoveryFlowsTests: XCTestCase {
+    func testBundledRuntimeRequiresCompleteVerifiedMetadataBeforePreparation() async {
+        let valid = ProviderSettingsFixtures.resource(
+            version: "0.150.1", source: .bundled, sha256: String(repeating: "a", count: 64))
+        for resource in [
+            ProviderSettingsFixtures.resource(source: .bundled),
+            ProviderSettingsFixtures.resource(
+                version: "0.150.1", source: .bundled, sha256: "invalid"),
+            valid,
+        ] {
+            let provider = ProviderSettingsFixtures.provider(
+                providerID: .codexAppServer, state: .notPrepared, resource: resource)
+            let store = ProviderSettingsStore(client: FakeProviderSettingsClient(
+                connections: [ProviderSettingsFixtures.connection(
+                    providerID: .codexAppServer, credential: false)],
+                providers: [provider]))
+            await store.load()
+            XCTAssertEqual(store.canPrepare(resource, provider: provider), resource == valid)
+        }
+    }
+
     func testAuthenticationRejectedBeforeAcceptanceDoesNotCreatePermanentUnknownWork() async {
         for code in [ProviderSettingsErrorCode.configurationConflict, .busy, .invalidArgument, .notFound, .authenticationRequired] {
             let client = FakeProviderSettingsClient(scenario: .init(authRejection: ProviderSettingsFailure(code)))

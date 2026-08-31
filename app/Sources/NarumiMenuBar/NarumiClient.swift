@@ -8,24 +8,32 @@ import NarumiMenuBarCore
 struct ToolFailure: Error, Equatable, CustomStringConvertible {
     var code: String
     var message: String
+    var transcriptionOutcome: TranscriptionOutcomeUnknownDetails?
 
     var isBusy: Bool { code == "busy" }
     var description: String { "\(code): \(message)" }
 
-    init(code: String, message: String) {
+    init(code: String, message: String, transcriptionOutcome: TranscriptionOutcomeUnknownDetails? = nil) {
         self.code = code
         self.message = message
+        self.transcriptionOutcome = transcriptionOutcome
     }
 
     init(from error: MCPClientError) {
+        transcriptionOutcome = nil
         switch error {
         case .tool(let message, let payload):
             if let inner = payload?["error"], let code = inner["code"]?.stringValue {
                 self.code = code
                 self.message = ToolErrorInfo.generationOutcomeMessage(
                     reason: inner["details"]?["reason"]?.stringValue,
-                    unknown: inner["details"]?["outcome_unknown"]?.boolValue == true)
+                    unknown: inner["details"]?["outcome_unknown"]?.boolValue == true,
+                    stage: inner["details"]?["stage"]?.stringValue)
                     ?? inner["message"]?.stringValue ?? message
+                if let data = try? inner.serialized(),
+                    let decoded = try? JSONDecoder().decode(ToolErrorInfo.self, from: data) {
+                    self.transcriptionOutcome = decoded.transcriptionOutcome
+                }
             } else {
                 self.code = "error"
                 self.message = message
@@ -181,14 +189,22 @@ struct NarumiClient: Sendable {
     }
 
     func regenerate(
-        meetingID: String, scope: String?, force: Bool, reason: String?, expectedConfig: MeetingConfig? = nil
+        meetingID: String, scope: String?, force: Bool, reason: String?, expectedConfig: MeetingConfig? = nil,
+        transcriptionRetry: TranscriptionRetry? = nil, requestID: String? = nil
     ) async throws -> RegenerateResponse {
-        guard !force || expectedConfig?.minutesModel == nil else {
-            throw ToolFailure(code: "invalid_argument", message: "指定した議事録モデルの新しい試行は、会議設定で試行番号を増やして保存してください。")
+        guard !force || expectedConfig?.requiresGenerationConfirmation != true else {
+            throw ToolFailure(code: "invalid_argument", message: "接続したモデルでは強制再生成を使えません。議事録は会議設定で新しい試行を確認し、音声認識の結果不明区間は文字起こしタブで個別に再送を確認してください。")
+        }
+        if let transcriptionRetry {
+            guard !force, transcriptionRetry.isWellFormed,
+                let selection = expectedConfig?.transcriptionModel, selection.isWellFormed,
+                selection.cacheEpoch > transcriptionRetry.blockedEpoch else {
+                throw ToolFailure(code: "invalid_argument", message: "音声認識の再送には、対象区間の確認と更新済みの保存設定が必要です。")
+            }
         }
         var args: [String: JSONNode] = [
             "meeting_id": .string(meetingID),
-            "request_id": Self.requestID(),
+            "request_id": requestID.map { .string($0) } ?? Self.requestID(),
         ]
         if let scope {
             args["scope"] = .string(scope)
@@ -199,11 +215,12 @@ struct NarumiClient: Sendable {
         if let reason, !reason.isEmpty {
             args["reason"] = .string(reason)
         }
-        // Contract 2 servers have no expected_config. A contract 3 server rejects a concurrent
-        // legacy -> explicit model switch because the saved model config requires this confirmation.
-        if let expectedConfig, expectedConfig.minutesModel != nil {
+        // Older servers have no ASR selection. Explicit model processing always carries the
+        // exact configuration shown in the confirmation; no retry token is inferred from an epoch.
+        if let expectedConfig, expectedConfig.requiresGenerationConfirmation {
             args["expected_config"] = .object(try Self.arguments(expectedConfig))
         }
+        if let transcriptionRetry { args["transcription_retry"] = .object(try Self.arguments(transcriptionRetry)) }
         return try await call(ToolCatalog.regenerate, args)
     }
 
@@ -237,7 +254,7 @@ struct NarumiClient: Sendable {
         }
         if autoRegenerate {
             args["auto_regenerate"] = .bool(true)
-            if let expectedConfig, expectedConfig.minutesModel != nil {
+            if let expectedConfig, expectedConfig.requiresGenerationConfirmation {
                 args["expected_config"] = .object(try Self.arguments(expectedConfig))
             }
         }
@@ -248,13 +265,17 @@ struct NarumiClient: Sendable {
 
     /// `updates` carries only the keys to change (set_meeting_config semantics); the meeting id,
     /// scope selector and request_id are added here.
-    func setMeetingConfig(meetingID: String, scope: String?, updates: [String: JSONNode]) async throws -> SetMeetingConfigResponse {
+    func setMeetingConfig(
+        meetingID: String, scope: String?, updates: [String: JSONNode],
+        expectedConfig: MeetingConfig? = nil, requestID: String? = nil
+    ) async throws -> SetMeetingConfigResponse {
         var args = updates
         args["meeting_id"] = .string(meetingID)
-        args["request_id"] = Self.requestID()
+        args["request_id"] = requestID.map { .string($0) } ?? Self.requestID()
         if let scope {
             args["scope"] = .string(scope)
         }
+        if let expectedConfig { args["expected_config"] = .object(try Self.arguments(expectedConfig)) }
         return try await call(ToolCatalog.setMeetingConfig, args)
     }
 
@@ -381,10 +402,11 @@ struct NarumiClient: Sendable {
 
     /// `updates` carries the set_profile keys to change (config / scope / engagement /
     /// export_destinations / make_default).
-    func setProfile(name: String, updates: [String: JSONNode]) async throws -> Profile {
+    func setProfile(name: String, updates: [String: JSONNode], expectedConfig: MeetingConfig? = nil) async throws -> Profile {
         var args = updates
         args["name"] = .string(name)
         args["request_id"] = Self.requestID()
+        if let expectedConfig { args["expected_config"] = .object(try Self.arguments(expectedConfig)) }
         let response: ProfileResponse = try await call(ToolCatalog.setProfile, args)
         return response.profile
     }
