@@ -22,6 +22,12 @@ public struct DesktopUpdateGate: Equatable, Sendable {
 
     public var installing: Bool { phase == .installing }
 
+    /// Feed discovery and downloads must remain available even when recording state is
+    /// unavailable. Only the final installation/relaunch is gated by application safety.
+    public func canCheckForUpdates(updaterCanCheck: Bool) -> Bool {
+        updaterCanCheck && !installing
+    }
+
     public mutating func deferInstallation() {
         invalidateValidation()
         phase = .waiting

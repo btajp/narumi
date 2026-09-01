@@ -553,11 +553,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func checkForUpdates() {
-        if let reason = updateBlockReason {
-            mainWindowModel?.showToast(reason)
+        guard updater.checkForUpdates() else {
+            mainWindowModel?.showToast("アップデートの確認処理中です。少し待ってからもう一度お試しください。")
             return
         }
-        updater.checkForUpdates()
     }
 
     // MARK: Server status

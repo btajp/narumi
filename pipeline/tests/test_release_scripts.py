@@ -119,6 +119,24 @@ def test_release_isolated_signed_notarized_draft_and_reverified(shipping):
     assert len(uploads(shipping)) == 1
 
 
+def test_critical_update_is_explicit_and_presented_to_every_older_host(shipping):
+    root, env, _ = shipping
+    env["SPARKLE_CRITICAL_UPDATE"] = "1"
+    result = invoke(shipping, "0.1.1")
+    assert result.returncode == 0, result.stderr + result.stdout
+    generate = next(args for name, args in calls(shipping) if name == "generate_appcast")
+    assert generate[generate.index("--critical-update-version") + 1] == ""
+    feed = (root / "dist/release/v0.1.1/feed/appcast.xml").read_text()
+    assert "criticalUpdate" in feed
+
+
+def test_invalid_critical_update_setting_stops_before_release(shipping):
+    shipping[1]["SPARKLE_CRITICAL_UPDATE"] = "yes"
+    result = invoke(shipping, "0.1.1")
+    assert result.returncode != 0
+    assert not uploads(shipping)
+
+
 def test_dmg_release_seals_final_stapled_bytes_and_uploads_exactly_three(modern_shipping):
     root, _, _ = modern_shipping
     old = root / "dist/release/v0.1.3/immutable-marker"

@@ -238,6 +238,34 @@ def test_appcast_rejects_a_different_expected_signature(artifacts: Path) -> None
         )
 
 
+def test_appcast_accepts_one_unconditional_critical_update_marker(artifacts: Path) -> None:
+    root = ET.fromstring((artifacts / "appcast.xml").read_bytes())
+    item = root.find("channel/item")
+    assert item is not None
+    ET.SubElement(item, f"{SPARKLE}criticalUpdate")
+    _write_feed(artifacts, root)
+    release.validate_artifacts(artifacts, VERSION, BUILD, KEY)
+
+
+@pytest.mark.parametrize("mutation", ["attribute", "text", "child", "duplicate"])
+def test_appcast_rejects_ambiguous_critical_update_markers(artifacts: Path, mutation: str) -> None:
+    root = ET.fromstring((artifacts / "appcast.xml").read_bytes())
+    item = root.find("channel/item")
+    assert item is not None
+    marker = ET.SubElement(item, f"{SPARKLE}criticalUpdate")
+    if mutation == "attribute":
+        marker.set(f"{SPARKLE}version", "41")
+    elif mutation == "text":
+        marker.text = "critical"
+    elif mutation == "child":
+        ET.SubElement(marker, "unexpected")
+    else:
+        ET.SubElement(item, f"{SPARKLE}criticalUpdate")
+    _write_feed(artifacts, root)
+    with pytest.raises(release.ReleaseError, match="criticalUpdate"):
+        release.validate_artifacts(artifacts, VERSION, BUILD, KEY)
+
+
 @pytest.mark.parametrize("name", ["version", "shortVersionString"])
 @pytest.mark.parametrize("mutation", ["missing", "empty", "duplicate", "conflicting"])
 def test_feed_version_fields_must_be_unambiguous(name: str, mutation: str) -> None:

@@ -183,6 +183,14 @@ def validate_appcast(
         require(
             len(entries) == 1 and entries[0].text == expected, f"{name} が欠落・重複・不一致です"
         )
+    critical_updates = item.findall(f"{SPARKLE}criticalUpdate")
+    require(len(critical_updates) <= 1, "criticalUpdate が重複しています")
+    if critical_updates:
+        critical = critical_updates[0]
+        require(
+            not critical.attrib and not list(critical) and not (critical.text or "").strip(),
+            "criticalUpdate は全旧版向けの空要素に限ります",
+        )
     actual_signature = enclosure.get(f"{SPARKLE}edSignature", "")
     decode_base64(actual_signature, 64, "EdDSA 署名")
     if signature is not None:

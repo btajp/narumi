@@ -124,7 +124,6 @@ struct DiagnosticsSheetView: View {
                 Button("アップデートを確認…") {
                     model.hostActions.checkForUpdates()
                 }
-                .disabled(model.permissionProcessControlsBlocked || model.desktopSession.recording.active)
                 Spacer()
             }
         }
