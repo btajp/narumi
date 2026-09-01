@@ -6,6 +6,8 @@
 #   NARUMI_RELEASE_ENV  Local shell settings (default ~/.config/narumi/release.env if present).
 #   SPARKLE_BIN        Existing tools; otherwise use app/.build/artifacts/*/*/bin.
 #   SPARKLE_KEY_ACCOUNT  Existing signing account (default jp.btajp.narumi).
+#   SPARKLE_CRITICAL_UPDATE  Set to 1 only when every older installed version must present
+#                            this update immediately (default 0).
 #   RELEASE_DIR        Unused absolute directory (default <repo>/dist/release/v<version>).
 # --verify-* only checks an existing release; it never overwrites or publishes anything.
 set +x
@@ -57,6 +59,11 @@ done
   || fail "安定版 semver（X.Y.Z、先頭ゼロなし）を指定してください"
 
 release_load_env || fail "リリース設定を読み込めません"
+SPARKLE_CRITICAL_UPDATE="${SPARKLE_CRITICAL_UPDATE:-0}"
+case "$SPARKLE_CRITICAL_UPDATE" in
+  0|1) ;;
+  *) fail "SPARKLE_CRITICAL_UPDATE は 0 または 1 で指定してください" ;;
+esac
 SPARKLE_BIN="$(release_sparkle_bin "$ROOT")" \
   || fail "Sparkle ツールがありません。SwiftPM の依存解決後、または SPARKLE_BIN 指定で再実行してください"
 SPARKLE_KEY_ACCOUNT="${SPARKLE_KEY_ACCOUNT:-jp.btajp.narumi}"
@@ -162,8 +169,13 @@ fi
 step "6/9 ZIP の EdDSA 署名と appcast を生成"
 "$SPARKLE_BIN/sign_update" --account "$SPARKLE_KEY_ACCOUNT" -p "$ZIP" \
   > "$RELEASE_DIR/archive-signature.txt"
+appcast_args=(--maximum-versions 1 --maximum-deltas 0)
+if [[ "$SPARKLE_CRITICAL_UPDATE" == "1" ]]; then
+  # Empty version means the update is critical for every older Sparkle 2 host.
+  appcast_args+=(--critical-update-version "")
+fi
 "$SPARKLE_BIN/generate_appcast" --account "$SPARKLE_KEY_ACCOUNT" \
-  --maximum-versions 1 --maximum-deltas 0 \
+  "${appcast_args[@]}" \
   --download-url-prefix "https://github.com/$REPO/releases/download/v$VERSION/" \
   -o "$FEED_DIR/appcast.xml" "$FEED_DIR"
 

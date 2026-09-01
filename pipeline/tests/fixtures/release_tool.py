@@ -233,6 +233,9 @@ def make_appcast():
         ("hardwareRequirements", "arm64"),
     ):
         ET.SubElement(item, SPARKLE + name).text = value
+    if "--critical-update-version" in ARGS:
+        assert ARGS[ARGS.index("--critical-update-version") + 1] == ""
+        ET.SubElement(item, SPARKLE + "criticalUpdate")
     url = ARGS[ARGS.index("--download-url-prefix") + 1] + archive.name
     if MODE == "tampered_feed":
         url = "https://example.invalid/other.zip"
