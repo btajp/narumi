@@ -3,6 +3,24 @@ import XCTest
 @testable import NarumiMenuBarCore
 
 final class DesktopUpdateGateTests: XCTestCase {
+    func testUpdateCheckRemainsAvailableWhileApplicationStateIsBlocked() {
+        var gate = DesktopUpdateGate()
+        XCTAssertTrue(gate.canCheckForUpdates(updaterCanCheck: true))
+
+        gate.deferInstallation()
+        XCTAssertTrue(gate.canCheckForUpdates(updaterCanCheck: true))
+        XCTAssertFalse(gate.canCheckForUpdates(updaterCanCheck: false))
+    }
+
+    func testUpdateCheckStopsOnlyDuringFinalInstallation() throws {
+        var gate = DesktopUpdateGate()
+        gate.deferInstallation()
+        let token = try XCTUnwrap(gate.beginValidation(blocked: false))
+        XCTAssertTrue(gate.canCheckForUpdates(updaterCanCheck: true))
+        XCTAssertTrue(gate.finishValidation(token, blocked: false))
+        XCTAssertFalse(gate.canCheckForUpdates(updaterCanCheck: true))
+    }
+
     func testIdleCannotValidateOrInstall() {
         var gate = DesktopUpdateGate()
         XCTAssertEqual(gate.phase, .idle)

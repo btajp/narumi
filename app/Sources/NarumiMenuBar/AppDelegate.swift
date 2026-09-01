@@ -553,10 +553,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func checkForUpdates() {
-        if let reason = updateBlockReason {
-            mainWindowModel?.showToast(reason)
-            return
-        }
         updater.checkForUpdates()
     }
 

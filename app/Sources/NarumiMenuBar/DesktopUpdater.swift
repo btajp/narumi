@@ -4,7 +4,7 @@ import NarumiMenuBarCore
 import Sparkle
 
 /// Sparkle remains responsible for the feed, signatures and scheduled checks. This adapter
-/// only postpones checks/installations until the app has a fresh, idle recording/job state.
+/// postpones only installation until the app has a fresh, idle recording/job state.
 @MainActor
 final class DesktopUpdater: NSObject, SPUUpdaterDelegate {
     private let blockReason: () -> String?
@@ -33,7 +33,7 @@ final class DesktopUpdater: NSObject, SPUUpdaterDelegate {
     }
 
     var canCheckForUpdates: Bool {
-        !installing && blockReason() == nil && controller.updater.canCheckForUpdates
+        gate.canCheckForUpdates(updaterCanCheck: controller.updater.canCheckForUpdates)
     }
 
     func checkForUpdates() {
@@ -89,14 +89,6 @@ final class DesktopUpdater: NSObject, SPUUpdaterDelegate {
                 // terminate directly from the validation Task/main-queue job.
                 NSApp.terminate(nil)
             }
-        }
-    }
-
-    func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
-        if let reason = blockReason() {
-            throw NSError(
-                domain: "jp.btajp.narumi.update", code: 1,
-                userInfo: [NSLocalizedDescriptionKey: reason])
         }
     }
 
