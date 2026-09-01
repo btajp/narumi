@@ -36,9 +36,11 @@ final class DesktopUpdater: NSObject, SPUUpdaterDelegate {
         gate.canCheckForUpdates(updaterCanCheck: controller.updater.canCheckForUpdates)
     }
 
-    func checkForUpdates() {
-        guard canCheckForUpdates else { return }
+    @discardableResult
+    func checkForUpdates() -> Bool {
+        guard canCheckForUpdates else { return false }
         controller.checkForUpdates(nil)
+        return true
     }
 
     func stateDidChange() {
