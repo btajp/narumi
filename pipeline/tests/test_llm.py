@@ -109,7 +109,14 @@ def test_available_providers_always_has_local_ones():
     names = available_providers()
     assert names[:2] == ["none", "fake"]
     assert "ollama" in names
+    assert "claude-agent-sdk" not in names
     assert set(names) <= set(provider_names())
+
+
+def test_available_providers_excludes_legacy_claude_stub_when_sdk_is_importable(monkeypatch):
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
+
+    assert "claude-agent-sdk" not in available_providers()
 
 
 def test_anthropic_registry_does_not_require_or_import_generation_sdk(monkeypatch):

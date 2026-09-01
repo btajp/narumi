@@ -33,6 +33,10 @@ _IMPORT_REQUIREMENTS: dict[str, str] = {
     claude_agent.PROVIDER_NAME: "claude_agent_sdk",
 }
 
+# The legacy adapter still raises ``engine_unavailable`` for every generation request.
+# Claude Agent SDK is usable only through the v6 provider connection/minutes-model path.
+_LEGACY_UNAVAILABLE = frozenset({claude_agent.PROVIDER_NAME})
+
 
 def provider_names() -> list[str]:
     return list(PROVIDER_PROFILES)
@@ -49,9 +53,11 @@ def provider_profile(name: str) -> CapabilityProfile:
 
 
 def available_providers() -> list[str]:
-    """Registered names whose Python dependencies are importable (``none`` / ``fake`` always)."""
+    """Legacy providers that can actually complete a request in this process."""
     names: list[str] = []
     for name in PROVIDER_PROFILES:
+        if name in _LEGACY_UNAVAILABLE:
+            continue
         module = _IMPORT_REQUIREMENTS.get(name)
         if module is None or importlib.util.find_spec(module) is not None:
             names.append(name)
