@@ -4,6 +4,15 @@ narumi（narumi.app / pipeline / server）の変更履歴。最新の版を先�
 `VERSION`・`pipeline/pyproject.toml`・`server/pyproject.toml` と最新見出しの版は常に一致させる
 （`scripts/check-version.sh` が検査し、`scripts/release-app.sh` がリリースノートとして抜粋する）。
 
+## 0.5.1 - 2026-09-02
+
+- サーバーの起動中・未接続・録画状態未確認でも、手動確認と定期確認を Sparkle へ渡すよう修正
+- 録画中やジョブ実行中も更新の発見・取得は許可し、アプリの終了と更新適用だけを安全な状態まで延期
+- 診断画面の「アップデートを確認」を録画権限やサーバー状態と切り離し、処理中は固定の案内を表示
+- 更新経路を修復する今回の版を、Sparkle 2 を使う全旧版へ重要な更新として即時提示できる出荷手順を追加
+- 契約は 5.0.0 のまま。Codex App Server / OpenAI API を含む 0.5 系機能は維持
+- OpenAI 互換 API と Claude Agent SDK による議事録生成は未対応で、6プロバイダ対応版に先行する更新修復版
+
 ## 0.5.0 - 2026-08-29
 
 - 配布版に OpenAI 公式 Codex CLI 0.150.1 の arm64 runtime と Apache-2.0 LICENSE / NOTICE を固定同梱。外部インストール不要で準備でき、欠落・変更時は外部環境へ切り替えず停止

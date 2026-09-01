@@ -1954,7 +1954,7 @@ wheels = [
 
 [[package]]
 name = "narumi"
-version = "0.5.0"
+version = "0.5.1"
 source = { editable = "pipeline" }
 dependencies = [
     { name = "click" },
@@ -2006,7 +2006,7 @@ provides-extras = ["whisper-mlx", "whisper-faster", "pyannote", "claude", "anthr
 
 [[package]]
 name = "narumi-server"
-version = "0.5.0"
+version = "0.5.1"
 source = { editable = "server" }
 dependencies = [
     { name = "anyio" },
