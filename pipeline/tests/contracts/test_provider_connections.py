@@ -34,7 +34,15 @@ def contracts() -> ContractSet:
 
 
 @pytest.mark.parametrize(
-    "provider", ["anthropic-api", "claude-agent-sdk", "codex-app-server", "ollama", "openai-api"]
+    "provider",
+    [
+        "codex-app-server",
+        "claude-agent-sdk",
+        "openai-api",
+        "openai-compatible-api",
+        "anthropic-api",
+        "ollama",
+    ],
 )
 def test_new_connection_can_be_saved_before_authentication(
     contracts: ContractSet, provider: str
@@ -44,7 +52,37 @@ def test_new_connection_can_be_saved_before_authentication(
         args.update(auth_method="none", endpoint="http://127.0.0.1:11434")
     elif provider == "codex-app-server":
         args.update(auth_method="chatgpt", endpoint="https://chatgpt.com")
+    elif provider == "openai-compatible-api":
+        args.update(endpoint="https://llm.example.com/v1", api_surface="responses")
     contracts.validate_input("set_provider_connection", args)
+
+
+def test_provider_catalog_uses_the_canonical_six_provider_order(contracts: ContractSet) -> None:
+    payload = deepcopy(contracts["list_providers"].output_examples[0])
+    assert [provider["provider_id"] for provider in payload["providers"]] == [
+        "codex-app-server",
+        "claude-agent-sdk",
+        "openai-api",
+        "openai-compatible-api",
+        "anthropic-api",
+        "ollama",
+    ]
+    contracts.validate_output("list_providers", payload)
+    compatible = payload["providers"][3]
+    assert compatible["display_name"] == "OpenAI互換API"
+    assert compatible["auth_methods"] == ["api_key", "none"]
+    assert compatible["roles"] == ["llm"]
+    missing = deepcopy(payload)
+    missing["providers"].pop(3)
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("list_providers", missing)
+    reordered = deepcopy(payload)
+    reordered["providers"][0], reordered["providers"][1] = (
+        reordered["providers"][1],
+        reordered["providers"][0],
+    )
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("list_providers", reordered)
 
 
 @pytest.mark.parametrize(
@@ -165,10 +203,16 @@ def test_openai_connection_can_save_without_authenticating(
 def test_openai_public_connection_and_runtime_metadata(contracts: ContractSet) -> None:
     connection = deepcopy(contracts["set_provider_connection"].output_examples[0]["connection"])
     connection.update(
-        provider_id="openai-api", endpoint="https://api.openai.com", auth_method="api_key"
+        provider_id="openai-api",
+        endpoint="https://api.openai.com",
+        auth_method="api_key",
+        api_surface="responses",
     )
     contracts.validate_output("set_provider_connection", {"connection": connection})
     connection["endpoint"] = "https://api.anthropic.com"
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("set_provider_connection", {"connection": connection})
+    connection.update(endpoint="https://api.openai.com", api_surface="chat_completions")
     with pytest.raises(ContractMismatchError):
         contracts.validate_output("set_provider_connection", {"connection": connection})
 
@@ -176,17 +220,157 @@ def test_openai_public_connection_and_runtime_metadata(contracts: ContractSet) -
     descriptor.update(
         provider_id="openai-api", auth_methods=["api_key"], roles=["llm", "transcription"]
     )
-    contracts.validate_output("list_providers", {"providers": [descriptor]})
+    descriptor_validator = Draft202012Validator(contracts.schema_for_def("provider_descriptor"))
+    descriptor_validator.validate(descriptor)
     descriptor["auth_methods"] = ["chatgpt"]
-    with pytest.raises(ContractMismatchError):
-        contracts.validate_output("list_providers", {"providers": [descriptor]})
+    with pytest.raises(ValidationError):
+        descriptor_validator.validate(descriptor)
     descriptor.update(auth_methods=["api_key"], roles=["transcription"])
-    with pytest.raises(ContractMismatchError):
-        contracts.validate_output("list_providers", {"providers": [descriptor]})
+    with pytest.raises(ValidationError):
+        descriptor_validator.validate(descriptor)
 
     preparation = deepcopy(contracts["prepare_provider_runtime"].input_examples[0])
     preparation.update(provider_id="openai-api", resource_id="openai-client")
     contracts.validate_input("prepare_provider_runtime", preparation)
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "auth_method"),
+    [
+        ("https://llm.example.com", "api_key"),
+        ("https://llm.example.com/v1", "api_key"),
+        ("https://gateway.example.com/openai/v1", "api_key"),
+        ("http://127.0.0.1:8080/v1", "none"),
+        ("https://127.22.1.255:443/v1", "none"),
+        ("http://[::1]:11434/v1", "none"),
+    ],
+)
+@pytest.mark.parametrize("api_surface", ["responses", "chat_completions"])
+def test_openai_compatible_connection_accepts_explicit_safe_configuration(
+    contracts: ContractSet, endpoint: str, auth_method: str, api_surface: str
+) -> None:
+    args: dict[str, Any] = {
+        **CREATE,
+        "provider_id": "openai-compatible-api",
+        "endpoint": endpoint,
+        "auth_method": auth_method,
+        "api_surface": api_surface,
+    }
+    if api_surface == "chat_completions":
+        args["chat_max_tokens_field"] = "max_completion_tokens"
+    contracts.validate_input("set_provider_connection", args)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://llm.example.com/v1",
+        "https://localhost/v1",
+        "https://192.168.1.10/v1",
+        "http://192.168.1.10/v1",
+        "https://user:secret@llm.example.com/v1",
+        "https://llm.example.com/v1/",
+        "https://llm.example.com//v1",
+        "https://llm.example.com/./v1",
+        "https://llm.example.com/../v1",
+        "https://llm.example.com/%2e%2e/v1",
+        "https://llm.example.com/v1?key=secret",
+        "https://llm.example.com/v1#fragment",
+        "https://llm.example.com:0/v1",
+        "https://llm.example.com:65536/v1",
+        "https://llm.example.com\\v1",
+    ],
+)
+def test_openai_compatible_connection_rejects_unsafe_base_endpoints(
+    contracts: ContractSet, endpoint: str
+) -> None:
+    with pytest.raises(InvalidArgumentError):
+        contracts.validate_input(
+            "set_provider_connection",
+            {
+                **CREATE,
+                "provider_id": "openai-compatible-api",
+                "endpoint": endpoint,
+                "api_surface": "responses",
+            },
+        )
+
+
+def test_openai_compatible_none_auth_is_numeric_loopback_only(contracts: ContractSet) -> None:
+    with pytest.raises(InvalidArgumentError):
+        contracts.validate_input(
+            "set_provider_connection",
+            {
+                **CREATE,
+                "provider_id": "openai-compatible-api",
+                "endpoint": "https://llm.example.com/v1",
+                "auth_method": "none",
+                "api_surface": "responses",
+            },
+        )
+
+
+@pytest.mark.parametrize("field", ["max_tokens", "max_completion_tokens"])
+def test_openai_compatible_chat_requires_an_exact_token_field(
+    contracts: ContractSet, field: str
+) -> None:
+    args = {
+        **CREATE,
+        "provider_id": "openai-compatible-api",
+        "endpoint": "https://llm.example.com/v1",
+        "api_surface": "chat_completions",
+        "chat_max_tokens_field": field,
+    }
+    contracts.validate_input("set_provider_connection", args)
+    with pytest.raises(InvalidArgumentError):
+        contracts.validate_input(
+            "set_provider_connection",
+            {key: value for key, value in args.items() if key != "chat_max_tokens_field"},
+        )
+
+
+def test_openai_compatible_surface_update_can_clear_chat_token_field(
+    contracts: ContractSet,
+) -> None:
+    contracts.validate_input(
+        "set_provider_connection",
+        {
+            **UPDATE,
+            "api_surface": "responses",
+            "chat_max_tokens_field": None,
+        },
+    )
+    with pytest.raises(InvalidArgumentError):
+        contracts.validate_input(
+            "set_provider_connection",
+            {
+                **UPDATE,
+                "api_surface": "responses",
+                "chat_max_tokens_field": "max_tokens",
+            },
+        )
+    with pytest.raises(InvalidArgumentError):
+        contracts.validate_input(
+            "set_provider_connection",
+            {**UPDATE, "api_surface": "chat_completions"},
+        )
+    with pytest.raises(InvalidArgumentError):
+        contracts.validate_input(
+            "set_provider_connection",
+            {**UPDATE, "endpoint": "https://user:secret@llm.example.com/v1"},
+        )
+
+
+def test_openai_compatible_public_connection_exposes_only_non_secret_protocol_config(
+    contracts: ContractSet,
+) -> None:
+    connection = deepcopy(contracts["set_provider_connection"].output_examples[-1]["connection"])
+    contracts.validate_output("set_provider_connection", {"connection": connection})
+    connection.update(api_surface="chat_completions", chat_max_tokens_field="max_completion_tokens")
+    contracts.validate_output("set_provider_connection", {"connection": connection})
+    connection["api_surface"] = "responses"
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("set_provider_connection", {"connection": connection})
 
 
 @pytest.mark.parametrize(
@@ -460,10 +644,11 @@ def test_codex_public_metadata_declares_only_official_chatgpt_auth(
 
     descriptor = deepcopy(contracts["list_providers"].output_examples[0]["providers"][0])
     descriptor.update(provider_id="codex-app-server", auth_methods=["chatgpt"])
-    contracts.validate_output("list_providers", {"providers": [descriptor]})
+    descriptor_validator = Draft202012Validator(contracts.schema_for_def("provider_descriptor"))
+    descriptor_validator.validate(descriptor)
     descriptor["auth_methods"] = ["api_key", "chatgpt"]
-    with pytest.raises(ContractMismatchError):
-        contracts.validate_output("list_providers", {"providers": [descriptor]})
+    with pytest.raises(ValidationError):
+        descriptor_validator.validate(descriptor)
 
 
 def test_codex_model_catalog_accepts_official_reasoning_values(contracts: ContractSet) -> None:
@@ -604,3 +789,72 @@ def test_minutes_provider_capabilities_are_a_closed_unique_list(
     payload["capabilities"]["minutes_model_providers"] = providers
     with pytest.raises(ContractMismatchError):
         contracts.validate_output("get_server_info", payload)
+
+
+def test_model_verification_requires_literal_charge_confirmation(
+    contracts: ContractSet,
+) -> None:
+    example = contracts["verify_provider_model"].input_examples[0]
+    contracts.validate_input("verify_provider_model", example)
+    for confirmation in (None, "yes", "send_test_prompt", True):
+        with pytest.raises(InvalidArgumentError):
+            contracts.validate_input(
+                "verify_provider_model", {**example, "confirmation": confirmation}
+            )
+
+
+def test_compatible_and_claude_metadata_candidates_require_explicit_verification(
+    contracts: ContractSet,
+) -> None:
+    examples = contracts["list_provider_models"].output_examples
+    for connection_id in ("conn-222233334444", "conn-333344445555"):
+        payload = next(item for item in examples if item["connection_id"] == connection_id)
+        contracts.validate_output("list_provider_models", payload)
+        assert payload["models"]
+        assert all(model["availability"] == "unverified" for model in payload["models"])
+        assert all(
+            model["reason"] == "explicit_model_verification_required" for model in payload["models"]
+        )
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"prompt": "caller controlled"},
+        {"parameters": {"max_tokens": 10}},
+        {"provider_id": "openai-compatible-api"},
+        {"retry": True},
+        {"fallback_model": "another-model"},
+        {"api_key": "example-not-a-real-key"},
+    ],
+)
+def test_model_verification_accepts_no_prompt_secret_retry_or_fallback(
+    contracts: ContractSet, extra: dict[str, Any]
+) -> None:
+    with pytest.raises(InvalidArgumentError):
+        contracts.validate_input(
+            "verify_provider_model",
+            {**contracts["verify_provider_model"].input_examples[0], **extra},
+        )
+
+
+def test_successful_model_verification_returns_an_available_exact_descriptor(
+    contracts: ContractSet,
+) -> None:
+    payload = deepcopy(contracts["verify_provider_model"].output_examples[0])
+    contracts.validate_output("verify_provider_model", payload)
+    payload["model"]["availability"] = "unverified"
+    payload["model"]["reason"] = "adapter_capability_verification_required"
+    with pytest.raises(ContractMismatchError):
+        contracts.validate_output("verify_provider_model", payload)
+
+
+def test_model_verification_is_write_idempotent_and_open_world(contracts: ContractSet) -> None:
+    tool = contracts["verify_provider_model"]
+    assert tool.annotations == {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+    assert "request_id" in tool.input_schema["required"]

@@ -1,7 +1,7 @@
 {
   "name": "list_provider_connections",
   "title": "List provider connections",
-  "description": "List saved non-secret provider connections, their configuration revisions and independent authentication, model-catalog and generation states. Disabled connections remain visible. No API key, token, digest, Keychain identifier, account history or external provider response is returned. This does not contact providers or read ambient credentials. On failure returns an error_envelope (isError=true) with code: authentication_required, internal. All provider operations require the authenticated resident server; no implicit in-process or unauthenticated HTTP fallback is allowed.",
+  "description": "List saved non-secret provider connections, their configuration revisions and independent authentication, model-catalog and generation states. OpenAI-compatible rows disclose the validated endpoint, api_surface and, only for chat_completions, chat_max_tokens_field so the UI can edit the exact saved protocol without reading secrets. Official OpenAI may disclose api_surface=responses. Disabled connections remain visible. No API key, token, digest, Keychain identifier, account history or external provider response is returned. This does not contact providers or read ambient credentials. On failure returns an error_envelope (isError=true) with code: authentication_required, internal. All provider operations require the authenticated resident server; no implicit in-process or unauthenticated HTTP fallback is allowed.",
   "annotations": {
     "readOnlyHint": true,
     "destructiveHint": false,
@@ -49,6 +49,23 @@
             "auth_state": "unconfigured",
             "catalog_state": "unfetched",
             "checked_at": null,
+            "active_auth": null,
+            "last_generation_state": "never"
+          },
+          {
+            "connection_id": "conn-222233334444",
+            "revision": 1,
+            "provider_id": "openai-compatible-api",
+            "display_name": "社内 OpenAI 互換 API",
+            "enabled": true,
+            "endpoint": "https://llm.example.com/v1",
+            "auth_method": "api_key",
+            "api_surface": "chat_completions",
+            "chat_max_tokens_field": "max_completion_tokens",
+            "credential_present": true,
+            "auth_state": "authenticated",
+            "catalog_state": "ready",
+            "checked_at": "2026-09-02T09:00:00Z",
             "active_auth": null,
             "last_generation_state": "never"
           },

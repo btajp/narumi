@@ -245,11 +245,21 @@ def _set_server_transport_shape(payload: dict[str, Any], transports: list[str]) 
     caps["workflow"] = {
         "provider_connections": resident,
         "provider_models": resident,
+        "provider_model_verification": resident,
         "stage_model_selection": resident,
         "ensemble_generation": False,
     }
     caps["minutes_model_providers"] = (
-        ["codex-app-server", "anthropic-api", "ollama", "openai-api"] if resident else []
+        [
+            "codex-app-server",
+            "claude-agent-sdk",
+            "openai-api",
+            "openai-compatible-api",
+            "anthropic-api",
+            "ollama",
+        ]
+        if resident
+        else []
     )
     caps["transcription_model_providers"] = ["openai-api"] if resident else []
     payload["secure_transport"] = {
@@ -284,6 +294,7 @@ def test_transcription_capability_is_required_and_transport_specific(
     [
         ("workflow", "provider_connections", False),
         ("workflow", "provider_models", False),
+        ("workflow", "provider_model_verification", False),
         ("workflow", "stage_model_selection", False),
         ("workflow", "ensemble_generation", True),
         ("capabilities", "minutes_model_providers", []),
@@ -312,6 +323,7 @@ def test_resident_capability_shape_is_closed(
     [
         ("workflow", "provider_connections", True),
         ("workflow", "provider_models", True),
+        ("workflow", "provider_model_verification", True),
         ("workflow", "stage_model_selection", True),
         ("workflow", "ensemble_generation", True),
         ("capabilities", "minutes_model_providers", ["openai-api"]),

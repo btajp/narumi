@@ -1,0 +1,139 @@
+{
+  "name": "verify_provider_model",
+  "title": "Verify provider model",
+  "description": "Explicitly verify one exact OpenAI-compatible API or Claude Agent SDK text model by sending Narumi's fixed non-secret test prompt once. This sends data to the configured provider and may incur API charges. The caller must present confirmation=send_test_prompt_and_may_charge; no arbitrary prompt, meeting content, transcript, context or model parameter is accepted. The connection must be enabled, match expected_revision, have verified authentication and runtime readiness, and contain the exact unverified model candidate. Metadata from /models alone never makes these providers selectable. The server revalidates the endpoint, API surface, credential, runtime and exact model immediately before sending. It performs one request only, with no retry, redirect, protocol/token-field fallback, alternate model or provider fallback. The returned model ID and fixed response sentinel must match exactly; tool calls, refusal, empty or malformed output and ambiguous completion are rejected. Success upgrades only that exact connection/revision/model/runtime/configuration fingerprint in the cached catalog and returns its available descriptor. Endpoint, API surface, token-field, credential, runtime or model-catalog changes invalidate that verification. The same request_id returns the recorded result and never repeats the external request. A post-send unknown outcome remains unverified and repeating the request does not resend. On failure returns an error_envelope (isError=true) with code: invalid_argument (unsupported provider, missing literal confirmation or malformed model ID), not_found, configuration_conflict, authentication_required, engine_unavailable, model_unavailable, busy, internal. All provider operations require the authenticated resident server; no implicit in-process or unauthenticated HTTP fallback is allowed.",
+  "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "connection_id": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_connection_id"
+      },
+      "expected_revision": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_connection_revision"
+      },
+      "model_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "description": "Exact candidate ID from this connection's cached llm catalog. No alias or substitution is allowed."
+      },
+      "confirmation": {
+        "const": "send_test_prompt_and_may_charge",
+        "description": "Literal, per-operation acknowledgement that one fixed non-secret prompt will be sent and may be billed."
+      },
+      "request_id": {
+        "$ref": "../defs/common.json#/$defs/request_id"
+      }
+    },
+    "required": [
+      "connection_id",
+      "expected_revision",
+      "model_id",
+      "confirmation",
+      "request_id"
+    ],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "connection_id": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_connection_id"
+      },
+      "connection_revision": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_connection_revision"
+      },
+      "model": {
+        "$ref": "../defs/provider_models.json#/$defs/provider_model_descriptor",
+        "properties": {
+          "availability": { "const": "available" },
+          "reason": { "type": "null" }
+        },
+        "description": "The exact candidate after successful capability verification; availability is available and reason is null."
+      },
+      "catalog_state": {
+        "const": "ready"
+      },
+      "verified_at": {
+        "$ref": "../defs/common.json#/$defs/timestamp"
+      }
+    },
+    "required": [
+      "connection_id",
+      "connection_revision",
+      "model",
+      "catalog_state",
+      "verified_at"
+    ],
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {
+        "connection_id": "conn-222233334444",
+        "expected_revision": 1,
+        "model_id": "fixture-compatible-text-model",
+        "confirmation": "send_test_prompt_and_may_charge",
+        "request_id": "verify-compatible-model-20260902-001"
+      },
+      {
+        "connection_id": "conn-333344445555",
+        "expected_revision": 2,
+        "model_id": "fixture-claude-sdk-text-model",
+        "confirmation": "send_test_prompt_and_may_charge",
+        "request_id": "verify-claude-model-20260902-001"
+      }
+    ],
+    "output": [
+      {
+        "connection_id": "conn-222233334444",
+        "connection_revision": 1,
+        "model": {
+          "model_id": "fixture-compatible-text-model",
+          "display_name": "Verified compatible API fixture",
+          "resolved_revision": null,
+          "input_modalities": ["text"],
+          "output_modalities": ["text"],
+          "roles": ["llm"],
+          "timestamp_support": "none",
+          "context_window": null,
+          "max_output_tokens": null,
+          "parameter_schema": {
+            "type": "object",
+            "properties": {
+              "max_tokens": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 32768,
+                "default": 4096,
+                "description": "Application request limit, not a verified model output capability."
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          },
+          "availability": "available",
+          "availability_expires_on": null,
+          "reason": null,
+          "source": "provider_api",
+          "fetched_at": "2026-09-02T09:00:00Z",
+          "billing": {
+            "kind": "api",
+            "input_usd_per_million_tokens": null,
+            "output_usd_per_million_tokens": null,
+            "audio_usd_per_minute": null,
+            "fetched_at": null
+          }
+        },
+        "catalog_state": "ready",
+        "verified_at": "2026-09-02T09:00:01Z"
+      }
+    ]
+  }
+}

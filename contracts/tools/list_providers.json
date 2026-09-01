@@ -1,7 +1,7 @@
 {
   "name": "list_providers",
   "title": "List providers",
-  "description": "List supported provider adapters, approved authentication methods and runtime readiness without contacting any provider. Only verified adapter capabilities are available; an installed provider name does not imply a ready connection, usable model or working generation. active_setup and last_setup preserve public job and start request IDs for setup recovery. On failure returns an error_envelope (isError=true) with code: authentication_required, internal. All provider operations require the authenticated resident server; no implicit in-process or unauthenticated HTTP fallback is allowed.",
+  "description": "List all six supported provider adapters in the canonical UI order: Codex App Server, Claude Agent SDK, OpenAI API, OpenAI-compatible API, Anthropic API and Ollama. Return approved authentication methods and runtime readiness without contacting any provider. Only verified adapter capabilities are available; an installed provider name does not imply a ready connection, verified model or working generation. OpenAI-compatible API advertises api_key and numeric-loopback none authentication; endpoint protocol details are connection-scoped. active_setup and last_setup preserve public job and start request IDs for setup recovery. On failure returns an error_envelope (isError=true) with code: authentication_required, internal. All provider operations require the authenticated resident server; no implicit in-process or unauthenticated HTTP fallback is allowed.",
   "annotations": {
     "readOnlyHint": true,
     "destructiveHint": false,
@@ -19,9 +19,36 @@
     "properties": {
       "providers": {
         "type": "array",
-        "items": {
-          "$ref": "../defs/providers.json#/$defs/provider_descriptor"
-        }
+        "prefixItems": [
+          {
+            "$ref": "../defs/providers.json#/$defs/provider_descriptor",
+            "properties": { "provider_id": { "const": "codex-app-server" } }
+          },
+          {
+            "$ref": "../defs/providers.json#/$defs/provider_descriptor",
+            "properties": { "provider_id": { "const": "claude-agent-sdk" } }
+          },
+          {
+            "$ref": "../defs/providers.json#/$defs/provider_descriptor",
+            "properties": { "provider_id": { "const": "openai-api" } }
+          },
+          {
+            "$ref": "../defs/providers.json#/$defs/provider_descriptor",
+            "properties": { "provider_id": { "const": "openai-compatible-api" } }
+          },
+          {
+            "$ref": "../defs/providers.json#/$defs/provider_descriptor",
+            "properties": { "provider_id": { "const": "anthropic-api" } }
+          },
+          {
+            "$ref": "../defs/providers.json#/$defs/provider_descriptor",
+            "properties": { "provider_id": { "const": "ollama" } }
+          }
+        ],
+        "items": false,
+        "minItems": 6,
+        "maxItems": 6,
+        "description": "Exactly all six supported adapters in canonical UI order: codex-app-server, claude-agent-sdk, openai-api, openai-compatible-api, anthropic-api, ollama. Readiness is expressed on each descriptor; providers are never omitted because they are not yet prepared."
       }
     },
     "required": [
@@ -38,20 +65,20 @@
       {
         "providers": [
           {
-            "provider_id": "anthropic-api",
-            "display_name": "Anthropic API",
+            "provider_id": "codex-app-server",
+            "display_name": "Codex App Server",
             "roles": [
               "llm"
             ],
             "auth_methods": [
-              "api_key"
+              "chatgpt"
             ],
-            "availability": "unverified",
-            "reason": "runtime_verification_pending",
+            "availability": "not_prepared",
+            "reason": "runtime_preparation_required",
             "runtime": {
               "state": "not_prepared",
               "version": null,
-              "catalog_revision": "bundled-v1",
+              "catalog_revision": null,
               "resources": [],
               "active_setup": null,
               "last_setup": null
@@ -89,46 +116,6 @@
             }
           },
           {
-            "provider_id": "ollama",
-            "display_name": "Ollama",
-            "roles": [
-              "llm"
-            ],
-            "auth_methods": [
-              "none"
-            ],
-            "availability": "unverified",
-            "reason": "local_server_verification_required",
-            "runtime": {
-              "state": "not_prepared",
-              "version": null,
-              "catalog_revision": "bundled-v1",
-              "resources": [],
-              "active_setup": null,
-              "last_setup": null
-            }
-          },
-          {
-            "provider_id": "codex-app-server",
-            "display_name": "Codex App Server",
-            "roles": [
-              "llm"
-            ],
-            "auth_methods": [
-              "chatgpt"
-            ],
-            "availability": "not_prepared",
-            "reason": "runtime_preparation_required",
-            "runtime": {
-              "state": "not_prepared",
-              "version": null,
-              "catalog_revision": null,
-              "resources": [],
-              "active_setup": null,
-              "last_setup": null
-            }
-          },
-          {
             "provider_id": "openai-api",
             "display_name": "OpenAI API",
             "roles": [
@@ -156,6 +143,78 @@
                   "license": "Installed package license metadata unavailable"
                 }
               ],
+              "active_setup": null,
+              "last_setup": null
+            }
+          },
+          {
+            "provider_id": "openai-compatible-api",
+            "display_name": "OpenAI互換API",
+            "roles": [
+              "llm"
+            ],
+            "auth_methods": [
+              "api_key",
+              "none"
+            ],
+            "availability": "not_prepared",
+            "reason": "runtime_preparation_required",
+            "runtime": {
+              "state": "not_prepared",
+              "version": null,
+              "catalog_revision": null,
+              "resources": [
+                {
+                  "resource_id": "openai-compatible-client",
+                  "display_name": "narumi OpenAI-compatible HTTP adapter inspection",
+                  "kind": "runtime",
+                  "version": null,
+                  "source": "installed",
+                  "download_host": null,
+                  "sha256": null,
+                  "license": "Installed package license metadata unavailable"
+                }
+              ],
+              "active_setup": null,
+              "last_setup": null
+            }
+          },
+          {
+            "provider_id": "anthropic-api",
+            "display_name": "Anthropic API",
+            "roles": [
+              "llm"
+            ],
+            "auth_methods": [
+              "api_key"
+            ],
+            "availability": "unverified",
+            "reason": "runtime_verification_pending",
+            "runtime": {
+              "state": "not_prepared",
+              "version": null,
+              "catalog_revision": "bundled-v1",
+              "resources": [],
+              "active_setup": null,
+              "last_setup": null
+            }
+          },
+          {
+            "provider_id": "ollama",
+            "display_name": "Ollama",
+            "roles": [
+              "llm"
+            ],
+            "auth_methods": [
+              "none"
+            ],
+            "availability": "unverified",
+            "reason": "local_server_verification_required",
+            "runtime": {
+              "state": "not_prepared",
+              "version": null,
+              "catalog_revision": "bundled-v1",
+              "resources": [],
               "active_setup": null,
               "last_setup": null
             }

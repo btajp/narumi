@@ -5,8 +5,15 @@
   "$defs": {
     "minutes_model_provider": {
       "type": "string",
-      "enum": ["codex-app-server", "anthropic-api", "ollama", "openai-api"],
-      "description": "Adapters implemented for explicit text-only minutes generation. This list excludes Claude Agent SDK generation and does not imply any connection or model is ready."
+      "enum": [
+        "codex-app-server",
+        "claude-agent-sdk",
+        "openai-api",
+        "openai-compatible-api",
+        "anthropic-api",
+        "ollama"
+      ],
+      "description": "Adapters implemented for explicit text-only minutes generation in the canonical UI order. The list does not imply that a connection, runtime or model is ready."
     },
     "minutes_max_tokens": {
       "type": "integer",
@@ -50,7 +57,14 @@
       "properties": { "max_tokens": { "$ref": "#/$defs/minutes_max_tokens" } },
       "additionalProperties": false,
       "default": {},
-      "description": "Closed Anthropic API and local Ollama text minutes options. reasoning_effort, credentials and runtime overrides are not supported."
+      "description": "Closed Anthropic API, OpenAI-compatible API and local Ollama text minutes options. reasoning_effort, credentials and runtime overrides are not supported."
+    },
+    "empty_minutes_model_parameters": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false,
+      "default": {},
+      "description": "Closed Claude Agent SDK text minutes options. The verified SDK adapter accepts no model parameters, credentials, paths, commands or runtime overrides from a meeting selection."
     },
     "minutes_model_selection": {
       "type": "object",
@@ -78,7 +92,7 @@
         }
       },
       "additionalProperties": false,
-      "description": "Explicit text-only minutes selection. It does not change llm_provider, transcript integration, vision, transcription or other stages. Requires an enabled, matching-revision connection with verified authentication and an available text model. Codex needs chatgpt authentication and subscription_ok or api_ok; Anthropic/OpenAI API need api_key and api_ok; Ollama needs numeric-loopback, a verified local model and no credentials, and may use local_only. Unknown models are display-only and cannot be selected. Claude Agent SDK generation is excluded.",
+      "description": "Explicit text-only minutes selection. It does not change llm_provider, transcript integration, vision, transcription or other stages. Requires an enabled, matching-revision connection with verified authentication and an available text model. Codex needs chatgpt authentication and subscription_ok or api_ok. Claude Agent SDK, OpenAI API, OpenAI-compatible API and Anthropic API need api_ok; their API-key connections also require a saved key. Ollama needs numeric loopback, a verified local model and no credentials, and may use local_only. OpenAI-compatible and Claude Agent SDK models remain unverified after metadata discovery until verify_provider_model succeeds. Unknown or unverified models are display-only and cannot be selected.",
       "allOf": [
         {
           "if": { "properties": { "provider": { "const": "codex-app-server" } }, "required": ["provider"] },
@@ -89,7 +103,11 @@
           "then": { "properties": { "parameters": { "$ref": "#/$defs/openai_minutes_model_parameters" } } }
         },
         {
-          "if": { "properties": { "provider": { "enum": ["anthropic-api", "ollama"] } }, "required": ["provider"] },
+          "if": { "properties": { "provider": { "const": "claude-agent-sdk" } }, "required": ["provider"] },
+          "then": { "properties": { "parameters": { "$ref": "#/$defs/empty_minutes_model_parameters" } } }
+        },
+        {
+          "if": { "properties": { "provider": { "enum": ["openai-compatible-api", "anthropic-api", "ollama"] } }, "required": ["provider"] },
           "then": { "properties": { "parameters": { "$ref": "#/$defs/bounded_minutes_model_parameters" } } }
         }
       ]

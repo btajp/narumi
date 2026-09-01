@@ -19,14 +19,16 @@ contracts/
 - `manifest.json` の `tools` はツール名の配列。`tools/<name>.json` と **過不足なく一致** させる（一致しなければローダーが起動時に `contract_mismatch` を投げる）
 - `manifest.json` の `defs` は共通定義ファイルの相対パス配列。定義名は全ファイルを通して一意
 
-## v5 ツール一覧（37）
+## v6 ツール一覧（38）
 
-契約 5.0.0 は、既存の 4 系統の議事録モデル選択に OpenAI API 音声認識を追加する。
+契約 6.0.0 は、議事録モデル選択を次の 6 系統へ統一する。
+表示順は Codex App Server / Claude Agent SDK / OpenAI API / OpenAI互換API / Anthropic API / Ollama。
+OpenAI互換APIの接続設定と、OpenAI互換API・Claude Agent SDKに対する明示的なモデル検証を追加する。
 既存の `llm_provider` は維持し、文字起こし・発話統合・画像処理へ選択を暗黙に適用しない。
 `get_server_info.capabilities.minutes_model_providers` は議事録生成を実装した adapter の一覧。
 この一覧とは別に、接続の認証・準備状態と各モデルの能力を確認する。
 `transcription_model_providers` は API 音声認識の対応経路で、常駐 HTTP サーバーは `["openai-api"]`、それ以外は `[]` を返す。
-全工程のモデル選択、複数生成・統合、Claude Agent SDK による明示的な議事録モデル選択、既知話者の参照音声送信は今回の対象外。
+全工程のモデル選択、複数生成・統合、既知話者の参照音声送信は今回の対象外。
 
 | 分類 | ツール |
 |---|---|
@@ -42,7 +44,7 @@ contracts/
 | Gaia 接続 | `get_gaia_connection` / `set_gaia_connection` / `test_gaia_connection` |
 | プロバイダ接続 | `list_providers` / `list_provider_connections` / `set_provider_connection` / `delete_provider_connection` |
 | プロバイダ準備・認証 | `prepare_provider_runtime` / `authenticate_provider_connection` / `get_provider_auth_status` |
-| プロバイダメタデータ | `test_provider_connection` / `list_provider_models` |
+| プロバイダメタデータ | `test_provider_connection` / `list_provider_models` / `verify_provider_model` |
 
 権限設定と録画系ツールは常駐サーバーを必要とする。`get_server_info` は
 `refresh_permissions: true` で権限を再確認できるが、読み取りから許可要求は行わない。
@@ -53,15 +55,18 @@ contracts/
 
 `defs/common.json` の主な共通型: `meeting_id` `request_id` `job_id` `context_id` `scope_name` `scope` `timestamp` `external_send_policy` `job_status` `job_kind` `job` `error_code`（`cancelled` を含む）`error` `error_envelope` `meeting_config` `track_status` `meeting_summary`（任意の `active_job` 付き）`segment` `context_source_type` `export_destination` `profile`。
 
-プロバイダ型は別の defs に分ける。接続対象は Anthropic API / Claude Agent SDK / Codex App Server / Ollama / OpenAI API。
-Claude SDK と OpenAI API は API キー認証のみ。OpenAI API の接続先は `https://api.openai.com` に固定する。
+プロバイダ型は別の defs に分ける。接続対象は Codex App Server / Claude Agent SDK / OpenAI API / OpenAI互換API / Anthropic API / Ollama の順で返す。
+Claude SDK と公式 OpenAI API は API キー認証のみ。OpenAI API の接続先は `https://api.openai.com`、API surface は Responses に固定する。
+OpenAI互換APIは `responses` または `chat_completions` を明示し、後者は `max_tokens` / `max_completion_tokens` のどちらを送るかも固定する。
+remote 接続は HTTPS + API key、`auth_method=none` は数値 loopback の HTTP/HTTPS だけを許可する。
 Codex は公式 ChatGPT 認証のみで、接続先は `https://chatgpt.com` に固定し、OpenAI API キーを流用しない。
-Claude のサブスク認証と `minutes_model` による Claude SDK 生成は未対応。
+Claude のサブスク認証は未対応。Claude SDK は接続別 API key と検証済み隔離 runtime だけを使う。
 モデル一覧の取得成功と生成可能性は区別し、不明な能力・上限・単価を推測で補わない。
 
 ### 接続・秘密・状態の扱い
 
-- 新規接続は `provider_id / display_name / auth_method` を指定する。更新は `connection_id / expected_revision` を指定し、種別変更は受け付けない。
+- 新規接続は `provider_id / display_name / auth_method` を指定する。OpenAI互換APIでは `endpoint / api_surface` も必須。更新は `connection_id / expected_revision` を指定し、種別変更は受け付けない。
+- OpenAI互換APIの `endpoint / api_surface / chat_max_tokens_field` は非秘密情報として公開する。更新時の省略は保持、`chat_max_tokens_field=null` は明示削除。
 - API 接続の `api_key` は write-only。省略は保持、null は削除。新規のキー未設定接続は保存できるが、生成利用は不可。Codex 接続は null を含め `api_key` 自体を受け付けない。
 - CLI の秘密入力は非表示プロンプトか stdin を使う。通常の argv・文字列 `--json`・ログ・応答・要求キャッシュへ秘密を出さない。
 - 接続の無効化は資格情報を保持し、再有効化で認証済み状態へ自動復帰しない。メタデータの観測だけでは設定版を増やさない。
@@ -85,7 +90,9 @@ Claude のサブスク認証と `minutes_model` による Claude SDK 生成は�
 | provider | 許可する parameters | 必要な外部送信ポリシー |
 |---|---|---|
 | `codex-app-server` | `reasoning_effort` | `subscription_ok` または `api_ok` |
+| `claude-agent-sdk` | なし | `api_ok` |
 | `openai-api` | `reasoning_effort`, `max_tokens` | `api_ok` |
+| `openai-compatible-api` | `max_tokens` | `api_ok` |
 | `anthropic-api` | `max_tokens` | `api_ok` |
 | `ollama` | `max_tokens` | `local_only` 可。数値 loopback と検証済みローカルモデルのみ |
 
@@ -95,6 +102,10 @@ Claude のサブスク認証と `minutes_model` による Claude SDK 生成は�
 省略時は adapter が既知のモデル上限と 4096 の小さい方を使い、モデル上限が不明ならアプリ側の制限として 4096 を使う。
 このアプリ側制限をモデルの能力とは扱わず、未知の `descriptor.max_output_tokens` は null のままにする。
 モデル能力を確認できない候補は表示できるが、`unverified` 等として選択を禁止する。
+OpenAI互換APIとClaude Agent SDKは `/models` 相当の一覧だけでは生成能力を確認済みにしない。
+ユーザーが送信と課金可能性を確認したうえで `verify_provider_model` を呼び、固定の非機密テスト prompt を1回だけ送る。
+このツールは exact model・connection revision を検査し、retry、別 model、別 protocol、別 provider へフォールバックしない。
+同じ `request_id` は外部要求を繰り返さず、結果不明の試行も自動再送しない。成功した exact model だけを `available` に更新する。
 モデル自体が検証済みで出力上限だけが不明な場合は、アプリ側の要求制限を適用できる。
 `availability_expires_on` は API が提供した終了日を `YYYY-MM-DD` のまま保持する任意項目。
 未提供・不明の場合は省略または null とし、仮の期限・時刻・タイムゾーンを補わない。
@@ -267,6 +278,10 @@ v4 は OpenAI API の provider 値、議事録の選択対象・パラメータ�
 旧 v3 Swift 型は Codex 以外の議事録選択を拒否するため major を上げ、v3 の保存済み Codex 設定と省略時の動作は維持する。
 v5 は音声認識の選択・対応 provider 一覧・OpenAI roles・型付き再試行情報を追加する。
 旧クライアントの閉じた型と整合しないため major を上げるが、既存の選択省略・ローカル処理は維持する。
+v6 は6プロバイダの閉じたenum、OpenAI互換接続設定、Claude SDKの議事録選択、
+`provider_model_verification` capability と `verify_provider_model` を追加する。
+旧クライアントが新provider・新workflow必須キーを解釈できないためmajorを上げる。
+既存保存データに新しい接続fieldがない場合はprovider条件に応じて補完し、従来providerの保存形式は維持する。
 
 手順: `contracts/` を編集 → `manifest.json` の `contract_version` を更新 → `uv run pytest pipeline/tests/contracts` → 実装 → サーバーテスト。エラーコードを増やすときは `defs/common.json#/$defs/error_code` と `narumi.errors.ErrorCode` を同時に更新する（テストが一致を検査する）。
 

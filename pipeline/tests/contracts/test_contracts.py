@@ -72,12 +72,14 @@ EXPECTED_TOOLS = {
     "get_provider_auth_status",
     "test_provider_connection",
     "list_provider_models",
+    "verify_provider_model",
 }
 EXTERNAL_METADATA_TOOLS = {
     "prepare_provider_runtime",
     "authenticate_provider_connection",
     "test_provider_connection",
     "list_provider_models",
+    "verify_provider_model",
 }
 MEETING_ID = "20260827T030500Z-a1b2c3d4"
 REQUEST_ID = "6f1c2a1e-9b7d-4c2e-8f0a-1a2b3c4d5e6f"
