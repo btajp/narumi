@@ -129,6 +129,9 @@ def test_https_handler_forwards_pinned_ips_while_tls_keeps_original_sni(monkeypa
     observed = {}
 
     class Socket:
+        def setblocking(self, value):
+            observed["blocking"] = value
+
         def settimeout(self, value):
             observed["timeout"] = value
 
@@ -184,6 +187,7 @@ def test_https_handler_forwards_pinned_ips_while_tls_keeps_original_sni(monkeypa
     assert observed["port"] == 443
     assert observed["resolved_addresses"] == (PUBLIC_V4,)
     assert observed["do_handshake_on_connect"] is False
+    assert observed["blocking"] is False
     assert observed["handshake"] is True
 
 
