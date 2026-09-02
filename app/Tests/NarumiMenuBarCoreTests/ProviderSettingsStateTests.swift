@@ -284,6 +284,23 @@ final class ProviderSettingsStateTests: XCTestCase {
         XCTAssertEqual(ProviderDisplay.price(nil, unit: "token"), "不明（無料とは扱いません）")
     }
 
+    func testProviderModelVerificationFailureEvidenceAcceptsOnlyClosedStates() {
+        XCTAssertEqual(
+            ProviderModelVerificationFailureEvidence(
+                reason: "model_generation_verification_failed", outcomeUnknown: false),
+            .knownFailure)
+        XCTAssertEqual(
+            ProviderModelVerificationFailureEvidence(
+                reason: "provider_generation_outcome_unknown", outcomeUnknown: true),
+            .unknownOutcome)
+        XCTAssertNil(ProviderModelVerificationFailureEvidence(
+            reason: "model_generation_verification_failed", outcomeUnknown: true))
+        XCTAssertNil(ProviderModelVerificationFailureEvidence(
+            reason: "provider_generation_outcome_unknown", outcomeUnknown: false))
+        XCTAssertNil(ProviderModelVerificationFailureEvidence(
+            reason: "fixture-secret-upstream-reason", outcomeUnknown: false))
+    }
+
     func testBundledRuntimeFailureExplainsRecoveryAndNoFallback() {
         let message = ProviderDisplay.reason("bundled_runtime_unavailable")
         XCTAssertTrue(message?.contains("更新または再インストール") == true)

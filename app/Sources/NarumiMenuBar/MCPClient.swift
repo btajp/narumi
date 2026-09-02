@@ -163,11 +163,21 @@ actor MCPClient {
                     reason: details["reason"]?.stringValue,
                     unknown: details["outcome_unknown"]?.boolValue == true,
                     stage: details["stage"]?.stringValue) ?? message
-                // Preserve only the closed, bounded evidence needed for explicit ASR review.
-                // Untrusted error text, arbitrary details and confidential-tool payloads stay redacted.
-                if let data = try? details.serialized(),
+                let rawProbeOutcome = details["outcome_unknown"]
+                if name == ToolCatalog.verifyProviderModel, code == ProviderSettingsErrorCode.engineUnavailable.rawValue,
+                    rawProbeOutcome == nil || rawProbeOutcome?.boolValue != nil,
+                    let evidence = ProviderModelVerificationFailureEvidence(
+                        reason: details["reason"]?.stringValue,
+                        outcomeUnknown: rawProbeOutcome?.boolValue ?? false) {
+                    // Normalize the bounded paid-probe evidence; arbitrary details never cross the boundary.
+                    safeError["details"] = .object([
+                        "reason": .string(evidence.reason.rawValue),
+                        "outcome_unknown": .bool(evidence.outcomeUnknown),
+                    ])
+                } else if let data = try? details.serialized(),
                     let outcome = try? JSONDecoder().decode(TranscriptionOutcomeUnknownDetails.self, from: data),
                     let encoded = try? JSONEncoder().encode(outcome), let safeDetails = try? JSONNode.parse(encoded) {
+                    // Preserve only the closed, bounded evidence needed for explicit ASR review.
                     safeError["details"] = safeDetails
                 }
             }

@@ -91,6 +91,24 @@ enum MCPClientSessionFixtureSource {
             if scenario == "malformed" {
                 return response(request, status: 200, body: Data(("invalid-json " + fixtureSecret).utf8))
             }
+            if name == ToolCatalog.verifyProviderModel, scenario.hasPrefix("provider_verify_") {
+                let reason = scenario == "provider_verify_unknown"
+                    ? "provider_generation_outcome_unknown" : "model_generation_verification_failed"
+                var details: [String: JSONNode] = [
+                    "reason": .string(reason), "untrusted_detail": .string(fixtureSecret),
+                ]
+                if scenario == "provider_verify_unknown" || scenario == "provider_verify_malformed" {
+                    details["outcome_unknown"] = .bool(true)
+                }
+                return try result(request, id: id, value: .object([
+                    "structuredContent": .object(["error": .object([
+                        "code": .string("engine_unavailable"), "message": .string(fixtureSecret),
+                        "details": .object(details),
+                    ])]),
+                    "isError": .bool(true),
+                    "content": .array([.object(["type": .string("text"), "text": .string(fixtureSecret)])]),
+                ]))
+            }
             if let transcription = try transcriptionResponse(request, id: id, name: name) {
                 return transcription
             }
@@ -261,6 +279,26 @@ enum MCPClientSessionFixtureSource {
             checks["generation_unknown_localized_without_details"] =
                 unknownFailure.code == "engine_unavailable" && unknownFailure.message.contains("結果が不明")
                 && unknownFailure.message.contains("自動再送しません") && !unknownFailure.message.contains(fixtureSecret)
+                && unknownFailure.providerModelVerification == .unknownOutcome
+            let verificationRequest = VerifyProviderModelRequest(
+                connectionID: "00000000-0000-4000-8000-000000000010", expectedRevision: 1,
+                modelID: "fixture-model", confirmation: .sendTestPromptAndMayCharge)
+            for (scenario, key, expected): (String, String, ProviderModelVerificationFailureEvidence?) in [
+                ("provider_verify_known", "provider_verification_known_failure_typed", .knownFailure),
+                ("provider_verify_unknown", "provider_verification_unknown_outcome_typed", .unknownOutcome),
+                ("provider_verify_malformed", "provider_verification_malformed_evidence_blocked", nil),
+            ] {
+                let (verificationMCP, _) = client(scenario)
+                do {
+                    _ = try await NarumiClient(mcp: verificationMCP).verifyProviderModel(verificationRequest)
+                    checks[key] = false
+                } catch let failure as ProviderSettingsFailure {
+                    checks[key] = failure.code == .engineUnavailable
+                        && failure.modelVerification == expected && !failure.message.contains(fixtureSecret)
+                }
+            }
+            let strippedFailure = providerSettingsFailure(unknownFailure, toolName: ToolCatalog.listProviders)
+            checks["provider_verification_evidence_scoped_to_probe_tool"] = strippedFailure.modelVerification == nil
             let selections: [(prefix: String, provider: String, scenario: String, effort: String?, maxTokens: Int?)] = [
                 ("v4_codex", "codex-app-server", "minutes_requests", "high", nil),
                 ("v4_openai", "openai-api", "minutes_requests", "high", 8192),

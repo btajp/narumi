@@ -46,6 +46,8 @@ final class MCPClientSecureSessionTests: XCTestCase {
             "setup_reconciled_without_replay", "readonly_reconnect", "rpc_error_redacted",
             "malformed_response_redacted", "invalid_config_rejected",
             "generation_unknown_localized_without_details",
+            "provider_verification_known_failure_typed", "provider_verification_unknown_outcome_typed",
+            "provider_verification_malformed_evidence_blocked", "provider_verification_evidence_scoped_to_probe_tool",
             "legacy_generation_omits_new_config_field", "legacy_meeting_config_omits_new_field",
             "legacy_profile_omits_new_field", "legacy_save_does_not_regenerate",
             "v4_meeting_omits_transcription", "v4_profile_omits_transcription",

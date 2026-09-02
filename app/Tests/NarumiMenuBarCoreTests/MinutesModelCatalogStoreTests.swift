@@ -250,6 +250,62 @@ final class MinutesModelCatalogStoreTests: XCTestCase {
         XCTAssertTrue(store.verificationNotice?.contains("同じ要求 ID") == true)
     }
 
+    func testKnownVerificationFailureAllowsANewExplicitRequestForBothPaidProbeProviders() async {
+        for providerID: ProviderID in [.claudeAgentSDK, .openAICompatibleAPI] {
+            let candidate = MinutesModelFixtures.model(
+                id: "\(providerID.rawValue)-candidate", availability: .unverified,
+                provider: providerID.rawValue)
+            let connection = MinutesModelFixtures.connection(providerID: providerID)
+            let client = FakeMinutesCatalogClient(
+                connections: [connection], pages: ["first": MinutesModelFixtures.catalog(models: [candidate])],
+                detailedVerificationFailures: [ProviderSettingsFailure(
+                    .engineUnavailable, modelVerification: .knownFailure)])
+            let store = MinutesModelCatalogStore(
+                client: client, supportedProviders: [providerID.rawValue], modelVerificationSupported: true)
+            await store.loadCachedCatalog(connectionID: connection.connectionID)
+
+            await store.verifyModel(
+                connectionID: connection.connectionID, expectedRevision: connection.revision,
+                expectedModel: candidate, confirmation: .sendTestPromptAndMayCharge)
+            XCTAssertTrue(store.verificationNotice?.contains("確定的に失敗") == true)
+            XCTAssertTrue(store.isVerificationCandidate(
+                connectionID: connection.connectionID, expectedRevision: connection.revision, model: candidate))
+
+            await store.verifyModel(
+                connectionID: connection.connectionID, expectedRevision: connection.revision,
+                expectedModel: candidate, confirmation: .sendTestPromptAndMayCharge)
+            let requests = await client.verificationRequests
+            XCTAssertEqual(requests.count, 2)
+            XCTAssertNotEqual(requests[0].requestID, requests[1].requestID)
+        }
+    }
+
+    func testExplicitUnknownVerificationEvidenceRetainsTheExactRequest() async {
+        let connection = MinutesModelFixtures.connection(providerID: .openAICompatibleAPI)
+        let candidate = MinutesModelFixtures.model(
+            id: "compatible-candidate", availability: .unverified, provider: "openai-compatible-api")
+        let client = FakeMinutesCatalogClient(
+            connections: [connection], pages: ["first": MinutesModelFixtures.catalog(models: [candidate])],
+            detailedVerificationFailures: [ProviderSettingsFailure(
+                .engineUnavailable, modelVerification: .unknownOutcome)])
+        let store = MinutesModelCatalogStore(
+            client: client, supportedProviders: ["openai-compatible-api"], modelVerificationSupported: true)
+        await store.loadCachedCatalog(connectionID: connection.connectionID)
+
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            expectedModel: candidate, confirmation: .sendTestPromptAndMayCharge)
+        let original = await client.verificationRequests.first
+        XCTAssertTrue(store.verificationNotice?.contains(original?.requestID ?? "missing") == true)
+
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            expectedModel: candidate, confirmation: .sendTestPromptAndMayCharge)
+        let requests = await client.verificationRequests
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(requests[0].requestID, requests[1].requestID)
+    }
+
     func testUnknownVerificationReusesTheExactRequestAfterReconnect() async {
         let connection = MinutesModelFixtures.connection(providerID: .openAICompatibleAPI)
         let candidate = MinutesModelFixtures.model(
@@ -584,6 +640,7 @@ private actor FakeMinutesCatalogClient: MinutesModelCatalogClient {
     private let holdModels: Bool
     private let verificationFails: Bool
     private var verificationFailures: [ProviderSettingsErrorCode]
+    private var detailedVerificationFailures: [ProviderSettingsFailure]
     private let postVerificationPage: ListProviderModelsResponse?
     private var shouldFail = false
     private var started: CheckedContinuation<Void, Never>?
@@ -594,6 +651,7 @@ private actor FakeMinutesCatalogClient: MinutesModelCatalogClient {
         pages: [String: ListProviderModelsResponse] = ["first": MinutesModelFixtures.catalog()],
         holdModels: Bool = false, verificationFails: Bool = false,
         verificationFailures: [ProviderSettingsErrorCode] = [],
+        detailedVerificationFailures: [ProviderSettingsFailure] = [],
         postVerificationPage: ListProviderModelsResponse? = nil
     ) {
         self.connections = connections
@@ -601,6 +659,7 @@ private actor FakeMinutesCatalogClient: MinutesModelCatalogClient {
         self.holdModels = holdModels
         self.verificationFails = verificationFails
         self.verificationFailures = verificationFailures
+        self.detailedVerificationFailures = detailedVerificationFailures
         self.postVerificationPage = postVerificationPage
     }
 
@@ -624,6 +683,9 @@ private actor FakeMinutesCatalogClient: MinutesModelCatalogClient {
 
     func verifyProviderModel(_ request: VerifyProviderModelRequest) async throws -> VerifyProviderModelResponse {
         verificationRequests.append(request)
+        if !detailedVerificationFailures.isEmpty {
+            throw detailedVerificationFailures.removeFirst()
+        }
         if !verificationFailures.isEmpty {
             throw ProviderSettingsFailure(verificationFailures.removeFirst())
         }

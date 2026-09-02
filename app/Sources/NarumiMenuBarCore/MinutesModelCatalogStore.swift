@@ -280,12 +280,16 @@ public final class MinutesModelCatalogStore {
         } catch {
             let failure = error as? ProviderSettingsFailure ?? ProviderSettingsFailure(.internalError)
             let rejectedBeforeProbe = Self.verificationRejectedBeforeProbe(failure.code)
-            if rejectedBeforeProbe, unresolvedVerification == attempt {
+            let knownProbeFailure = failure.code == .engineUnavailable
+                && failure.modelVerification?.isKnownFailure == true
+            if (rejectedBeforeProbe || knownProbeFailure), unresolvedVerification == attempt {
                 unresolvedVerification = nil
             }
             guard isCurrent(token) else { return }
             errorMessage = failure.message
-            if rejectedBeforeProbe {
+            if knownProbeFailure {
+                verificationNotice = "モデルの固定テストは確定的に失敗しました。次の明示確認では新しい要求 ID で再検証できます。"
+            } else if rejectedBeforeProbe {
                 verificationNotice = nil
             } else {
                 verificationNotice = attempt.recoveryNotice

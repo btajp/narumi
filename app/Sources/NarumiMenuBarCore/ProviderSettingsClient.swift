@@ -67,15 +67,59 @@ public enum ProviderSettingsErrorCode: String, Sendable {
     }
 }
 
+/// Closed server evidence that decides whether a paid model probe can use a new request ID.
+public struct ProviderModelVerificationFailureEvidence: Equatable, Sendable {
+    public enum Reason: String, Equatable, Sendable {
+        case modelGenerationVerificationFailed = "model_generation_verification_failed"
+        case providerGenerationOutcomeUnknown = "provider_generation_outcome_unknown"
+    }
+
+    public static let knownFailure = Self(
+        validatedReason: .modelGenerationVerificationFailed, outcomeUnknown: false)
+    public static let unknownOutcome = Self(
+        validatedReason: .providerGenerationOutcomeUnknown, outcomeUnknown: true)
+
+    public let reason: Reason
+    public let outcomeUnknown: Bool
+
+    /// Accepts only the two server states that have defined paid-probe retry semantics.
+    public init?(reason: String?, outcomeUnknown: Bool) {
+        guard let reason = reason.flatMap(Reason.init(rawValue:)) else { return nil }
+        switch (reason, outcomeUnknown) {
+        case (.modelGenerationVerificationFailed, false), (.providerGenerationOutcomeUnknown, true):
+            self.init(validatedReason: reason, outcomeUnknown: outcomeUnknown)
+        default:
+            return nil
+        }
+    }
+
+    public var isKnownFailure: Bool {
+        reason == .modelGenerationVerificationFailed && !outcomeUnknown
+    }
+
+    private init(validatedReason: Reason, outcomeUnknown: Bool) {
+        reason = validatedReason
+        self.outcomeUnknown = outcomeUnknown
+    }
+}
+
 /// Raw upstream errors are intentionally discarded at the client boundary.
 public struct ProviderSettingsFailure: Error, Equatable, Sendable {
     public let code: ProviderSettingsErrorCode
+    public let modelVerification: ProviderModelVerificationFailureEvidence?
 
-    public init(code: String) {
+    public init(code: String, modelVerification: ProviderModelVerificationFailureEvidence? = nil) {
         self.code = ProviderSettingsErrorCode(rawValue: code) ?? .internalError
+        self.modelVerification = modelVerification
     }
 
-    public init(_ code: ProviderSettingsErrorCode) { self.code = code }
+    public init(
+        _ code: ProviderSettingsErrorCode,
+        modelVerification: ProviderModelVerificationFailureEvidence? = nil
+    ) {
+        self.code = code
+        self.modelVerification = modelVerification
+    }
 
     public var message: String { "\(code.rawValue): \(code.message)" }
 }
