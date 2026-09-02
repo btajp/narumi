@@ -97,9 +97,16 @@ class Socket:
         self.position = 0
         self.sent = []
         self.timeouts = []
+        self.blocking = []
+        self.current_timeout = None
 
     def settimeout(self, timeout):
         self.timeouts.append(timeout)
+        self.current_timeout = timeout
+
+    def setblocking(self, value):
+        self.blocking.append(value)
+        self.current_timeout = None if value else 0.0
 
     def connect(self, address):
         assert address == ("127.0.0.1", 11434), "unexpected destination"
@@ -282,23 +289,122 @@ def test_cancel_during_tls_handshake_closes_socket_without_marking_http_send(mon
         guard.close()
 
 
-def test_tls_handshake_completes_before_first_http_write_is_marked(monkeypatch):
+@pytest.mark.parametrize("cancel", [False, True])
+@pytest.mark.parametrize("want", ["read", "write"])
+def test_tls_handshake_poll_enforces_cancellation_and_absolute_deadline(monkeypatch, cancel, want):
     clock, connection = install_clock_and_socket(monkeypatch)
-    guard = RequestDeadline(3, monotonic=clock)
-    events = []
+    monkeypatch.setattr(deadline_module, "_abort", lambda _connection: None)
+    guard = RequestDeadline(
+        30 if cancel else 0.2,
+        monotonic=clock,
+        should_cancel=(lambda: clock.value >= 0.2) if cancel else None,
+    )
+
+    class TLSContext:
+        def wrap_socket(self, raw, **kwargs):
+            assert raw is connection
+            return connection
+
+    def handshake():
+        raise ssl.SSLWantReadError() if want == "read" else ssl.SSLWantWriteError()
+
+    def not_ready(readers, writers, errors, timeout):
+        assert (readers, writers) == (([connection], []) if want == "read" else ([], [connection]))
+        assert not errors
+        clock.advance(timeout)
+        return [], [], []
+
+    connection.do_handshake = handshake
+    monkeypatch.setattr(deadline_module.select, "select", not_ready)
+    request = deadline_module._HTTPSConnection(
+        "127.0.0.1", 11434, context=TLSContext(), deadline=guard
+    )
+    guard.start()
+    try:
+        with pytest.raises(RequestCancelled if cancel else TimeoutError):
+            request.connect()
+        assert clock.value <= 0.21
+        assert connection.blocking == [False]
+        assert not guard.request_started and not connection.sent
+    finally:
+        guard.close()
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [("cancel", RequestCancelled), ("deadline", TimeoutError), ("transport", OSError)],
+)
+def test_tls_select_close_race_preserves_cancel_and_deadline_precedence(
+    monkeypatch, mode, expected
+):
+    clock, connection = install_clock_and_socket(monkeypatch)
+    monkeypatch.setattr(deadline_module, "_abort", lambda _connection: None)
+    guard = RequestDeadline(
+        0.2 if mode == "deadline" else 30,
+        monotonic=clock,
+        should_cancel=(lambda: clock.value >= 0.2) if mode == "cancel" else None,
+    )
 
     class TLSContext:
         def wrap_socket(self, raw, **kwargs):
             return raw
 
     def handshake():
+        raise ssl.SSLWantReadError()
+
+    connection.do_handshake = handshake
+
+    def descriptor_closed(readers, writers, errors, timeout):
+        assert readers == [connection] and not writers and not errors
+        if mode != "transport":
+            clock.advance(0.2)
+        raise ValueError("file descriptor cannot be a negative integer")
+
+    monkeypatch.setattr(deadline_module.select, "select", descriptor_closed)
+    request = deadline_module._HTTPSConnection(
+        "127.0.0.1", 11434, context=TLSContext(), deadline=guard
+    )
+    guard.start()
+    try:
+        with pytest.raises(expected):
+            request.connect()
+        assert not guard.request_started and not connection.sent
+    finally:
+        guard.close()
+
+
+def test_tls_handshake_completes_before_first_http_write_is_marked(monkeypatch):
+    clock, connection = install_clock_and_socket(monkeypatch)
+    guard = RequestDeadline(3, monotonic=clock)
+    events = []
+    waits = []
+    attempts = 0
+
+    class TLSContext:
+        def wrap_socket(self, raw, **kwargs):
+            return raw
+
+    def handshake():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ssl.SSLWantReadError()
+        if attempts == 2:
+            raise ssl.SSLWantWriteError()
+        clock.advance(0.5)
         events.append(("handshake", guard.request_started))
+
+    def ready(readers, writers, errors, timeout):
+        waits.append((readers, writers, errors, timeout))
+        clock.advance(0.25)
+        return readers, writers, []
 
     def sendall(data):
         events.append(("write", guard.request_started))
 
     connection.do_handshake = handshake
     connection.sendall = sendall
+    monkeypatch.setattr(deadline_module.select, "select", ready)
     request = deadline_module._HTTPSConnection(
         "127.0.0.1", 11434, context=TLSContext(), deadline=guard
     )
@@ -306,6 +412,14 @@ def test_tls_handshake_completes_before_first_http_write_is_marked(monkeypatch):
     try:
         request.send(b"POST / HTTP/1.1\r\n\r\n")
         assert events == [("handshake", False), ("write", True)]
+        assert [(readers, writers) for readers, writers, _, _ in waits] == [
+            ([connection], []),
+            ([], [connection]),
+        ]
+        assert [timeout for _, _, _, timeout in waits] == [3, 2.75]
+        assert connection.blocking == [False]
+        assert connection.timeouts == [3, 3, 2]
+        assert connection.current_timeout == 2
     finally:
         guard.close()
 
@@ -402,7 +516,11 @@ def test_real_urllib_marks_generation_unknown_only_when_http_write_may_have_star
 
         class TLSContext:
             def wrap_socket(self, raw, **kwargs):
-                raise OSError("fixture handshake failure")
+                def fail_handshake():
+                    raise ssl.SSLCertVerificationError("fixture certificate failure")
+
+                raw.do_handshake = fail_handshake
+                return raw
 
         monkeypatch.setattr("narumi.providers.metadata.http.tls_context", TLSContext)
     with pytest.raises(EngineUnavailableError) as failure:
@@ -512,9 +630,14 @@ def test_cancel_interrupts_real_blocked_socket_promptly_without_a_second_post(ph
         }
 
 
-def test_real_tls_handshake_cancellation_is_prompt_and_known_before_http_send():
+def test_real_tls_handshake_cancellation_is_prompt_and_known_before_http_send(monkeypatch):
     cancelled, disconnected = threading.Event(), threading.Event()
     cancelled_at, failures = [], []
+
+    # Cross-thread close does not reliably wake a blocking SSL_do_handshake on
+    # every supported macOS/OpenSSL combination. Cancellation must instead be
+    # observed by the request thread's bounded nonblocking handshake poll.
+    monkeypatch.setattr(deadline_module, "_abort", lambda _connection: None)
 
     def cancel():
         cancelled_at.append(time.monotonic())
@@ -531,7 +654,20 @@ def test_real_tls_handshake_cancellation_is_prompt_and_known_before_http_send():
                 connection, _ = listener.accept()
                 with connection:
                     connection.settimeout(2)
-                    assert connection.recv(4096).startswith(b"\x16")
+
+                    def receive_exact(size):
+                        chunks = []
+                        while size:
+                            chunk = connection.recv(size)
+                            if not chunk:
+                                raise OSError("fixture TLS record ended early")
+                            chunks.append(chunk)
+                            size -= len(chunk)
+                        return b"".join(chunks)
+
+                    header = receive_exact(5)
+                    assert header.startswith(b"\x16\x03")
+                    receive_exact(int.from_bytes(header[3:5], "big"))
                     timer = threading.Timer(0.05, cancel)
                     timer.start()
                     try:
