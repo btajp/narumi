@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import struct
+import subprocess
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -38,6 +42,7 @@ from narumi.transcribe import (
     run_transcribe,
     sidecar_path,
 )
+from narumi.transcribe._wav import canonical_wave
 from narumi.transcription_selection import TranscriptionRetry
 
 from .media_fixtures import make_bundle_with_tracks, make_sine_wav, write_sidecar
@@ -136,6 +141,100 @@ def test_whisper_model_env_override(monkeypatch):
     assert get_engine("mlx-whisper").model == "mlx-community/whisper-tiny"
     assert get_engine("faster-whisper").model == "mlx-community/whisper-tiny"
     assert MlxWhisperEngine(model="explicit").model == "explicit"
+
+
+class _FakeMlxArray:
+    def __init__(self, values) -> None:
+        self.values = tuple(values)
+
+    def astype(self, _dtype):
+        return self
+
+    def __truediv__(self, divisor: float):
+        return _FakeMlxArray(value / divisor for value in self.values)
+
+
+def _fake_mlx_modules(monkeypatch):
+    calls: list[tuple[tuple[float, ...], dict[str, object]]] = []
+    seeds: list[int] = []
+    mlx = types.ModuleType("mlx")
+    core = types.ModuleType("mlx.core")
+    core.float32 = object()
+    core.random = types.SimpleNamespace(seed=seeds.append)
+    core.array = _FakeMlxArray
+    core.eval = lambda _value: None
+    mlx.core = core
+    whisper = types.ModuleType("mlx_whisper")
+
+    def transcribe(audio, **kwargs):
+        calls.append((audio.values, kwargs))
+        return {"segments": [{"start": 0, "end": 0.25, "text": " fixed "}]}
+
+    whisper.transcribe = transcribe
+    monkeypatch.setitem(sys.modules, "mlx", mlx)
+    monkeypatch.setitem(sys.modules, "mlx.core", core)
+    monkeypatch.setitem(sys.modules, "mlx_whisper", whisper)
+    monkeypatch.setattr(mlx_whisper_engine, "package_version", lambda *a, **k: "0.0-test")
+    return core, calls, seeds
+
+
+def _normalized_test_wav(tmp_path: Path) -> Path:
+    directory = tmp_path / "normalized"
+    directory.mkdir()
+    wav = directory / "audio.wav"
+    wav.write_bytes(canonical_wave(struct.pack("<hhh", -32768, 0, 32767)))
+    return wav
+
+
+def test_mlx_reads_normalized_waveform_without_ffmpeg(tmp_path: Path, monkeypatch):
+    _core, calls, seeds = _fake_mlx_modules(monkeypatch)
+    wav = _normalized_test_wav(tmp_path)
+
+    def forbidden_subprocess(*_args, **_kwargs):
+        raise AssertionError("mlx transcription must not launch a subprocess")
+
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(subprocess, "run", forbidden_subprocess)
+    monkeypatch.setattr(subprocess, "Popen", forbidden_subprocess)
+    engine = MlxWhisperEngine(model="fixed-model")
+    first = engine.transcribe(wav, source_id="own-mic", language="ja", vocab_hints=["鳴海"])
+    second = engine.transcribe(wav, source_id="own-mic", language="ja", vocab_hints=["鳴海"])
+
+    assert first == second
+    assert [segment.text for segment in first] == ["fixed"]
+    assert seeds == [mlx_whisper_engine.SEED, mlx_whisper_engine.SEED]
+    assert [audio for audio, _options in calls] == [(-1.0, 0.0, 32767 / 32768)] * 2
+    assert all(options["path_or_hf_repo"] == "fixed-model" for _audio, options in calls)
+
+
+def test_mlx_rejects_corrupt_normalized_wav(tmp_path: Path, monkeypatch):
+    _core, calls, _seeds = _fake_mlx_modules(monkeypatch)
+    directory = tmp_path / "normalized"
+    directory.mkdir()
+    wav = directory / "audio.wav"
+    wav.write_bytes(b"not a complete wave")
+
+    with pytest.raises(InvalidArgumentError) as failure:
+        MlxWhisperEngine().transcribe(wav, source_id="own-mic", language="ja", vocab_hints=[])
+    assert failure.value.details["reason"] == "transcription_audio_invalid"
+    assert calls == []
+
+
+def test_mlx_converts_waveform_allocation_failure(tmp_path: Path, monkeypatch):
+    core, calls, _seeds = _fake_mlx_modules(monkeypatch)
+    wav = _normalized_test_wav(tmp_path)
+
+    def fail_allocation(_values):
+        raise MemoryError("synthetic allocation failure")
+
+    core.array = fail_allocation
+    with pytest.raises(EngineUnavailableError) as failure:
+        MlxWhisperEngine().transcribe(wav, source_id="own-mic", language="ja", vocab_hints=[])
+    assert failure.value.details == {
+        "engine": "mlx-whisper",
+        "reason": "mlx_audio_load_failed",
+    }
+    assert calls == []
 
 
 def test_build_initial_prompt():
