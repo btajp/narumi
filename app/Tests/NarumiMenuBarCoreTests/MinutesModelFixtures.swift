@@ -20,7 +20,8 @@ enum MinutesModelFixtures {
         roles: [ProviderRole] = [.llm],
         billing: ProviderBillingKind? = nil, required: [String] = [], provider: String = "codex-app-server",
         parameterSchema: ProviderParameterSchema? = nil, maxOutputTokens: Int? = 10_000,
-        availabilityExpiresOn: String? = nil
+        contextWindow: Int? = 100_000, availabilityExpiresOn: String? = nil, reason: String? = nil,
+        source: ProviderModelSource = .runtime
     ) -> ProviderModelDescriptor {
         var properties: [String: ProviderModelParameter] = [:]
         if ["codex-app-server", "openai-api"].contains(provider) {
@@ -34,9 +35,9 @@ enum MinutesModelFixtures {
         return ProviderModelDescriptor(
             modelID: id, displayName: "Fixture Codex model", resolvedRevision: "fixture-revision",
             inputModalities: inputs, outputModalities: outputs, roles: roles, timestampSupport: .none,
-            contextWindow: 100_000, maxOutputTokens: maxOutputTokens,
+            contextWindow: contextWindow, maxOutputTokens: maxOutputTokens,
             parameterSchema: parameterSchema ?? ProviderParameterSchema(properties: properties, required: required),
-            availability: availability, reason: nil, source: .runtime,
+            availability: availability, reason: reason, source: source,
             fetchedAt: ProviderSettingsFixtures.timestamp,
             billing: ProviderModelBilling(
                 kind: billingKind, inputUSDPerMillionTokens: nil, outputUSDPerMillionTokens: nil,

@@ -148,6 +148,31 @@ final class ProviderSettingsStateTests: XCTestCase {
         XCTAssertNil(object["api_key"])
     }
 
+    func testNewCompatibleConnectionTreatsEveryRoutingEditAsUnsaved() {
+        var editor = ProviderConnectionSettings(providerID: .openAICompatibleAPI)
+        XCTAssertFalse(editor.hasUnsavedChanges)
+
+        editor.endpoint = "https://compatible.example.invalid/v1"
+        XCTAssertTrue(editor.hasUnsavedChanges)
+        editor.dismiss()
+        XCTAssertFalse(editor.hasUnsavedChanges)
+
+        editor.selectAuthMethod(.none)
+        XCTAssertTrue(editor.hasUnsavedChanges)
+        editor.dismiss()
+
+        editor.apiSurface = .chatCompletions
+        XCTAssertTrue(editor.hasUnsavedChanges)
+        editor.dismiss()
+
+        editor.chatMaxTokensField = .maxCompletionTokens
+        XCTAssertTrue(editor.hasUnsavedChanges)
+        editor.dismiss()
+
+        editor.enabled = false
+        XCTAssertTrue(editor.hasUnsavedChanges)
+    }
+
     func testOpenAICompatibleEndpointRejectsObviousUnsafeShapes() {
         let valid = [
             "https://api.example.com/v1", "https://LLM.Example.COM:443/api-v1/models_v2~beta",

@@ -64,7 +64,12 @@ public struct ProviderConnectionSettings: Sendable {
 
     public var hasUnsavedChanges: Bool {
         guard let connection else {
-            return !normalizedName.isEmpty || !apiKey.isEmpty || clearAPIKey
+            return !normalizedName.isEmpty || enabled != true
+                || normalizedEndpoint != Self.defaultEndpoint(for: providerID)
+                || authMethod != providerID.defaultAuthMethod
+                || (providerID == .openAICompatibleAPI && (
+                    apiSurface != .responses || chatMaxTokensField != .maxTokens))
+                || !apiKey.isEmpty || clearAPIKey
         }
         return normalizedName != connection.displayName || enabled != connection.enabled
             || normalizedEndpoint != connection.endpoint || authMethod != connection.authMethod

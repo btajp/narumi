@@ -348,6 +348,12 @@ final class MinutesModelFormTests: XCTestCase {
         let compatible = "openai-compatible-api"
         let valid = MinutesModelFixtures.model(availability: .unverified, provider: compatible)
         XCTAssertTrue(MinutesModelForm.isModelVerificationCandidate(valid, provider: compatible))
+        let discoveredUnknown = MinutesModelFixtures.model(
+            id: "compatible-unknown", availability: .unverified, inputs: [], outputs: [], roles: [],
+            provider: compatible, parameterSchema: ProviderParameterSchema(), maxOutputTokens: nil,
+            contextWindow: nil, reason: "adapter_capability_verification_required", source: .providerAPI)
+        XCTAssertTrue(MinutesModelForm.isModelVerificationCandidate(
+            discoveredUnknown, provider: compatible))
         XCTAssertTrue(MinutesModelForm.isModelVerificationCandidate(
             MinutesModelFixtures.model(availability: .unverified, provider: "claude-agent-sdk"),
             provider: "claude-agent-sdk"))
@@ -371,6 +377,10 @@ final class MinutesModelFormTests: XCTestCase {
             MinutesModelFixtures.model(
                 availability: .unverified, provider: compatible,
                 parameterSchema: ProviderParameterSchema()),
+            MinutesModelFixtures.model(
+                id: discoveredUnknown.modelID, availability: .unverified, inputs: [], outputs: [], roles: [],
+                provider: compatible, parameterSchema: ProviderParameterSchema(), maxOutputTokens: nil,
+                contextWindow: nil, reason: "model_capabilities_unavailable", source: .providerAPI),
             MinutesModelFixtures.model(availability: .available, provider: compatible),
         ]
         for model in rejected {

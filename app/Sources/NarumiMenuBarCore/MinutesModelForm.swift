@@ -109,7 +109,27 @@ public struct MinutesModelForm: Equatable, Sendable {
     public static func isModelVerificationCandidate(_ model: ProviderModelDescriptor, provider: String) -> Bool {
         guard ["claude-agent-sdk", "openai-compatible-api"].contains(provider),
             model.availability == .unverified else { return false }
+        if provider == "openai-compatible-api", isUnknownCompatibleCandidate(model) {
+            return true
+        }
         return textMinutesCapabilityUnavailableReason(model, provider: provider) == nil
+    }
+
+    /// Generic OpenAI-compatible `/models` metadata proves only model identity.
+    /// The fixed paid probe is what establishes text-generation capabilities.
+    private static func isUnknownCompatibleCandidate(_ model: ProviderModelDescriptor) -> Bool {
+        !model.availabilityExpired
+            && model.reason == "adapter_capability_verification_required"
+            && model.source == .providerAPI
+            && model.billing.kind == .api
+            && model.roles.isEmpty
+            && model.inputModalities.isEmpty
+            && model.outputModalities.isEmpty
+            && model.timestampSupport == .none
+            && model.contextWindow == nil
+            && model.maxOutputTokens == nil
+            && model.parameterSchema.properties.isEmpty
+            && model.parameterSchema.required.isEmpty
     }
 
     private static func textMinutesCapabilityUnavailableReason(
