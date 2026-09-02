@@ -4,6 +4,17 @@ narumi（narumi.app / pipeline / server）の変更履歴。最新の版を先�
 `VERSION`・`pipeline/pyproject.toml`・`server/pyproject.toml` と最新見出しの版は常に一致させる
 （`scripts/check-version.sh` が検査し、`scripts/release-app.sh` がリリースノートとして抜粋する）。
 
+## 0.6.0 - 2026-09-02
+
+- AI プロバイダを Codex App Server / Claude Agent SDK / OpenAI API / OpenAI互換API / Anthropic API / Ollama の正規順に統一
+- 全 6 種で方式に応じた接続設定・認証確認・モデル候補の取得と選択・単一プロバイダによるテキスト議事録生成に対応
+- OpenAI API の音声認識を維持し、ローカル Whisper 系との工程別選択を継続
+- OpenAI互換APIは接続ごとに Responses または Chat Completions を固定し、未確認モデルの利用には送信前の明示確認を伴う固定プロンプト probe を要求
+- Claude Agent SDK は固定版の隔離プロセスで実行し、tools・MCP・履歴・自動再試行を無効化
+- 外部送信ポリシーと送信先を実行直前に照合し、送信後に結果不明となった処理の自動再送を防止
+- 契約を 6.0.0 に更新。複数プロバイダによる生成・統合は未対応
+- 実アカウントでの認証、実 API への課金を伴う送信、公開後のインストール済みアプリでの UI 操作は未検証
+
 ## 0.5.1 - 2026-09-02
 
 - サーバーの起動中・未接続・録画状態未確認でも、手動確認と定期確認を Sparkle へ渡すよう修正

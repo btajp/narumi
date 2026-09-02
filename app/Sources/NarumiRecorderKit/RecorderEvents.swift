@@ -318,7 +318,7 @@ public struct RecorderSummary: Codable, Equatable, Sendable {
 }
 
 public enum NarumiRecorderKit {
-    public static let version = "0.5.1"
+    public static let version = "0.6.0"
 }
 
 // MARK: - Sinks

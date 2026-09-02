@@ -4,7 +4,7 @@ narumi は、macOS 上でローカルに会議を録画し、終了後に議事�
 
 相棒の **gaia-library**（記憶の索引 MCP）とは任意連携です。gaia-library が無くても narumi 単体で完結し、接続すると語彙・参加者・前回要点などを会議ブリーフに取り込みます。議事録の書き戻しは提案キューへの登録だけで、人間の承認は gaia-library 側で行います。設計の正本は Notion「議事録生成システム」ページで、リポジトリ内の要約と開発ルールは [AGENTS.md](AGENTS.md)、基盤の具体設計は [docs/superpowers/specs/](docs/superpowers/specs/) にあります。
 
-**0.5.0** では、既定のローカル Whisper を維持したまま、OpenAI API の音声認識モデル選択、区間ごとの保存、結果不明時の明示的な再送を追加しました。4 系統のテキスト議事録とは接続・モデルを別に選びます。実装・ソース検証済みで、公開は未了です。全工程の設定移行、Claude Agent SDK による生成、API の画像入力、複数案の生成と統合は後続です。
+**0.6.0** では、AI 接続を Codex App Server / Claude Agent SDK / OpenAI API / OpenAI互換API / Anthropic API / Ollama の順に統一し、全 6 種で接続・モデル選択・単一プロバイダによるテキスト議事録生成に対応しました。既定のローカル Whisper と OpenAI API 音声認識は工程別に選択できます。全工程のモデル選択、API の画像入力、複数プロバイダによる生成・統合は後続です。
 
 ソース検証と配布の公開状況は別に扱います。利用できる公開版は [GitHub Releases](https://github.com/btajp/narumi/releases) で確認してください。
 
@@ -25,7 +25,7 @@ ffmpeg / ffprobe は別途必要です。アプリの「診断」で検出状態
 - macOS 15 以降（マイク取り込みに ScreenCaptureKit の `captureMicrophone` を使うため）
 - [uv](https://docs.astral.sh/uv/)（Python 3.12 以降を管理。`.venv` はリポジトリ直下に作られます）
 - ffmpeg / ffprobe（`brew install ffmpeg`）
-- Xcode Command Line Tools（`xcode-select --install`。録画アプリのビルドに Swift 6.3 相当のツールチェーンが必要）。`swift test` だけは XCTest を含む Xcode 本体が必要で、`xcode-select` が CLT を指す環境では `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` で実行する（`swift build` は CLT だけで通る）
+- Xcode Command Line Tools（`xcode-select --install`。録画アプリのビルドに Swift 6.0 以降が必要。6.3.3 で検証）。`swift test` だけは XCTest を含む Xcode 本体が必要で、`xcode-select` が CLT を指す環境では `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` で実行する（`swift build` は CLT だけで通る）
 - 任意: gaia-library（無くてもテストは全て通ります）
 
 ## 開発環境のセットアップ
@@ -74,14 +74,14 @@ open dist/narumi.app     # メイン画面と、名前付きのメニューバ�
 
 各工程は `Bundle.run_stage(key, inputs, params, ...)` で実行され、`manifest.json` に入力ハッシュと生成パラメータを記録します。同じ入力＋同じパラメータなら再実行はスキップされ、「同じ入力 → 同じ版」が守られます。dev CLI の `regenerate` は align → integrate → generate だけを再実行します。MCP ツールの `regenerate` は、未処理・失敗した上流工程（前処理・ブリーフ・文字起こし・話者分離・スライド抽出）と、設定変更や `register_context` で inputs / params が変わった工程だけを冪等に実行してから align 以降を再実行します（`force` でも上流工程は強制しません）。
 
-議事録用の接続・モデルを指定した場合は、4 系統とも `force=true` を使えません。モデル選択だけの変更は文字起こし・発話統合をやり直さず、同じ入力と選択では保存済み議事録を再利用します。新しい試行が必要な場合は、後述の [試行番号による再生成](#接続指定の設定保存と再試行) を使います。
+議事録用の接続・モデルを指定した場合は、6 系統とも `force=true` を使えません。モデル選択だけの変更は文字起こし・発話統合をやり直さず、同じ入力と選択では保存済み議事録を再利用します。新しい試行が必要な場合は、後述の [試行番号による再生成](#接続指定の設定保存と再試行) を使います。
 
 ### 実装状況
 
 | 項目 | 状態 |
 |---|---|
 | セッションバンドル / manifest / 冪等ステージ実行 | 実装済み |
-| 契約（`contracts/`）と MCP サーバー（契約 5.0.0・37 ツール） | 実装・ソース検証済み。音声認識の設定・再送確認を既存ツールへ追加。常駐は認証付き TLS、外部 MCP クライアント向け stdio bridge、開発用 stdio |
+| 契約（`contracts/`）と MCP サーバー（契約 6.0.0・38 ツール） | 実装・ソース検証済み。6 プロバイダと明示的なモデル検証を公開。常駐は認証付き TLS、外部 MCP クライアント向け stdio bridge、開発用 stdio |
 | 操作面パリティ拡張（録画状態・議事録取得・全文検索・既存録画の取り込み・プロファイル＋自動エクスポート・トラック破棄・会議削除・ジョブ取消・カタログ再構築） | 実装済み（MCP ツール＋CLI＋アプリ本体ウィンドウ） |
 | 製品 CLI `narumi`（契約から自動生成の 1:1 写像） | 実装済み（常駐サーバーの証明書・認証を検証。条件を満たすローカル操作のみ in-process 可） |
 | 録画アプリ / `narumi-recorder` | 実装済み（メイン画面とメニューバーから同じ MCP 録画操作を利用） |
@@ -92,13 +92,13 @@ open dist/narumi.app     # メイン画面と、名前付きのメニューバ�
 | キースライド抽出（pHash）/ Vision 読解 / 第 3 層話者判定 | 実装済み（pHash は pillow の自前実装、議事録へ画像埋め込みまで。第 3 層は vision 対応プロバイダが送信ポリシーで許可されたときだけ実行。実 vision プロバイダでの実機確認は未了） |
 | gaia-library 照会によるコンテキスト注入（会議ブリーフ） | 実装済み（実契約の scope 付き照会と案件名から ID への解決。参照結果を `context/brief.json` に保存し、語彙・参加者・背景を注入。契約版とクライアントの識別情報も確認） |
 | Gaia 接続設定 | 実装済み（アプリの「Gaia 接続」から URL・API キーの保存、無効化、接続テスト。MCP と CLI にも同じ操作を公開） |
-| AI プロバイダ接続・認証・モデル候補 | OpenAI API を加えた 5 系統を実装・ソース検証済み。API キーは Keychain、Codex のログイン情報は接続専用領域 |
-| 接続とモデルを指定したテキスト議事録生成 | Codex / OpenAI API / Anthropic API / Ollama の 4 系統を実装・ソース検証済み。会議設定・プロファイルから接続・モデル・対応パラメータを指定し、送信許可を確認して保存・再生成 |
+| AI プロバイダ接続・認証・モデル候補 | Codex App Server / Claude Agent SDK / OpenAI API / OpenAI互換API / Anthropic API / Ollama の 6 系統を実装・ソース検証済み。API キーは Keychain、Codex のログイン情報は接続専用領域 |
+| 接続とモデルを指定したテキスト議事録生成 | 全 6 系統の単一プロバイダ生成を実装・ソース検証済み。会議設定・プロファイルから接続・モデル・対応パラメータを指定し、送信許可を確認して保存・再生成 |
 | OpenAI 音声認識・区間ごとの再開 | 実装・ソース検証済み（`whisper-1` / `gpt-4o-transcribe-diarize` のモデル選択、音声送信確認、成功区間の再利用・不明区間の明示再送） |
 | Notion / gaia-library エクスポーター | 実装済み（Notion は REST でページ作成＋Markdown→ブロック変換。スライド画像のアップロードと実環境検証は未対応。gaia-library は `propose_update` の提案キューのみ＝絶対原則 5。実プロセスで認証・scope・提案の重複防止・agent の承認拒否を検証） |
 | アップグレード再生成（影響区間だけ第 2 段を再実行） | 実装済み（`merged/integrate_cache.json` の区間フィンガープリントで、追加ソースが触れた区間だけ LLM を再実行） |
 
-接続・モデル設定を適用するのは、**OpenAI 音声認識と、4 系統による単独のテキスト議事録生成**です。全工程のモデル選択、API の画像入力、複数プロバイダでの生成・統合は未対応です。Claude Agent SDK は API キー方式のみを扱い、認証・履歴の隔離を確認できるまで生成を停止しています。接続テストやモデル候補の表示は、実認識・実生成の成功を意味しません。今回の範囲は [OpenAI 音声認識の設計](docs/superpowers/specs/2026-08-29-openai-transcription-design.md)、既存の生成は [API・ローカル議事録生成](docs/superpowers/specs/2026-08-29-openai-minutes-design.md) と [Codex 議事録生成](docs/superpowers/specs/2026-08-29-codex-minutes-design.md)、後続は [実装計画](docs/superpowers/plans/2026-08-28-provider-workflow.md) を参照してください。
+接続・モデル設定を適用するのは、**OpenAI 音声認識と、6 系統による単独のテキスト議事録生成**です。全工程のモデル選択、API の画像入力、複数プロバイダでの生成・統合は未対応です。Claude Agent SDK は固定版を隔離プロセスで実行し、API キー方式だけを扱います。接続テストやモデル候補の表示は、実認識・実生成の成功を意味しません。
 
 **0.5.0 のソース検証結果**（2026-08-29）は次のとおりです。通常のテストでは fake とローカル TLS を使います。
 
@@ -146,14 +146,15 @@ cd app && swift build && swift test                      # 録画アプリ / rec
 | プロバイダ | 認証・接続先 | この版の範囲 |
 |---|---|---|
 | Codex App Server | 専用の ChatGPT ログイン。API キー不要。OpenAI へ接続 | 接続・モデル選択・テキスト議事録生成 |
+| Claude Agent SDK | API キー。`https://api.anthropic.com` 固定 | 固定版の隔離実行・明示的なモデル検証・テキスト議事録生成。サブスクリプションログインは未対応 |
 | OpenAI API | API キー。`https://api.openai.com` 固定。ChatGPT の利用枠とは別の API 課金 | 接続・モデル選択・テキスト議事録生成・音声認識 |
+| OpenAI互換API | API キー、または数値 loopback に限り認証なし。接続先と Responses / Chat Completions を固定 | 明示的なモデル検証・テキスト議事録生成 |
 | Anthropic API | API キー。`https://api.anthropic.com` 固定 | 接続・モデル選択・テキスト議事録生成 |
-| Claude Agent SDK | API キー。`https://api.anthropic.com` 固定 | 接続確認・候補の参照。サブスクリプションログインと生成は未対応 |
-| ローカル Ollama | 認証不要。既定 `http://127.0.0.1:11434` | 接続・ローカルモデル選択・テキスト議事録生成 |
+| Ollama | 認証不要。既定 `http://127.0.0.1:11434` | 接続・ローカルモデル選択・テキスト議事録生成 |
 
 接続名は用途を区別できる名前を入力します。同じプロバイダの接続を複数保存できます。API キーが未準備なら空欄で保存でき、既存接続では空欄で現在のキーを維持します。API キーは `narumi-keychain` ヘルパーを介して Keychain に保存し、再表示しません。入力欄は保存の成功・失敗・画面を閉じる際に消去します。
 
-Ollama の接続先を変更する場合は `127.0.0.0/8` または `[::1]` の数値 loopback URL（HTTP / HTTPS）のみです。`localhost`・外部ホスト・URL 内の認証情報・クエリは使えず、クラウド実行モデルは対象外です。OpenAI API / Anthropic API / Ollama の「確認・準備」は内蔵 HTTP アダプタの版・配布メタデータを確認し、専用領域へ検査結果を保存します。Claude Agent SDK は既存依存の検査のみで、SDK・Ollama 本体・モデルの新規導入は行いません。
+Ollama の接続先を変更する場合は `127.0.0.0/8` または `[::1]` の数値 loopback URL（HTTP / HTTPS）のみです。`localhost`・外部ホスト・URL 内の認証情報・クエリは使えず、クラウド実行モデルは対象外です。OpenAI互換APIの外部接続は HTTPS と API キーを必須とし、認証なしは数値 loopback だけを許可します。準備処理は固定したアダプタや SDK の版・配布メタデータを確認し、SDK・Ollama 本体・モデルを新規導入しません。
 
 「この接続を有効にする」をオフにすると、設定と認証情報を残して無効化します。「保存時に API キーを削除」や「この接続からログアウト」は選択した接続の認証情報だけを削除し、ほかのアプリや接続には触れません。接続の保存・認証確認・候補更新だけでは会議データを送信せず、生成もしません。
 
@@ -200,8 +201,8 @@ MCP / CLI の `transcription_retry` は、全体入力・対象区間の指紋�
 
 接続の保存 → 準備・認証とモデル候補の取得 → 議事録の設定保存 → 内容を確認して再生成、の順に進めます。
 
-1. **接続を保存**: 「AI 接続」でプロバイダと接続名（例: `議事録用 OpenAI`）を選び、「接続を追加して保存」を押します。OpenAI / Anthropic は API キーを入力します。接続先は固定のため変更不要です。Codex と Ollama はキー不要です。
-2. **準備・接続確認**: 「実行環境」の「確認・準備」を完了します。OpenAI は「モデル一覧で接続を確認」、Anthropic / Ollama は「接続テスト」を使います。Codex は [専用ログインの手順](#codex-でテキスト議事録を生成) を先に行います。OpenAI の確認成功は、保存したキーでモデル一覧を取得できたことだけを示し、残高・生成権限・実生成の成功は確認しません。
+1. **接続を保存**: 「AI 接続」でプロバイダと接続名を選び、「接続を追加して保存」を押します。Claude SDK / OpenAI / Anthropic / 外部のOpenAI互換APIは API キーを入力します。Codex と Ollama、数値 loopback で認証なしにした互換APIはキー不要です。
+2. **準備・接続確認**: 「実行環境」の「確認・準備」を完了します。各接続の「モデル一覧で接続を確認」または「接続テスト」を使います。Codex は [専用ログインの手順](#codex-でテキスト議事録を生成) を先に行います。メタデータ取得の成功は残高・生成権限・実生成の成功を保証しません。
 3. **モデル候補を取得**: 「接続先から候補を更新」を押します。画面を開くだけでは保存済み候補を読み、更新時だけ接続先へモデル情報を照会します。会議内容は送信しません。
 4. **議事録の設定を保存**: 会議の「設定」または「プロファイル」で、「議事録の生成方法」を「接続とモデルを指定」にします。「議事録プロバイダ」→「保存済み接続」→「議事録モデル」の順に選び、下表のパラメータと外部送信ポリシーを確認して保存します。この画面の「モデル候補を取得・更新」からも候補を更新できます。保存だけでは送信・生成しません。
 5. **内容を確認して再生成**: 議事録タブの「再生成」で、接続・モデル・パラメータ・送信先・利用料と送信内容を確認し、「再生成を開始」を押します。入力は文字起こし・話者名・会議名・議事録用コンテキストのテキストだけです。理由欄は任意で、空欄でも構いません。この議事録生成には音声・動画・画像を渡しません。
@@ -209,9 +210,11 @@ MCP / CLI の `transcription_retry` は、全体入力・対象区間の指紋�
 | 議事録プロバイダ | 設定するパラメータ | 外部送信ポリシー |
 |---|---|---|
 | Codex App Server | 対応モデルの「推論量」。未指定なら「モデルの既定値」。出力トークン上限は指定不可 | `subscription_ok` または `api_ok`。どちらも ChatGPT の利用枠を使い、API 認証へ切り替えない |
+| Claude Agent SDK | 追加パラメータなし。出力トークン上限は指定不可 | `api_ok` を明示。Anthropic API の従量課金 |
 | OpenAI API | 対応モデルの「推論量」と「出力上限（トークン）」 | `api_ok` を明示。ChatGPT の利用枠とは別に API 課金 |
+| OpenAI互換API | 「出力上限（トークン）」。接続時に固定した API surface と token field を使用 | `api_ok` を明示。loopback でも外部中継の可能性を含む |
 | Anthropic API | 「出力上限（トークン）」。推論量は今回は指定しない | `api_ok` を明示 |
-| ローカル Ollama | 「出力上限（トークン）」。推論量は今回は指定しない | `local_only` のままで利用可。ローカル実行モデルの確認が必要 |
+| Ollama | 「出力上限（トークン）」。推論量は今回は指定しない | `local_only` のままで利用可。ローカル実行モデルの確認が必要 |
 
 出力上限には 1〜32,768 の整数を入力します。空欄なら 4,096 と確認済みのモデル上限の小さい方を使います。モデル上限が不明なら 4,096 をアプリの既定値として使い、モデルの能力は未確認（`null`）のままです。既知のモデル上限を超える値は拒否します。この上限は 1 回の要求に適用し、分割処理を含む総利用量・金額の上限ではありません。OpenAI の推論モデルでは推論トークンも出力上限に含まれます。
 
@@ -254,18 +257,18 @@ Ollama は送信前にローカルモデルの digest を再確認し、変更�
 
 | 項目 | 保存する内容 |
 |---|---|
-| `provider` | `codex-app-server` / `openai-api` / `anthropic-api` / `ollama` |
+| `provider` | `codex-app-server` / `claude-agent-sdk` / `openai-api` / `openai-compatible-api` / `anthropic-api` / `ollama` |
 | `connection_id` / `connection_revision` | 選んだ接続と、その時点の版 |
 | `model_id` | その接続から取得した候補のモデル ID |
 | `parameters.reasoning_effort` | 選択モデルが対応する推論量。省略は候補の既定値 |
-| `parameters.max_tokens` | OpenAI / Anthropic / Ollama の 1 回あたりの出力上限。省略時の扱いは上記の共通手順を参照 |
+| `parameters.max_tokens` | OpenAI / OpenAI互換 / Anthropic / Ollama の 1 回あたりの出力上限。省略時の扱いは上記の共通手順を参照 |
 | `cache_epoch` | 生成の試行番号。通常は `0` |
 
 設定更新で `minutes_model` を省略すると保持、`null` なら解除、オブジェクトを渡すと選択全体を置き換えます。アプリでは「従来設定」を選んで保存すると解除します。接続版が変わった場合は「変更後の接続を選び直す」からモデルを再選択し、保存します。利用できない接続・モデル・推論量は拒否し、別モデルへ自動変更しません。
 
 議事録用の接続・モデルを指定した会議の `regenerate` と、`auto_regenerate=true` の `register_context` には、確認した設定全体を `expected_config` として渡します。アプリは確認画面に表示した設定を送ります。CLI / MCP では `get_meeting` の `config` を使い、実行時に保存済み設定と一致しなければ、変更・ジョブ作成・外部送信の前に拒否します。
 
-同じ入力・選択・実行環境では保存済みの結果を再利用し、4 系統とも `force=true` は拒否します。呼出ごとに成功結果を checkpoint へ保存し、送信後に結果が不明になった場合は生成を自動で開始し直しません。新しく試す場合は会議設定の「前回の結果が不明・新しい試行が必要なとき」→「新しく生成を試す…」で、API 利用料や ChatGPT の利用枠を重複消費する可能性を確認し、「試行番号を増やす（保存後に再生成）」を押します。Ollama ではローカル処理を再実行します。この操作だけでは保存・送信せず、フォームを保存してから再生成します。過去の議事録は保持します。CLI / MCP では保存後の設定を `expected_config` に渡し、新しい `request_id` と `force=false` で再生成します。
+同じ入力・選択・実行環境では保存済みの結果を再利用し、6 プロバイダすべてで `force=true` は拒否します。呼出ごとに成功結果を checkpoint へ保存し、送信後に結果が不明になった場合は生成を自動で開始し直しません。新しく試す場合は会議設定の「前回の結果が不明・新しい試行が必要なとき」→「新しく生成を試す…」で、API 利用料や ChatGPT の利用枠を重複消費する可能性を確認し、「試行番号を増やす（保存後に再生成）」を押します。Ollama ではローカル処理を再実行します。この操作だけでは保存・送信せず、フォームを保存してから再生成します。過去の議事録は保持します。CLI / MCP では保存後の設定を `expected_config` に渡し、新しい `request_id` と `force=false` で再生成します。
 
 ### gaia-library との接続（任意）
 
@@ -302,7 +305,7 @@ uv run narumi tool list_meetings --json '{"limit": 5}'    # 秘密情報を含�
 
 接続先はデータルート内の `runtime/server/bootstrap.json` から取得します。`--server-url` または `NARUMI_SERVER_URL` を指定する場合も、起動情報と一致する数値 loopback の HTTPS URL が必要です。Keychain のトークンで認証する TLS 接続を使い、証明書・サーバー識別情報・契約メジャー版を確認してから操作を送ります。常駐サーバーとの全通信で環境プロキシとリダイレクトを使いません。
 
-自動で in-process 実行へ切り替えるのは、起動情報がなく、接続先も明示していない場合の一部のローカル操作だけです。録画・権限設定・プロバイダ関連の 9 ツール・秘密入力を持つツールは常駐サーバー必須です。`--require-server` は常駐接続を必須にし、`--in-process` でもこれらの制約は解除されません。起動情報の不正、証明書・認証エラー、通信断では in-process に切り替えず、実行要求も自動再送しません。
+自動で in-process 実行へ切り替えるのは、起動情報がなく、接続先も明示していない場合の一部のローカル操作だけです。録画・権限設定・プロバイダ関連の 10 ツール・秘密入力を持つツールは常駐サーバー必須です。`--require-server` は常駐接続を必須にし、`--in-process` でもこれらの制約は解除されません。起動情報の不正、証明書・認証エラー、通信断では in-process に切り替えず、実行要求も自動再送しません。
 
 出力は結果 JSON（`--pretty` 既定、`--raw` で 1 行）で、エラーは契約の `error_envelope` を stderr に出し終了コード 2 で終わります。`--data-root PATH`（または `NARUMI_HOME`）は、常駐接続の起動情報と in-process 実行のデータルートを指定します。アプリと同じデータルートを使ってください。
 
@@ -315,7 +318,7 @@ uv run narumi set-provider-connection --provider-id anthropic-api \
 
 権限設定はサーバーが動く Mac 上の操作です。`--action open_settings` は対象のプライバシー設定を開くだけで、許可を自動付与しません。応答が不明になった場合は要求を自動再送せず、`get-server-info --refresh-permissions` で、操作前と同じ `server_instance_id` の `permission_setup_in_progress` と権限の状態を確認します。別サーバーの未処理表示は、元の操作の終了証明にはなりません。この機能は契約版 1.1.0 以降が必要です。
 
-OpenAI 音声認識の選択・再送確認には契約 5.x が必要です。配布アプリは同梱サーバーの契約 5.0.0 と厳密に照合し、製品 CLI は契約メジャー版 5 を要求します。開発用に外部サーバーへ接続する Swift アプリだけは、旧契約 2 / 3 / 4 も各版の対応範囲で許可し、音声認識へは対応を推測しません。通常はアプリ・サーバー・CLI を同じ対応版に揃え、未認証 HTTP へダウングレードしません。
+6プロバイダの接続・モデル検証・生成には契約 6.x が必要です。配布アプリは同梱サーバーの契約 6.0.0 と厳密に照合し、製品 CLI は契約メジャー版 6 を要求します。開発用に外部サーバーへ接続する Swift アプリだけは、旧契約 2 / 3 / 4 / 5 も各版の対応範囲で許可し、新機能への対応を推測しません。通常はアプリ・サーバー・CLI を同じ対応版に揃え、未認証 HTTP へダウングレードしません。
 
 音声認識の選択解除は `set-meeting-config --clear-transcription-model` です。`regenerate` と再生成付き `register_context` は、API 音声認識を選択した場合も確認済みの全設定を `--expected-config` に渡します。不明区間の再送確認は `regenerate` の `--transcription-retry` だけで受け付け、自動処理やコンテキスト登録では再送を許可しません。
 
