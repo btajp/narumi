@@ -186,6 +186,32 @@ def _connect(host: str, port: int, deadline: RequestDeadline) -> socket.socket:
     raise OSError("HTTP connection failed")
 
 
+def _handshake_interruptibly(connection: ssl.SSLSocket, deadline: RequestDeadline) -> None:
+    """Complete TLS without relying on a cross-thread close to wake OpenSSL."""
+    connection.setblocking(False)
+    while True:
+        deadline.remaining()
+        try:
+            connection.do_handshake()
+        except ssl.SSLWantReadError:
+            readers, writers = [connection], []
+        except ssl.SSLWantWriteError:
+            readers, writers = [], [connection]
+        else:
+            break
+        try:
+            select.select(readers, writers, [], deadline.wait_timeout())
+        except (OSError, ValueError):
+            # A concurrent abort may invalidate the descriptor while select
+            # is entering the kernel. Preserve cancel/deadline precedence and
+            # normalize any other readiness failure as a transport error.
+            deadline.remaining()
+            raise OSError("TLS readiness poll failed") from None
+    # HTTPResponse expects a blocking socket. Recompute the timeout so time
+    # spent in TLS remains covered by the same absolute request deadline.
+    connection.settimeout(deadline.remaining())
+
+
 class _TrackedSend:
     def send(self, data) -> None:
         # HTTPConnection.send() normally connects lazily. Complete that step
@@ -257,8 +283,7 @@ class _HTTPSConnection(_TrackedSend, http.client.HTTPSConnection):
             raw, server_hostname=self.host, do_handshake_on_connect=False
         )
         self.deadline.track(self.sock)
-        self.sock.do_handshake()
-        self.deadline.remaining()
+        _handshake_interruptibly(self.sock, self.deadline)
 
 
 class DeadlineHTTPHandler(urllib.request.HTTPHandler):
