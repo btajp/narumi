@@ -4,6 +4,13 @@ narumi（narumi.app / pipeline / server）の変更履歴。最新の版を先�
 `VERSION`・`pipeline/pyproject.toml`・`server/pyproject.toml` と最新見出しの版は常に一致させる
 （`scripts/check-version.sh` が検査し、`scripts/release-app.sh` がリリースノートとして抜粋する）。
 
+## 0.5.2 - 2026-09-02
+
+- GUI アプリの最小 `PATH` でも mlx-whisper が bare `ffmpeg` を解決できるようにし、録画後の文字起こしが失敗する問題を修正
+- 既に失敗した会議も録画データは保持されており、更新後の再生成で復旧可能
+- 契約は 5.0.0 のまま。機能範囲も 0.5.1 から変更なし
+- 実モデルを使った全議事録の実機再処理は、公開後の配布アプリで確認予定
+
 ## 0.5.1 - 2026-09-02
 
 - サーバーの起動中・未接続・録画状態未確認でも、手動確認と定期確認を Sparkle へ渡すよう修正
