@@ -11,11 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from narumi import __version__
-from narumi.errors import AuthenticationRequiredError, InvalidArgumentError
+from narumi.errors import AuthenticationRequiredError, EngineUnavailableError, InvalidArgumentError
 from narumi.providers._io import _open_directory, _open_regular
 from narumi.providers.codex import _policy
 from narumi.providers.codex._rpc import StdioRPC, unavailable
 from narumi.providers.codex._runtime import CodexRuntime, private_environment, write_private_json
+
+_AUTH_TEMPORARY_NAME = re.compile(r"\.auth\.[0-9a-f]{32}\.tmp")
 
 
 def connection_directory(root: Path, connection_id: str) -> Path:
@@ -53,6 +55,11 @@ class CodexSession:
         try:
             _policy.host_preflight()
             executable = self.runtime.require_prepared()
+            # The backend admits only one operation per connection. At this boundary,
+            # any temporary or run belongs to a crashed process. Reclaim only exact,
+            # verified names while the connection operation lease is held.
+            _clear_credential_temporaries(self.credential_directory, self.runtime.root)
+            _clear_orphan_runs(self.connection / "runs", self.runtime.root)
             for path in (
                 self.home,
                 self.codex_home,
@@ -164,7 +171,10 @@ class CodexSession:
                     self.operation.detach(rpc)
             if persist and self._authenticated and not self.operation.should_cancel():
                 if not _copy_credentials(
-                    self.codex_home, self.credential_directory, self.runtime.root
+                    self.codex_home,
+                    self.credential_directory,
+                    self.runtime.root,
+                    report_unknown_install=True,
                 ):
                     raise unavailable("codex_credentials_missing")
         finally:
@@ -172,7 +182,13 @@ class CodexSession:
                 shutil.rmtree(self.run_directory)
 
 
-def _copy_credentials(source: Path, destination: Path, root: Path) -> bool:
+def _copy_credentials(
+    source: Path,
+    destination: Path,
+    root: Path,
+    *,
+    report_unknown_install: bool = False,
+) -> bool:
     """Copy only the official file-store credential as opaque private bytes.
 
     The persistent connection state is never CODEX_HOME for a child. Installation
@@ -197,6 +213,7 @@ def _copy_credentials(source: Path, destination: Path, root: Path) -> bool:
         os.close(source_directory)
     directory = _open_directory(destination, trusted_root=root)
     temporary = f".auth.{uuid.uuid4().hex}.tmp"
+    installed = False
     try:
         try:
             previous = _open_regular(directory, "auth.json", os.O_RDONLY)
@@ -211,8 +228,13 @@ def _copy_credentials(source: Path, destination: Path, root: Path) -> bool:
             os.fsync(stream.fileno())
         del contents
         os.replace(temporary, "auth.json", src_dir_fd=directory, dst_dir_fd=directory)
+        installed = True
         os.fsync(directory)
         return True
+    except Exception:
+        if installed and report_unknown_install:
+            raise unavailable("codex_credential_install_outcome_unknown") from None
+        raise
     finally:
         try:
             os.unlink(temporary, dir_fd=directory)
@@ -225,6 +247,7 @@ def clear_credentials(root: Path, connection_id: str) -> None:
     """Delete only this connection's official file-store credential, without startup."""
     connection = connection_directory(root, connection_id)
     state = connection / "state"
+    _clear_credential_temporaries(state, root)
     try:
         os.lstat(state)
     except FileNotFoundError:
@@ -243,6 +266,96 @@ def clear_credentials(root: Path, connection_id: str) -> None:
         finally:
             os.close(directory)
     _clear_orphan_runs(connection / "runs", root)
+    _require_credentials_cleared(connection, root)
+
+
+def recover_connection_artifacts(root: Path, connection_id: str) -> None:
+    """Reclaim crash-only copies for one registered connection under the server lease."""
+    connection = connection_directory(root, connection_id)
+    _clear_credential_temporaries(connection / "state", root)
+    _clear_orphan_runs(connection / "runs", root)
+
+
+def _require_credentials_cleared(connection: Path, root: Path) -> None:
+    """Verify that neither persistent nor short-lived credential copies remain."""
+    state = connection / "state"
+    try:
+        os.lstat(state)
+    except FileNotFoundError:
+        pass
+    else:
+        directory = _open_directory(state, trusted_root=root)
+        try:
+            if any(_AUTH_TEMPORARY_NAME.fullmatch(name) for name in os.listdir(directory)):
+                raise unavailable("codex_credential_cleanup_unverified")
+            try:
+                credential = _open_regular(directory, "auth.json", os.O_RDONLY)
+            except FileNotFoundError:
+                pass
+            else:
+                os.close(credential)
+                raise unavailable("codex_credential_cleanup_unverified")
+        finally:
+            os.close(directory)
+    runs = connection / "runs"
+    try:
+        os.lstat(runs)
+    except FileNotFoundError:
+        return
+    directory = _open_directory(runs, trusted_root=root)
+    try:
+        if os.listdir(directory):
+            raise unavailable("codex_session_cleanup_unverified")
+    finally:
+        os.close(directory)
+
+
+def _clear_credential_temporaries(state: Path, root: Path) -> None:
+    """Reclaim exact interrupted credential writes under the connection lease."""
+    try:
+        os.lstat(state)
+    except FileNotFoundError:
+        return
+    directory = _open_directory(state, trusted_root=root)
+    removed = False
+    try:
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            raise unavailable("codex_credential_cleanup_unverified") from None
+        for name in names:
+            if _AUTH_TEMPORARY_NAME.fullmatch(name) is None:
+                continue
+            try:
+                descriptor = _open_regular(directory, name, os.O_RDONLY)
+            except OSError:
+                raise unavailable("codex_credential_cleanup_rejected") from None
+            try:
+                opened = os.fstat(descriptor)
+                current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                if not os.path.samestat(opened, current):
+                    raise unavailable("codex_credential_cleanup_rejected")
+                os.unlink(name, dir_fd=directory)
+                removed = True
+            except EngineUnavailableError:
+                raise
+            except OSError:
+                raise unavailable("codex_credential_cleanup_unverified") from None
+            finally:
+                os.close(descriptor)
+        if removed:
+            try:
+                os.fsync(directory)
+            except OSError:
+                raise unavailable("codex_credential_cleanup_unverified") from None
+        try:
+            remaining = os.listdir(directory)
+        except OSError:
+            raise unavailable("codex_credential_cleanup_unverified") from None
+        if any(_AUTH_TEMPORARY_NAME.fullmatch(name) for name in remaining):
+            raise unavailable("codex_credential_cleanup_unverified")
+    finally:
+        os.close(directory)
 
 
 def _clear_orphan_runs(runs: Path, root: Path) -> None:
@@ -262,5 +375,7 @@ def _clear_orphan_runs(runs: Path, root: Path) -> None:
             else:
                 os.unlink(name, dir_fd=directory)
         os.fsync(directory)
+        if os.listdir(directory):
+            raise unavailable("codex_session_cleanup_unverified")
     finally:
         os.close(directory)

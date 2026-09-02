@@ -124,7 +124,9 @@ def test_openai_key_omission_preserves_and_null_explicitly_clears(http_setup):
         }
     )["connection"]
     assert renamed["revision"] == 2 and renamed["credential_present"] is True
-    assert service.secrets.calls == calls
+    assert service.secrets.calls[: len(calls)] == calls
+    assert len(service.secrets.calls) == len(calls) + 2
+    assert all(call[0] == "get" for call in service.secrets.calls[len(calls) :])
     result = service.test_connection(
         {"connection_id": record["connection_id"], "expected_revision": 2}
     )
@@ -295,18 +297,11 @@ def test_openai_secret_replacement_failure_cannot_fallback_to_another_key(http_s
                 "request_id": "fail-openai-replacement",
             }
         )
-    result = service.test_connection(
-        {"connection_id": first["connection_id"], "expected_revision": 2}
-    )
-    assert result["connected"] is False and result["reason"] == "credential_required"
+    with pytest.raises(BusyError, match="credential recovery"):
+        service.test_connection({"connection_id": first["connection_id"], "expected_revision": 2})
     assert len(service.metadata.calls) == 1
-    assert (
-        service.test_connection({"connection_id": second["connection_id"], "expected_revision": 1})[
-            "connected"
-        ]
-        is True
-    )
-    assert service.metadata.calls[-1][-1] == "second-fixture-key"
+    with pytest.raises(BusyError, match="credential recovery"):
+        service.test_connection({"connection_id": second["connection_id"], "expected_revision": 1})
     assert "fixture-key" not in service.store.path.read_text()
     assert backend.calls == []
 

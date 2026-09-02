@@ -9,11 +9,12 @@ from typing import Any
 from narumi.errors import BusyError, ConfigurationConflictError, NotFoundError
 
 PROVIDERS = {
-    "anthropic-api": "Anthropic API",
-    "claude-agent-sdk": "Claude Agent SDK",
     "codex-app-server": "Codex App Server",
-    "ollama": "Ollama",
+    "claude-agent-sdk": "Claude Agent SDK",
     "openai-api": "OpenAI API",
+    "openai-compatible-api": "OpenAI-compatible API",
+    "anthropic-api": "Anthropic API",
+    "ollama": "Ollama",
 }
 AUTH_METHODS = {
     "anthropic-api": "api_key",
@@ -21,7 +22,11 @@ AUTH_METHODS = {
     "codex-app-server": "chatgpt",
     "ollama": "none",
     "openai-api": "api_key",
+    "openai-compatible-api": "api_key",
 }
+SUPPORTED_AUTH_METHODS = {
+    provider_id: (method,) for provider_id, method in AUTH_METHODS.items()
+} | {"openai-compatible-api": ("api_key", "none")}
 CONNECTION_FIELDS = (
     "connection_id",
     "revision",
@@ -30,6 +35,8 @@ CONNECTION_FIELDS = (
     "enabled",
     "endpoint",
     "auth_method",
+    "api_surface",
+    "chat_max_tokens_field",
     "credential_present",
     "auth_state",
     "catalog_state",
@@ -52,7 +59,12 @@ def timestamp() -> str:
 
 
 def public_connection(record: dict[str, Any]) -> dict[str, Any]:
-    return {key: copy.deepcopy(record[key]) for key in CONNECTION_FIELDS}
+    optional = {"api_surface", "chat_max_tokens_field"}
+    return {
+        key: copy.deepcopy(record[key])
+        for key in CONNECTION_FIELDS
+        if key not in optional or record.get(key) is not None
+    }
 
 
 def connection(document: dict[str, Any], connection_id: str) -> dict[str, Any]:
@@ -67,7 +79,12 @@ def check_revision(record: dict[str, Any], expected: int) -> None:
         raise ConfigurationConflictError("Provider connection changed; refresh before updating")
 
 
-def check_provider_idle(document: dict[str, Any], provider_id: str) -> None:
+def check_provider_idle(
+    document: dict[str, Any],
+    provider_id: str,
+    *,
+    credential_recovery_connection_id: str | None = None,
+) -> None:
     runtime = document["runtimes"].get(provider_id, {})
     setup = runtime.get("active_setup")
     if setup is not None and setup["state"] in ("queued", "running"):
@@ -77,6 +94,10 @@ def check_provider_idle(document: dict[str, Any], provider_id: str) -> None:
     for record in document["connections"].values():
         if record["provider_id"] != provider_id:
             continue
+        if record.get("pending_secret_accounts") and (
+            record["connection_id"] != credential_recovery_connection_id
+        ):
+            raise BusyError("Provider credential recovery is unresolved")
         active = record["active_auth"]
         if active is not None and active["state"] in ("pending", "unknown"):
             raise BusyError("Provider authentication is active or unresolved")

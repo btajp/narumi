@@ -13,9 +13,15 @@ from narumi.errors import (
     InvalidArgumentError,
     ModelUnavailableError,
 )
-from narumi.providers.metadata import anthropic, ollama, openai
+from narumi.providers.metadata import anthropic, ollama, openai, openai_compatible
 from narumi.providers.metadata.endpoints import validate_endpoint
 from narumi.providers.metadata.http import DEFAULT_TIMEOUT, JSONHTTPClient
+from narumi.providers.metadata.openai_compatible_transport import (
+    OpenAICompatibleTransport,
+)
+from narumi.providers.metadata.openai_compatible_transport import (
+    configuration as compatible_configuration,
+)
 from narumi.providers.metadata.validation import (
     check_public_payload,
     invalid_metadata,
@@ -34,10 +40,12 @@ class MetadataClient:
         http: JSONHTTPClient | None = None,
         now: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        resolver: Callable[..., list[tuple]] | None = None,
     ) -> None:
         self._http = http or JSONHTTPClient()
         self._now = now or (lambda: datetime.now(UTC))
         self._monotonic = monotonic
+        self._resolver = resolver
 
     def fetch(self, provider_id: str, endpoint: str, api_key: str | None) -> list[dict[str, Any]]:
         request = self._requester(provider_id, endpoint, api_key)
@@ -48,6 +56,50 @@ class MetadataClient:
         if provider_id == "openai-api":
             return openai.fetch_models(request, fetched_at=fetched_at, now=now)
         return anthropic.fetch_models(request, provider_id=provider_id, fetched_at=fetched_at)
+
+    def fetch_openai_compatible(
+        self,
+        endpoint: str,
+        api_key: str | None,
+        *,
+        auth_method: str,
+        api_surface: str,
+    ) -> list[dict[str, Any]]:
+        """List display-only candidates; a separate paid probe verifies generation."""
+        config = compatible_configuration(
+            endpoint,
+            auth_method=auth_method,
+            api_surface=api_surface,
+            require_chat_max_tokens_field=False,
+        )
+        transport = OpenAICompatibleTransport(
+            http=self._http,
+            monotonic=self._monotonic,
+            **({"resolver": self._resolver} if self._resolver is not None else {}),
+        )
+        deadline = self._monotonic() + DISCOVERY_TIMEOUT
+
+        def request(method: str, route: str, *, payload=None) -> dict[str, Any]:
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                raise invalid_metadata("metadata_timeout")
+            result = transport.request(
+                config,
+                api_key,
+                method,
+                route,
+                payload=payload,
+                timeout=min(DEFAULT_TIMEOUT, remaining),
+            )
+            if self._monotonic() > deadline:
+                raise invalid_metadata("metadata_timeout")
+            result = require_object(result)
+            secrets = (api_key, "Bearer " + api_key) if api_key else ()
+            check_public_payload(result, secrets=secrets)
+            return result
+
+        fetched_at = self._now().astimezone(UTC).isoformat().replace("+00:00", "Z")
+        return openai_compatible.fetch_models(request, fetched_at=fetched_at)
 
     def require_local_ollama_model(
         self, endpoint: str, model: str, *, should_cancel: Callable[[], bool] | None = None

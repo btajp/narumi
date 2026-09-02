@@ -11,6 +11,7 @@ from narumi.errors import (
     BusyError,
     CancelledError,
     EngineUnavailableError,
+    InvalidArgumentError,
     NarumiError,
     NotFoundError,
 )
@@ -82,6 +83,41 @@ def test_auth_start_is_durable_before_work_and_replays_one_acceptance(auth_setup
     assert saved["auth_state"] == "authenticated"
     assert saved["last_generation_state"] == "never"
     load_contracts().validate_output("authenticate_provider_connection", completed)
+
+
+def test_authentication_identifier_check_fails_closed_when_keychain_is_unavailable(auth_setup):
+    service, secrets, metadata, executor = auth_setup
+    record = create_connection(service)
+    before = service.store.path.read_text()
+    secrets.calls.clear()
+    secrets.fail_get = True
+    with pytest.raises(BusyError) as failure:
+        service.authenticate(start_args(record, request_id="safe-authentication-request"))
+    assert failure.value.details == {"reason": "credential_unavailable"}
+    assert "fixture-key" not in str(failure.value)
+    assert service.store.path.read_text() == before
+    assert metadata.calls == []
+    assert executor.pending == []
+
+
+@pytest.mark.parametrize("lookup", ["start_request_id", "operation_id"])
+def test_auth_status_never_reflects_a_request_id_that_now_equals_the_saved_credential(
+    auth_setup, caplog, lookup
+):
+    service, secrets, _, _ = auth_setup
+    record = create_connection(service)
+    request_id = "credential-shaped-authentication-request"
+    operation = service.authenticate(start_args(record, request_id=request_id))["operation"]
+    private = service.store.read()["connections"][record["connection_id"]]
+    secrets.values[private["secret_account"]] = request_id
+    query = {
+        "connection_id": record["connection_id"],
+        lookup: request_id if lookup == "start_request_id" else operation["operation_id"],
+    }
+    with pytest.raises(InvalidArgumentError) as failure:
+        service.auth_status(query)
+    assert request_id not in str(failure.value)
+    assert request_id not in caplog.text
 
 
 def test_restart_pending_auth_is_unknown_and_never_automatically_reissued(auth_setup, tmp_path):
@@ -358,9 +394,274 @@ def test_codex_login_publishes_only_pending_challenge_and_does_not_fetch_models(
     assert saved["revision"] == 1
     assert saved["catalog_state"] == "unfetched"
     assert saved["last_generation_state"] == "never"
-    assert backend.calls == [("authenticate", record["connection_id"])]
+    assert backend.calls == [
+        ("cancel_auth", record["connection_id"]),
+        ("authenticate", record["connection_id"]),
+    ]
     assert backend.authorization_url not in service.store.path.read_text()
     assert secrets.calls == []
+
+
+def test_codex_reauthentication_failure_clears_the_old_credential_first(codex_auth_setup):
+    service, backend, executor, _ = codex_auth_setup
+    record = create_connection(service, provider_id="codex-app-server")
+    first = start_args(record, request_id="initial-codex-login")
+    service.authenticate(first)
+    executor.run_next()
+    assert record["connection_id"] in backend.authenticated
+    backend.error = AuthenticationRequiredError("fixture replacement login rejected")
+
+    second = start_args(record, request_id="replacement-codex-login")
+    accepted = service.authenticate(second)["operation"]
+    assert service.list_connections()["connections"][0]["credential_present"] is True
+    executor.run_next()
+
+    completed = service.authenticate(second)["operation"]
+    saved = service.store.read()["connections"][record["connection_id"]]
+    assert completed["operation_id"] == accepted["operation_id"]
+    assert completed["state"] == "failed"
+    assert completed["reason"] == "credential_rejected"
+    assert saved["credential_present"] is False
+    assert saved["auth_state"] == "failed"
+    assert record["connection_id"] not in backend.authenticated
+    assert backend.calls == [
+        ("cancel_auth", record["connection_id"]),
+        ("authenticate", record["connection_id"]),
+        ("cancel_auth", record["connection_id"]),
+        ("authenticate", record["connection_id"]),
+    ]
+
+
+def test_codex_reauthentication_cleanup_failure_never_starts_a_new_login(
+    codex_auth_setup, monkeypatch
+):
+    service, backend, executor, _ = codex_auth_setup
+    record = create_connection(service, provider_id="codex-app-server")
+    first = start_args(record, request_id="initial-codex-login")
+    service.authenticate(first)
+    executor.run_next()
+    cleanup_targets = []
+
+    def reject_replacement_cleanup(connection_id, *, operation_id=None):
+        cleanup_targets.append(operation_id)
+        return False
+
+    monkeypatch.setattr(backend, "cancel_auth", reject_replacement_cleanup)
+    second = start_args(record, request_id="blocked-replacement-codex-login")
+    accepted = service.authenticate(second)["operation"]
+    executor.run_next()
+
+    completed = service.authenticate(second)["operation"]
+    saved = service.store.read()["connections"][record["connection_id"]]
+    assert completed["operation_id"] == accepted["operation_id"]
+    assert completed["state"] == "unknown"
+    assert saved["credential_present"] is True
+    assert saved["auth_state"] == "unknown"
+    assert saved["active_auth"]["operation_id"] == accepted["operation_id"]
+    assert record["connection_id"] in backend.authenticated
+    assert cleanup_targets == [accepted["operation_id"]]
+    assert backend.calls == [
+        ("cancel_auth", record["connection_id"]),
+        ("authenticate", record["connection_id"]),
+    ]
+
+
+@pytest.mark.parametrize("cleanup_verified", [True, False])
+def test_codex_ambiguous_credential_install_uses_verified_cleanup_outcome(
+    codex_auth_setup, monkeypatch, cleanup_verified
+):
+    service, backend, executor, _ = codex_auth_setup
+    record = create_connection(service, provider_id="codex-app-server")
+    args = start_args(record, request_id="ambiguous-codex-credential-install")
+    operation = service.authenticate(args)["operation"]
+    original_authenticate = backend.authenticate
+    original_cancel = backend.cancel_auth
+    cleanup_targets = []
+
+    def ambiguous_install(*auth_args, **auth_kwargs):
+        original_authenticate(*auth_args, **auth_kwargs)
+        raise EngineUnavailableError(
+            "fixture credential install outcome unknown",
+            details={"reason": "codex_credential_install_outcome_unknown"},
+        )
+
+    def tracked_cleanup(connection_id, *, operation_id=None):
+        cleanup_targets.append(operation_id)
+        if len(cleanup_targets) == 1 or cleanup_verified:
+            return original_cancel(connection_id, operation_id=operation_id)
+        return False
+
+    monkeypatch.setattr(backend, "authenticate", ambiguous_install)
+    monkeypatch.setattr(backend, "cancel_auth", tracked_cleanup)
+    executor.run_next()
+
+    completed = service.auth_status(
+        {"connection_id": record["connection_id"], "operation_id": operation["operation_id"]}
+    )["operation"]
+    saved = service.store.read()["connections"][record["connection_id"]]
+    assert cleanup_targets == [operation["operation_id"], operation["operation_id"]]
+    if cleanup_verified:
+        assert completed["state"] == "failed"
+        assert saved["auth_state"] == "unconfigured"
+        assert saved["credential_present"] is False
+        assert saved["active_auth"] is None
+        assert record["connection_id"] not in backend.authenticated
+    else:
+        assert completed["state"] == "unknown"
+        assert saved["auth_state"] == "unknown"
+        assert saved["credential_present"] is True
+        assert saved["active_auth"]["operation_id"] == operation["operation_id"]
+        assert record["connection_id"] in backend.authenticated
+
+
+@pytest.mark.parametrize("commit_installed", [False, True])
+@pytest.mark.parametrize("failure_kind", ["generic", "cancelled", "authentication"])
+def test_codex_login_final_commit_failure_clears_credential_before_marking_failed(
+    codex_auth_setup, monkeypatch, commit_installed, failure_kind
+):
+    service, backend, executor, _ = codex_auth_setup
+    record = create_connection(service, provider_id="codex-app-server")
+    args = start_args(record, request_id="codex-login-final-commit-failure")
+    operation = service.authenticate(args)["operation"]
+    original_commit = service.store.commit
+    original_cancel = backend.cancel_auth
+    cleanup_targets = []
+    rejected = False
+
+    def verified_cleanup(connection_id, *, operation_id=None):
+        cleanup_targets.append(operation_id)
+        backend.authenticated.discard(connection_id)
+        return original_cancel(connection_id, operation_id=operation_id)
+
+    def reject_final_success(document):
+        nonlocal rejected
+        current = document["auth_operations"].get(operation["operation_id"])
+        if not rejected and current is not None and current["state"] == "succeeded":
+            rejected = True
+            if commit_installed:
+                original_commit(document)
+            if failure_kind == "cancelled":
+                raise CancelledError("fixture final registry commit cancelled")
+            if failure_kind == "authentication":
+                raise AuthenticationRequiredError("fixture final registry commit rejected")
+            raise NarumiError("fixture final registry commit failed")
+        return original_commit(document)
+
+    monkeypatch.setattr(service.store, "commit", reject_final_success)
+    monkeypatch.setattr(backend, "cancel_auth", verified_cleanup)
+    executor.run_next()
+
+    saved = service.store.read()["connections"][record["connection_id"]]
+    completed = service.auth_status(
+        {"connection_id": record["connection_id"], "operation_id": operation["operation_id"]}
+    )["operation"]
+    assert rejected
+    assert completed["state"] == "failed"
+    assert completed["reason"] == "authentication_verification_unavailable"
+    assert saved["credential_present"] is False
+    assert saved["auth_state"] == "unconfigured"
+    assert saved["active_auth"] is None
+    assert record["connection_id"] not in backend.authenticated
+    assert cleanup_targets == [operation["operation_id"], operation["operation_id"]]
+    assert backend.calls == [
+        ("cancel_auth", record["connection_id"]),
+        ("authenticate", record["connection_id"]),
+        ("cancel_auth", record["connection_id"]),
+    ]
+
+
+@pytest.mark.parametrize("commit_installed", [False, True])
+def test_codex_login_final_commit_and_cleanup_failure_remain_unknown(
+    codex_auth_setup, monkeypatch, commit_installed
+):
+    service, backend, executor, _ = codex_auth_setup
+    record = create_connection(service, provider_id="codex-app-server")
+    args = start_args(record, request_id="codex-login-unresolved-final-commit")
+    operation = service.authenticate(args)["operation"]
+    original_commit = service.store.commit
+    original_cancel = backend.cancel_auth
+    rejected = False
+
+    def reject_final_success(document):
+        nonlocal rejected
+        current = document["auth_operations"].get(operation["operation_id"])
+        if not rejected and current is not None and current["state"] == "succeeded":
+            rejected = True
+            if commit_installed:
+                original_commit(document)
+            raise NarumiError("fixture final registry commit failed")
+        return original_commit(document)
+
+    cleanup_targets = []
+
+    def reject_cleanup(connection_id, *, operation_id=None):
+        cleanup_targets.append(operation_id)
+        if len(cleanup_targets) == 1:
+            return original_cancel(connection_id, operation_id=operation_id)
+        backend.calls.append(("cancel_auth", connection_id))
+        raise RuntimeError("fixture credential cleanup failed")
+
+    monkeypatch.setattr(service.store, "commit", reject_final_success)
+    monkeypatch.setattr(backend, "cancel_auth", reject_cleanup)
+    executor.run_next()
+
+    saved = service.store.read()["connections"][record["connection_id"]]
+    completed = service.auth_status(
+        {"connection_id": record["connection_id"], "operation_id": operation["operation_id"]}
+    )["operation"]
+    assert rejected
+    assert completed["state"] == "unknown"
+    assert completed["reason"] == "authentication_operation_interrupted"
+    assert saved["credential_present"] is True
+    assert saved["auth_state"] == "unknown"
+    assert saved["active_auth"]["operation_id"] == operation["operation_id"]
+    assert saved["active_auth"]["state"] == "unknown"
+    assert record["connection_id"] in backend.authenticated
+    assert cleanup_targets == [operation["operation_id"], operation["operation_id"]]
+    assert backend.calls == [
+        ("cancel_auth", record["connection_id"]),
+        ("authenticate", record["connection_id"]),
+        ("cancel_auth", record["connection_id"]),
+    ]
+
+
+def test_old_login_commit_failure_never_cleans_a_new_active_login(codex_auth_setup):
+    service, backend, executor, _ = codex_auth_setup
+    record = create_connection(service, provider_id="codex-app-server")
+    first_args = start_args(record, request_id="first-codex-login")
+    first = service.authenticate(first_args)["operation"]
+    executor.run_next()
+    second_args = start_args(record, request_id="new-codex-login")
+    second = service.authenticate(second_args)["operation"]
+    observed = []
+
+    def while_new_login_is_active(_connection_id, _cancelled):
+        service.auth.codex._resolve_login_commit_failure(first["operation_id"], record)
+        document = service.store.read()
+        saved = document["connections"][record["connection_id"]]
+        observed.append(
+            (
+                document["auth_operations"][first["operation_id"]]["state"],
+                saved["active_auth"]["operation_id"],
+                saved["auth_state"],
+            )
+        )
+
+    backend.on_auth = while_new_login_is_active
+    executor.run_next()
+
+    assert observed == [("unknown", second["operation_id"], "authenticating")]
+    assert service.authenticate(second_args)["operation"]["state"] == "succeeded"
+    saved = service.store.read()["connections"][record["connection_id"]]
+    assert saved["auth_state"] == "authenticated"
+    assert saved["active_auth"] is None
+    assert record["connection_id"] in backend.authenticated
+    assert backend.calls == [
+        ("cancel_auth", record["connection_id"]),
+        ("authenticate", record["connection_id"]),
+        ("cancel_auth", record["connection_id"]),
+        ("authenticate", record["connection_id"]),
+    ]
 
 
 def test_codex_auth_requires_preparation_before_scheduling(tmp_path):
@@ -675,6 +976,23 @@ def test_late_codex_cancellation_targets_only_its_original_operation(codex_auth_
             assert cancel_entered.wait(3)
             executor.run_next()  # The cancelled old worker releases its own store lease.
             if action == "disable":
+                with pytest.raises(BusyError):
+                    service.set_connection(
+                        {
+                            "connection_id": record["connection_id"],
+                            "expected_revision": 2,
+                            "enabled": True,
+                            "request_id": "blocked-reenable-during-cancellation",
+                        }
+                    )
+            else:
+                with pytest.raises(BusyError):
+                    service.authenticate(
+                        start_args(record, request_id="blocked-login-during-cancellation")
+                    )
+            release_cancel.set()
+            cancellation.result(timeout=3)
+            if action == "disable":
                 record = service.set_connection(
                     {
                         "connection_id": record["connection_id"],
@@ -687,26 +1005,91 @@ def test_late_codex_cancellation_targets_only_its_original_operation(codex_auth_
             second = service.authenticate(next_args)["operation"]
             next_login = pool.submit(executor.run_next)
             assert next_login_entered.wait(3)
-            release_cancel.set()
-            cancellation.result(timeout=3)
             release_login.set()
             next_login.result(timeout=3)
         finally:
             release_cancel.set()
             release_login.set()
-    assert backend.cancel_targets == [first["operation_id"]]
+    assert backend.cancel_targets == [first["operation_id"], second["operation_id"]]
     assert second["operation_id"] not in backend.cancelled_operations
     assert service.authenticate(next_args)["operation"]["state"] == "succeeded"
 
 
+@pytest.mark.parametrize("action", ["cancel", "disable"])
+def test_codex_cancel_failure_requires_a_new_explicit_cleanup_request(codex_auth_setup, action):
+    service, _, _, _ = codex_auth_setup
+
+    class FailingCancellationBackend(FakeCodexBackend):
+        def __init__(self):
+            super().__init__()
+            self.fail_cancellation = True
+            self.cancel_targets = []
+
+        def cancel_auth(self, connection_id, *, operation_id=None):
+            self.cancel_targets.append((connection_id, operation_id))
+            if self.fail_cancellation:
+                raise RuntimeError("fixture private cancellation failure")
+
+    backend = FailingCancellationBackend()
+    service._codex_backend = backend
+    record = create_connection(service, provider_id="codex-app-server")
+    operation = service.authenticate(start_args(record))["operation"]
+    if action == "cancel":
+        args = {
+            "connection_id": record["connection_id"],
+            "expected_revision": 1,
+            "action": "cancel",
+            "operation_id": operation["operation_id"],
+            "request_id": "failed-explicit-codex-cancel",
+        }
+    else:
+        args = {
+            "connection_id": record["connection_id"],
+            "expected_revision": 1,
+            "enabled": False,
+            "request_id": "failed-codex-disable-cancel",
+        }
+    with pytest.raises(NarumiError, match="cancellation is unresolved"):
+        (service.authenticate(args) if action == "cancel" else service.set_connection(args))
+    document = service.store.read()
+    assert document["requests"][args["request_id"]]["state"] == "unknown"
+    assert document["requests"][args["request_id"]]["response"] is None
+    assert document["auth_operations"][operation["operation_id"]]["state"] == "unknown"
+    assert document["connections"][record["connection_id"]]["active_auth"]["state"] == "unknown"
+    with pytest.raises(NarumiError, match="original provider change is unresolved"):
+        (service.authenticate(args) if action == "cancel" else service.set_connection(args))
+    assert len(backend.cancel_targets) == 1
+
+    backend.fail_cancellation = False
+    if action == "cancel":
+        repaired = service.authenticate({**args, "request_id": "explicit-codex-cancel-repair"})[
+            "operation"
+        ]
+        assert repaired["state"] == "cancelled"
+    else:
+        repaired = service.set_connection(
+            {
+                **args,
+                "expected_revision": 2,
+                "request_id": "explicit-codex-disable-repair",
+            }
+        )["connection"]
+        assert repaired["enabled"] is False
+        assert repaired["revision"] == 3
+    assert len(backend.cancel_targets) == 2
+    saved = service.store.read()["connections"][record["connection_id"]]
+    assert saved["active_auth"] is None
+
+
 @pytest.mark.parametrize("instance_id", [INSTANCE_ONE, INSTANCE_TWO])
 def test_nonowner_context_never_recovers_or_interrupts_resident_auth(auth_setup, instance_id):
-    owner, _, metadata, executor = auth_setup
+    owner, secrets, metadata, executor = auth_setup
     record = create_connection(owner)
     args = start_args(record)
     accepted = owner.authenticate(args)
     before = owner.store.path.read_bytes()
-    backend, secrets = FakeCodexBackend(), MemorySecretStore()
+    backend = FakeCodexBackend()
+    secrets.calls.clear()
     observer = ProviderService(
         owner.root,
         server_instance_id=instance_id,
@@ -727,7 +1110,12 @@ def test_nonowner_context_never_recovers_or_interrupts_resident_auth(auth_setup,
     )
     observer.close()
     assert owner.store.path.read_bytes() == before
-    assert secrets.calls == []
+    private = owner.store.read()["connections"][record["connection_id"]]
+    assert secrets.calls == [
+        ("get", f"providers:{owner.namespace}:request-hmac"),
+        ("get", private["secret_account"]),
+        ("get", private["secret_account"]),
+    ]
     assert backend.calls == [("close",)]
     executor.run_next()
     assert owner.authenticate(args)["operation"]["state"] == "succeeded"

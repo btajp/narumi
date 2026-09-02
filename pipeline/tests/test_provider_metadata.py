@@ -124,10 +124,42 @@ def test_anthropic_discovery_intersects_adapter_capabilities_and_contract():
 def test_missing_capabilities_and_limits_are_not_invented():
     metadata, _ = client(page(api_model(capabilities=None, max_tokens=None, max_input_tokens=None)))
     model = metadata.fetch("anthropic-api", API, KEY)[0]
-    assert model["availability"] == "unverified"
-    assert model["reason"] == "model_capabilities_unavailable"
+    assert model["availability"] == "available"
+    assert model["reason"] is None
     assert model["input_modalities"] == ["text"]
     assert model["context_window"] is model["max_output_tokens"] is None
+    validate_models([model])
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"capabilities": {}},
+        {"capabilities": {"image_input": {"supported": False}}},
+        {"capabilities": None},
+    ],
+)
+def test_anthropic_models_api_identity_is_enough_for_text_messages(changes):
+    raw = api_model(**changes)
+    raw.pop("max_input_tokens")
+    raw.pop("max_tokens")
+    metadata, _ = client(page(raw))
+    model = metadata.fetch("anthropic-api", API, KEY)[0]
+    assert model["availability"] == "available"
+    assert model["reason"] is None
+    assert model["input_modalities"] == ["text"]
+    assert model["context_window"] is model["max_output_tokens"] is None
+    validate_models([model])
+
+
+def test_anthropic_models_api_does_not_require_capabilities_field():
+    raw = api_model()
+    del raw["capabilities"]
+    metadata, _ = client(page(raw))
+    model = metadata.fetch("anthropic-api", API, KEY)[0]
+    assert model["availability"] == "available"
+    assert model["reason"] is None
+    assert model["input_modalities"] == ["text"]
     validate_models([model])
 
 
@@ -201,6 +233,8 @@ def test_pagination_is_explicit_bounded_and_deduplicated():
         {"data": [], "has_more": True, "last_id": "not-present"},
         page(api_model(), api_model()),
         page(api_model(max_tokens=True)),
+        page(api_model(capabilities=[])),
+        page(api_model(capabilities={"image_input": []})),
         page(api_model(capabilities={"image_input": {"supported": "yes"}})),
         page(api_model(id="bad\nidentifier")),
         page(api_model(display_name="sk-ant-fixture-secret")),

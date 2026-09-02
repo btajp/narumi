@@ -7,6 +7,7 @@ provider lease. Secret values are obtained only for that call, never kept in pro
 from __future__ import annotations
 
 import copy
+import ipaddress
 import re
 import uuid
 from collections.abc import Callable, Iterator
@@ -15,6 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
@@ -37,13 +39,25 @@ from narumi.llm.registry import select_provider
 from narumi.model_selection import MINUTES_PARAMETER_NAMES, ModelSelection
 from narumi.models import MeetingConfig
 from narumi.providers._common import check_provider_idle, check_revision, connection
+from narumi.providers.catalog import (
+    expected_runtime_evidence,
+    model_verification_evidence,
+    returned_runtime_matches,
+)
 from narumi.providers.metadata import validate_endpoint
 
 if TYPE_CHECKING:
     from narumi.providers.service import ProviderService
 
 PROVIDER_ID = "codex-app-server"
-MINUTES_MODEL_PROVIDERS = ("codex-app-server", "anthropic-api", "ollama", "openai-api")
+MINUTES_MODEL_PROVIDERS = (
+    "codex-app-server",
+    "claude-agent-sdk",
+    "openai-api",
+    "openai-compatible-api",
+    "anthropic-api",
+    "ollama",
+)
 ADAPTER_VERSION = "1"
 OUTCOME_UNKNOWN = "provider_generation_outcome_unknown"
 LEGACY_OUTCOME_UNKNOWN = "codex_generation_outcome_unknown"
@@ -64,7 +78,7 @@ USAGE_FIELDS = frozenset(
 
 @dataclass(frozen=True)
 class _ProviderSpec:
-    auth_method: str
+    auth_methods: tuple[str, ...]
     cost_class: CostClass
     destination: str
     source: str
@@ -74,10 +88,14 @@ class _ProviderSpec:
 
 
 _PROVIDERS = {
-    "codex-app-server": _ProviderSpec("chatgpt", "subscription", "openai", "runtime"),
-    "openai-api": _ProviderSpec("api_key", "api", "openai", "provider_api"),
-    "anthropic-api": _ProviderSpec("api_key", "api", "anthropic", "provider_api"),
-    "ollama": _ProviderSpec("none", "local", "local", "runtime"),
+    "codex-app-server": _ProviderSpec(("chatgpt",), "subscription", "openai", "runtime"),
+    "claude-agent-sdk": _ProviderSpec(("api_key",), "api", "anthropic", "provider_api"),
+    "openai-api": _ProviderSpec(("api_key",), "api", "openai", "provider_api"),
+    "openai-compatible-api": _ProviderSpec(
+        ("api_key", "none"), "api", "configured-openai-compatible-api", "provider_api"
+    ),
+    "anthropic-api": _ProviderSpec(("api_key",), "api", "anthropic", "provider_api"),
+    "ollama": _ProviderSpec(("none",), "local", "local", "runtime"),
 }
 
 
@@ -91,7 +109,11 @@ class _Selection:
     model: dict[str, Any]
     parameters: dict[str, Any]
     endpoint: str
+    auth_method: str
     secret_account: str | None
+    api_surface: str | None
+    chat_max_tokens_field: str | None
+    expected_runtime: dict[str, str] | None
 
 
 class MinutesResolver:
@@ -156,6 +178,8 @@ class MinutesResolver:
             raise ConfigurationConflictError("The minutes connection is disabled")
         check_revision(record, selected.connection_revision)
         endpoint = validate_endpoint(selected.provider, record["endpoint"])
+        if selected.provider == "openai-compatible-api":
+            _validate_openai_compatible_settings(record, endpoint)
         secret_account = self._authentication(record, spec)
         runtime = self.service.runtime._current(selected.provider, document)
         if runtime["state"] != "ready" or not runtime.get("version"):
@@ -184,6 +208,13 @@ class MinutesResolver:
             or model.get("billing", {}).get("kind") != spec.cost_class
         ):
             raise ModelUnavailableError("The selected model is not verified for text generation")
+        verification = None
+        if selected.provider in {"claude-agent-sdk", "openai-compatible-api"}:
+            verification = model_verification_evidence(catalog, model, runtime["catalog_revision"])
+            if verification is None:
+                raise ModelUnavailableError(
+                    "Run the explicit generation probe before selecting this model"
+                )
         _check_availability(model)
         context = _positive_capability(model, "context_window")
         output_limit = _positive_capability(model, "max_output_tokens")
@@ -195,6 +226,7 @@ class MinutesResolver:
         resources = runtime.get("resources", [])
         if len(resources) != 1 or not resources[0].get("sha256"):
             raise EngineUnavailableError("The provider runtime fingerprint is unavailable")
+        expected_runtime = expected_runtime_evidence(self.service, selected.provider, runtime)
         params = {
             "minutes_model": selected.model_dump(mode="json"),
             "model_id": selected.model_id,
@@ -223,6 +255,12 @@ class MinutesResolver:
             if model_capabilities(selected.model_id) is None:
                 raise ModelUnavailableError("The selected OpenAI model's capabilities are unknown")
             params["capability_table_version"] = CAPABILITY_TABLE_VERSION
+        if selected.provider == "openai-compatible-api":
+            params["api_surface"] = record.get("api_surface")
+            params["chat_max_tokens_field"] = record.get("chat_max_tokens_field")
+        if verification is not None:
+            params["model_verification_sha256"] = verification["fingerprint"]
+            params["model_verified_at"] = verification["verified_at"]
         profile = CapabilityProfile(
             vision=False,
             # Zero is the chunker's unknown-capacity sentinel, not a model capability.
@@ -241,23 +279,32 @@ class MinutesResolver:
             copy.deepcopy(model),
             parameters,
             endpoint,
+            record["auth_method"],
             secret_account,
+            record.get("api_surface"),
+            record.get("chat_max_tokens_field"),
+            expected_runtime,
         )
 
     def _authentication(self, record: dict[str, Any], spec: _ProviderSpec) -> str | None:
-        if record["auth_method"] != spec.auth_method or record["auth_state"] != "authenticated":
+        if (
+            record["auth_method"] not in spec.auth_methods
+            or record["auth_state"] != "authenticated"
+        ):
             raise AuthenticationRequiredError("The minutes connection must be verified again")
         if record.get("active_auth") is not None:
             raise AuthenticationRequiredError(
                 "Provider authentication must finish before generation"
             )
-        if spec.auth_method == "none":
+        if record["auth_method"] == "none":
             if record["credential_present"] or record.get("secret_account") is not None:
-                raise AuthenticationRequiredError("Local minutes cannot use API credentials")
+                raise AuthenticationRequiredError(
+                    "This unauthenticated connection cannot use API credentials"
+                )
             return None
         if record["credential_present"] is not True:
             raise AuthenticationRequiredError("The minutes connection requires authentication")
-        if spec.auth_method == "chatgpt":
+        if record["auth_method"] == "chatgpt":
             return None
         account = record.get("secret_account")
         prefix = f"providers:{self.service.namespace}:{record['connection_id']}:"
@@ -284,7 +331,7 @@ class MinutesResolver:
         effort = schema["properties"].get("reasoning_effort", {})
         if "reasoning_effort" not in result and "default" in effort:
             result["reasoning_effort"] = effort["default"]
-        if provider_id != PROVIDER_ID:
+        if provider_id not in {PROVIDER_ID, "claude-agent-sdk"}:
             known_max = _positive_capability(model, "max_output_tokens")
             result.setdefault(
                 "max_tokens", min(DEFAULT_OUTPUT_TOKENS, known_max or DEFAULT_OUTPUT_TOKENS)
@@ -315,6 +362,30 @@ def _positive_capability(model: dict[str, Any], field: str) -> int | None:
     if value is not None and (type(value) is not int or value <= 0):
         raise ModelUnavailableError("The model's capacity has not been verified")
     return value
+
+
+def _validate_openai_compatible_settings(record: dict[str, Any], endpoint: str) -> None:
+    surface = record.get("api_surface")
+    token_field = record.get("chat_max_tokens_field")
+    if surface == "responses":
+        if token_field is not None:
+            raise ConfigurationConflictError("The compatible API settings are inconsistent")
+    elif surface == "chat_completions":
+        if token_field not in {"max_tokens", "max_completion_tokens"}:
+            raise ConfigurationConflictError("The compatible API settings are incomplete")
+    else:
+        raise ConfigurationConflictError("The compatible API surface is not configured")
+    if record.get("auth_method") != "none":
+        return
+    host = urlsplit(endpoint).hostname
+    try:
+        address = ipaddress.ip_address(host or "")
+    except ValueError:
+        address = None
+    if address is None or not address.is_loopback:
+        raise AuthenticationRequiredError(
+            "Unauthenticated compatible APIs are restricted to numeric loopback"
+        )
 
 
 def _check_availability(model: dict[str, Any]) -> None:
@@ -423,6 +494,10 @@ class _ConnectedMinutesProvider:
                     system=system,
                     should_cancel=self._cancelled,
                 )
+            elif self.name == "claude-agent-sdk":
+                result = self._claude_complete(current, prompt, system)
+            elif self.name == "openai-compatible-api":
+                result = self._openai_compatible_complete(current, prompt, system)
             else:
                 result = self._http_complete(current, prompt, system)
             if not isinstance(result, str) or not result.strip():
@@ -457,18 +532,7 @@ class _ConnectedMinutesProvider:
                 raise _safe_error(ErrorCode.ENGINE_UNAVAILABLE, unknown=True) from None
 
     def _http_complete(self, current: _Selection, prompt: str, system: str | None) -> str:
-        credential = None
-        if current.secret_account is not None:
-            try:
-                credential = self.resolver.service.secrets.get(current.secret_account)
-            except Exception:
-                raise AuthenticationRequiredError(
-                    "The selected connection's credential is unavailable"
-                ) from None
-            if not isinstance(credential, str) or not credential:
-                raise AuthenticationRequiredError(
-                    "The selected connection's credential is unavailable"
-                )
+        credential = self._credential(current)
         if self._cancelled():
             raise CancelledError("Minutes generation was cancelled")
         result = self.resolver.service.http_backend.complete(
@@ -498,6 +562,92 @@ class _ConnectedMinutesProvider:
             "usage": copy.deepcopy(usage),
         }
         return text
+
+    def _claude_complete(self, current: _Selection, prompt: str, system: str | None) -> str:
+        credential = self._credential(current)
+        if credential is None:
+            raise AuthenticationRequiredError("The selected connection's credential is unavailable")
+        result = self.resolver.service.claude_backend.complete(
+            current.connection_id,
+            credential,
+            current.model_id,
+            prompt,
+            system=system,
+            expected_runtime=current.expected_runtime,
+            should_cancel=self._cancelled,
+        )
+        return self._validated_backend_result(
+            current,
+            credential,
+            result,
+            exact_model=True,
+            expected_runtime=current.expected_runtime,
+        )
+
+    def _openai_compatible_complete(
+        self, current: _Selection, prompt: str, system: str | None
+    ) -> str:
+        credential = self._credential(current)
+        result = self.resolver.service.openai_compatible_backend.complete(
+            current.endpoint,
+            credential,
+            copy.deepcopy(current.model),
+            dict(current.parameters),
+            prompt,
+            auth_method=current.auth_method,
+            api_surface=current.api_surface,
+            chat_max_tokens_field=current.chat_max_tokens_field,
+            system=system,
+            should_cancel=self._cancelled,
+        )
+        return self._validated_backend_result(current, credential, result, exact_model=True)
+
+    def _credential(self, current: _Selection) -> str | None:
+        if current.secret_account is None:
+            return None
+        try:
+            credential = self.resolver.service.secrets.get(current.secret_account)
+        except Exception:
+            raise AuthenticationRequiredError(
+                "The selected connection's credential is unavailable"
+            ) from None
+        if not isinstance(credential, str) or not credential:
+            raise AuthenticationRequiredError("The selected connection's credential is unavailable")
+        return credential
+
+    def _validated_backend_result(
+        self,
+        current: _Selection,
+        credential: str | None,
+        result: Any,
+        *,
+        exact_model: bool,
+        expected_runtime: dict[str, str] | None = None,
+    ) -> str:
+        text = getattr(result, "text", None)
+        returned_model = getattr(result, "returned_model", None)
+        usage = getattr(result, "usage", None)
+        if (
+            not isinstance(text, str)
+            or not text.strip()
+            or not isinstance(returned_model, str)
+            or not returned_model
+            or len(returned_model) > 256
+            or not returned_model.isprintable()
+            or (exact_model and returned_model != current.model_id)
+            or (credential is not None and (credential in text or credential in returned_model))
+            or not _valid_usage(usage)
+            or (
+                expected_runtime is not None
+                and not returned_runtime_matches(result, expected_runtime)
+            )
+        ):
+            raise _safe_error(ErrorCode.ENGINE_UNAVAILABLE, unknown=True)
+        self.last_completion_metadata = {
+            "returned_model": returned_model,
+            "usage": copy.deepcopy(usage),
+        }
+        return text.strip()
 
 
 def _valid_usage(usage: Any) -> bool:

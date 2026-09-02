@@ -228,6 +228,16 @@ def save_credentials(fixture, connection=CONNECTION, contents=ORIGINAL):
     return path
 
 
+def force_terminated_credential_write(fixture, connection=CONNECTION, marker="a"):
+    """Materialize the only file that SIGKILL can leave before atomic replace."""
+    state = _session.connection_directory(fixture.root, connection) / "state"
+    state.mkdir(parents=True, mode=0o700, exist_ok=True)
+    temporary = state / f".auth.{marker * 32}.tmp"
+    temporary.write_bytes(REFRESHED)
+    temporary.chmod(0o600)
+    return temporary
+
+
 def authenticate(fixture, connection=CONNECTION, *, callback=None, operation_id=None):
     authorizations = []
     receive = callback or (lambda url, code: authorizations.append((url, code)))
@@ -391,6 +401,34 @@ def test_success_without_fresh_credentials_is_not_reported_as_complete(setup, op
     assert_clean(setup)
 
 
+def test_post_replace_directory_sync_failure_reports_unknown_credential_install(setup, monkeypatch):
+    original_replace = _session.os.replace
+    original_fsync = _session.os.fsync
+    installed = False
+
+    def track_replace(source, target, **kwargs):
+        nonlocal installed
+        result = original_replace(source, target, **kwargs)
+        if target == "auth.json":
+            installed = True
+        return result
+
+    def fail_installed_directory_sync(descriptor):
+        if installed and stat.S_ISDIR(_session.os.fstat(descriptor).st_mode):
+            raise OSError("fixture post-replace directory sync failure")
+        return original_fsync(descriptor)
+
+    monkeypatch.setattr(_session.os, "replace", track_replace)
+    monkeypatch.setattr(_session.os, "fsync", fail_installed_directory_sync)
+    with pytest.raises(EngineUnavailableError) as failure:
+        authenticate(setup, operation_id="ambiguous-credential-install")
+
+    assert_private(failure.value, "codex_credential_install_outcome_unknown")
+    saved = _session.connection_directory(setup.root, CONNECTION) / "state/auth.json"
+    assert saved.read_bytes() == REFRESHED
+    assert_clean(setup)
+
+
 @pytest.mark.parametrize(
     "account",
     [
@@ -518,20 +556,150 @@ def test_stale_auth_cancel_cannot_stop_a_new_operation(setup):
         try:
             first, old = start_auth(setup, executor, operation_id="old-auth")
             (old.state / "auth.json").write_bytes(REFRESHED)
-            setup.backend.cancel_auth(CONNECTION, operation_id="not-this-auth")
+            assert setup.backend.cancel_auth(CONNECTION, operation_id="not-this-auth") is False
             assert not old.cancelled.is_set()
-            setup.backend.cancel_auth(CONNECTION, operation_id="old-auth")
+            assert setup.backend.cancel_auth(CONNECTION, operation_id="old-auth") is True
             with pytest.raises(CancelledError):
                 first.result(timeout=2)
-            assert saved.read_bytes() == ORIGINAL and old.closed
+            assert not saved.exists() and old.closed
             second, new = start_auth(setup, executor, operation_id="new-auth")
-            setup.backend.cancel_auth(CONNECTION, operation_id="old-auth")
+            assert setup.backend.cancel_auth(CONNECTION, operation_id="old-auth") is False
             assert not new.cancelled.is_set()
             new.release.set()
             second.result(timeout=2)
         finally:
             setup.backend.close()
     assert saved.read_bytes() == REFRESHED
+    assert_clean(setup)
+
+
+def test_cancel_waits_past_late_credential_copy_and_verifies_cleanup(setup, monkeypatch):
+    copied = threading.Event()
+    original_copy = _session._copy_credentials
+    state = _session.connection_directory(setup.root, CONNECTION) / "state"
+
+    def copy_then_wait_for_cancel(source, destination, root, **kwargs):
+        result = original_copy(source, destination, root, **kwargs)
+        if destination == state and result:
+            copied.set()
+            operation = setup.backend._operations[CONNECTION]
+            assert operation.cancelled.wait(2)
+        return result
+
+    monkeypatch.setattr(_session, "_copy_credentials", copy_then_wait_for_cancel)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            authenticate,
+            setup,
+            operation_id="late-copy-authentication",
+        )
+        assert copied.wait(2)
+        assert (state / "auth.json").exists()
+        assert (
+            setup.backend.cancel_auth(CONNECTION, operation_id="late-copy-authentication") is True
+        )
+        future.result(timeout=2)
+    assert not (state / "auth.json").exists()
+    runs = state.parent / "runs"
+    assert not runs.exists() or list(runs.iterdir()) == []
+    assert_clean(setup)
+
+
+def test_next_session_removes_crash_run_before_copying_credentials(setup):
+    save_credentials(setup)
+    runs = _session.connection_directory(setup.root, CONNECTION) / "runs"
+    orphan = runs / ("d" * 32)
+    orphan.mkdir(parents=True, mode=0o700)
+    (orphan / "auth.json").write_bytes(REFRESHED)
+    setup.backend.list_models(CONNECTION)
+    assert not orphan.exists()
+    assert_clean(setup)
+
+
+def test_next_session_recovers_a_force_terminated_credential_replace(setup):
+    saved = save_credentials(setup)
+    interrupted = force_terminated_credential_write(setup)
+    retained = saved.parent / ".auth.not-a-narumi-temporary.tmp"
+    retained.write_bytes(b"unrelated synthetic state")
+    other = force_terminated_credential_write(setup, OTHER_CONNECTION, marker="b")
+
+    setup.backend.list_models(CONNECTION)
+
+    assert not interrupted.exists()
+    assert retained.read_bytes() == b"unrelated synthetic state"
+    assert other.read_bytes() == REFRESHED
+    assert setup.rpcs[0].initial_state == {"auth.json": ORIGINAL}
+    assert_clean(setup)
+
+
+@pytest.mark.parametrize("action", ["logout", "cancel_auth"])
+def test_explicit_cleanup_removes_force_terminated_credential_replace(setup, action):
+    saved = save_credentials(setup)
+    interrupted = force_terminated_credential_write(setup)
+
+    getattr(setup.backend, action)(CONNECTION)
+
+    assert not saved.exists() and not interrupted.exists()
+    assert setup.rpcs == setup.preflights == setup.prepared == []
+    assert_clean(setup)
+
+
+@pytest.mark.parametrize("link_kind", ["symlink", "hardlink", "world_writable"])
+def test_unsafe_credential_temporary_is_never_followed_or_deleted(setup, tmp_path, link_kind):
+    saved = save_credentials(setup)
+    candidate = saved.parent / f".auth.{'c' * 32}.tmp"
+    target = tmp_path / "unrelated-private-file"
+    target.write_bytes(b"unchanged synthetic contents")
+    if link_kind == "symlink":
+        candidate.symlink_to(target)
+    elif link_kind == "hardlink":
+        candidate.hardlink_to(target)
+    else:
+        candidate.write_bytes(REFRESHED)
+        candidate.chmod(0o666)
+
+    with pytest.raises(EngineUnavailableError) as failure:
+        setup.backend.logout(CONNECTION)
+
+    assert_private(failure.value, "codex_credential_cleanup_rejected")
+    assert saved.read_bytes() == ORIGINAL
+    assert candidate.exists()
+    assert target.read_bytes() == b"unchanged synthetic contents"
+    assert setup.rpcs == setup.preflights == setup.prepared == []
+    assert_clean(setup)
+
+
+def test_credential_temporary_identity_change_is_fail_closed(setup, monkeypatch):
+    saved = save_credentials(setup)
+    interrupted = force_terminated_credential_write(setup)
+    monkeypatch.setattr(_session.os.path, "samestat", lambda _opened, _current: False)
+
+    with pytest.raises(EngineUnavailableError) as failure:
+        setup.backend.logout(CONNECTION)
+
+    assert_private(failure.value, "codex_credential_cleanup_rejected")
+    assert saved.read_bytes() == ORIGINAL and interrupted.read_bytes() == REFRESHED
+    assert setup.rpcs == setup.preflights == setup.prepared == []
+    assert_clean(setup)
+
+
+def test_credential_temporary_unlink_failure_is_fail_closed(setup, monkeypatch):
+    saved = save_credentials(setup)
+    interrupted = force_terminated_credential_write(setup)
+    original_unlink = _session.os.unlink
+
+    def reject_temporary(name, *, dir_fd=None):
+        if name == interrupted.name:
+            raise OSError("fixture unlink failure")
+        return original_unlink(name, dir_fd=dir_fd)
+
+    monkeypatch.setattr(_session.os, "unlink", reject_temporary)
+    with pytest.raises(EngineUnavailableError) as failure:
+        setup.backend.logout(CONNECTION)
+
+    assert_private(failure.value, "codex_credential_cleanup_unverified")
+    assert saved.read_bytes() == ORIGINAL and interrupted.read_bytes() == REFRESHED
+    assert setup.rpcs == setup.preflights == setup.prepared == []
     assert_clean(setup)
 
 

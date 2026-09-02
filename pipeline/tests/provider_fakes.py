@@ -19,15 +19,23 @@ class MemorySecretStore:
     def __init__(self):
         self.values = {}
         self.calls = []
+        self.fail_get = False
+        self.fail_hmac = False
         self.fail_set = False
         self.fail_delete = False
 
     def get(self, account):
         self.calls.append(("get", account))
+        if self.fail_hmac and account.endswith("request-hmac"):
+            raise RuntimeError("unexpected request fingerprint secret")
+        if self.fail_get and not account.endswith("request-hmac"):
+            raise RuntimeError("unexpected upstream secret: fixture-key")
         return self.values.get(account)
 
     def set(self, account, value):
         self.calls.append(("set", account))
+        if self.fail_hmac and account.endswith("request-hmac"):
+            raise RuntimeError("unexpected request fingerprint secret")
         if self.fail_set and not account.endswith("request-hmac"):
             raise RuntimeError("unexpected upstream secret: fixture-key")
         self.values[account] = value
@@ -111,6 +119,7 @@ class FakeRuntimeInspector(RuntimeInspector):
                 "ollama": "local-ollama",
                 "claude-agent-sdk": "claude-sdk",
                 "openai-api": "openai-client",
+                "openai-compatible-api": "openai-compatible-client",
             }[provider_id],
             "display_name": "Installed runtime fixture",
             "kind": "runtime",
@@ -207,6 +216,8 @@ class FakeCodexBackend:
 
     def cancel_auth(self, connection_id, *, operation_id=None):
         self.calls.append(("cancel_auth", connection_id))
+        self.authenticated.discard(connection_id)
+        return True
 
     def complete(
         self,

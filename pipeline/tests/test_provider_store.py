@@ -41,7 +41,8 @@ def test_new_store_has_no_initialization_io_and_returns_independent_defaults(tmp
     assert not root.exists()
     snapshot = store.read()
     assert snapshot == {
-        "version": 1,
+        "version": 2,
+        "request_hmac_generation": None,
         "connections": {},
         "catalogs": {},
         "auth_operations": {},
@@ -66,6 +67,40 @@ def test_metadata_survives_reopening_without_mutable_aliases(tmp_path: Path):
     snapshot["connections"]["conn-example"]["display_name"] = "Unsaved"
     assert reopened.read()["connections"]["conn-example"]["display_name"] == "Example"
     assert mode(store.path) == 0o600
+
+
+def test_pre_marker_registry_is_normalized_without_bootstrapping_hmac(tmp_path: Path):
+    store = initialized(tmp_path)
+    document = json.loads(store.path.read_text())
+    document.pop("request_hmac_generation")
+    store.path.write_text(json.dumps(document))
+
+    reopened = ProviderStore(tmp_path)
+    assert reopened.read()["request_hmac_generation"] is None
+    with reopened.transaction():
+        pass
+    assert json.loads(store.path.read_text())["request_hmac_generation"] is None
+
+
+@pytest.mark.parametrize(
+    "generation",
+    [
+        True,
+        0,
+        2,
+        "1",
+        {"scheme": "sha256", "digest": "a" * 63},
+        {"scheme": "sha512", "digest": "a" * 64},
+    ],
+)
+def test_invalid_request_hmac_generation_is_rejected(tmp_path: Path, generation):
+    store = initialized(tmp_path)
+    document = json.loads(store.path.read_text())
+    document["request_hmac_generation"] = generation
+    store.path.write_text(json.dumps(document))
+
+    with pytest.raises(NarumiError):
+        ProviderStore(tmp_path).read()
 
 
 def test_existing_ancestors_are_unchanged_and_private_modes_are_repaired(tmp_path: Path):

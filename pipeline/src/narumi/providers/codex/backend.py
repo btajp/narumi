@@ -185,17 +185,29 @@ class CodexBackend:
                 session.verify_configuration()
                 return _models.fetch_models(session.call)
 
-    def cancel_auth(self, connection_id: str, *, operation_id: str | None = None) -> None:
+    def cancel_auth(self, connection_id: str, *, operation_id: str | None = None) -> bool:
+        """Return true only when this request performed verified credential cleanup."""
         with self._lock:
             operation = self._operations.get(connection_id)
-            if (
-                operation is None
-                or operation.kind != "auth"
+            if operation is not None and (
+                operation.kind != "auth"
                 or (operation_id is not None and operation.operation_id != operation_id)
             ):
-                return
-        # The captured slot belongs to the old operation even if a new one starts.
-        operation.cancel()
+                # A stale operation ID must never cancel or clean a newer session.
+                return False
+        if operation is not None:
+            # Wait until session teardown has passed the credential-persistence boundary.
+            # A late cancel may race after the pre-copy cancellation check, so signalling
+            # the worker alone is not proof that the persistent auth file is absent.
+            operation.cancel()
+            if not operation.done.wait(_LOGOUT_WAIT):
+                raise BusyError("Codex authentication has not finished cancelling")
+        # Reserve the connection while removing both persistent credentials and any
+        # per-run copies. A concurrent replacement operation must win or lose this slot,
+        # never start between the worker wait and cleanup verification.
+        with self._operation(connection_id, "cancel_cleanup"):
+            clear_credentials(self.runtime.root, connection_id)
+        return True
 
     def logout(self, connection_id: str) -> None:
         with self._lock:

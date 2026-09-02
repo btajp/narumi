@@ -30,6 +30,11 @@ MAX_GENERATION_RESPONSE_BYTES = 8_388_608
 MAX_MULTIPART_REQUEST_BYTES = 24_000_000 + 65_536
 DEFAULT_TIMEOUT = 10.0
 _OUTCOME_RESPONSE_KINDS = {"generation", "transcription"}
+# These standard responses reject malformed input (400/422), authentication or
+# access (401/403/404), the method (405), or the request framing/media
+# (413/415). Provider-defined and less precise 4xx statuses are not proof that
+# a metered operation did not finish.
+_GENERATION_KNOWN_REFUSALS = {400, 401, 403, 404, 405, 413, 415, 422}
 _TRANSCRIPTION_KNOWN_REFUSALS = {400, 401, 403, 413, 429}
 _MULTIPART_CONTENT_TYPE = re.compile(r"multipart/form-data; boundary=([A-Za-z0-9_-]{1,70})\Z")
 _HEADER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]*\Z")
@@ -54,6 +59,11 @@ def _unknown_outcome() -> EngineUnavailableError:
         "Provider generation outcome is unknown",
         details={"reason": "provider_generation_outcome_unknown", "outcome_unknown": True},
     )
+
+
+def generation_status_is_unknown(status: object) -> bool:
+    """Return whether an HTTP status cannot prove that generation was not processed."""
+    return type(status) is not int or status not in _GENERATION_KNOWN_REFUSALS
 
 
 def _cancelled(deadline: RequestDeadline, *, response_kind: str) -> CancelledError:
@@ -169,6 +179,7 @@ class JSONHTTPClient:
         timeout: float = DEFAULT_TIMEOUT,
         response_kind: Literal["metadata", "generation", "transcription"] = "metadata",
         should_cancel: Callable[[], bool] | None = None,
+        resolved_addresses: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         if (
             not math.isfinite(timeout)
@@ -176,6 +187,15 @@ class JSONHTTPClient:
             or response_kind not in {"metadata", "generation", "transcription"}
             or (raw_body is not None and payload is not None)
             or (response_kind == "transcription" and raw_body is None)
+            or (
+                resolved_addresses is not None
+                and (
+                    not isinstance(resolved_addresses, tuple)
+                    or not resolved_addresses
+                    or len(resolved_addresses) > 16
+                    or any(not isinstance(address, str) for address in resolved_addresses)
+                )
+            )
         ):
             raise invalid_metadata("invalid_http_options")
         limit = MAX_RESPONSE_BYTES if response_kind == "metadata" else MAX_GENERATION_RESPONSE_BYTES
@@ -189,6 +209,7 @@ class JSONHTTPClient:
                 request_headers["Content-Type"] = "application/json"
             data = json.dumps(payload).encode("utf-8") if payload is not None else None
         request = urllib.request.Request(url, data=data, headers=request_headers, method=method)
+        request.narumi_resolved_addresses = resolved_addresses
         deadline = RequestDeadline(
             timeout,
             monotonic=self._monotonic,
@@ -297,7 +318,7 @@ class JSONHTTPClient:
             raise AuthenticationRequiredError(
                 "Provider authentication failed", details={"reason": "credential_rejected"}
             ) from None
-        if response_kind == "generation" and not 400 <= status < 500:
+        if response_kind == "generation" and generation_status_is_unknown(status):
             raise _unknown_outcome() from None
         if response_kind == "transcription" and status not in _TRANSCRIPTION_KNOWN_REFUSALS:
             raise _unknown_outcome() from None
