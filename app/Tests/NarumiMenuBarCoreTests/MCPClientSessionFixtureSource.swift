@@ -38,7 +38,8 @@ enum MCPClientSessionFixtureSource {
         private var contractVersion: String {
             switch scenario {
             case "v1": return "1.1.0"
-            case "future_contract": return "6.0.0"
+            case "future_contract": return "7.0.0"
+            case "v6_success": return "6.0.0"
             case "codex_minutes_requests": return "3.0.0"
             case "minutes_requests", "minutes_retry_response_lost": return "4.0.0"
             default: return scenario.hasPrefix("transcription_") ? "5.0.0" : "2.0.0"
@@ -206,6 +207,11 @@ enum MCPClientSessionFixtureSource {
             _ = try await ordinary.callTool(ToolCatalog.listProviders, arguments: [:])
             checks["discovery_before_tools"] = http.allMethods.prefix(2) == ["initialize", "notifications/initialized"]
                 && http.calls == [ToolCatalog.getServerInfo, ToolCatalog.listProviders]
+            let (v6, v6Wire) = client("v6_success")
+            _ = try await v6.callTool(ToolCatalog.listProviders, arguments: [:])
+            checks["v6_authenticated_success"] = v6Wire.calls == [
+                ToolCatalog.getServerInfo, ToolCatalog.listProviders,
+            ]
             for (scenario, key) in [("v1", "v1_rejected"), ("future_contract", "future_contract_rejected"),
                 ("missing_tls", "missing_tls_rejected"),
                 ("false_auth", "false_client_auth_rejected"), ("wrong_instance", "wrong_instance_rejected")] {

@@ -6,6 +6,38 @@ import XCTest
 final class ProviderSettingsSaveRecoveryTests: XCTestCase {
     private let key = "not-a-real-recovery-key"
 
+    func testCompatibleCreateRecoveryPreservesExactSurfaceAndTokenField() throws {
+        var editor = ProviderConnectionSettings(providerID: .openAICompatibleAPI)
+        editor.displayName = "Compatible chat"
+        editor.endpoint = "https://llm.example.com/v1"
+        editor.apiSurface = .chatCompletions
+        editor.chatMaxTokensField = .maxCompletionTokens
+        editor.apiKey = key
+        let original = try XCTUnwrap(editor.takeSaveRequest(requestID: "compatible-create-recovery"))
+        let recovery = ProviderSettingsSaveRecovery(editor: editor, connections: [], request: original)
+        let replay = try XCTUnwrap(recovery.retryRequest(apiKey: key))
+        XCTAssertEqual(replay, original)
+        XCTAssertEqual(replay.apiSurface, .chatCompletions)
+        XCTAssertEqual(replay.chatMaxTokensField, .maxCompletionTokens)
+        XCTAssertNoThrow(try JSONEncoder().encode(replay))
+    }
+
+    func testCompatibleResponseUpdateRecoveryPreservesExplicitTokenFieldNull() throws {
+        let connection = ProviderSettingsFixtures.connection(
+            providerID: .openAICompatibleAPI, apiSurface: .chatCompletions,
+            chatMaxTokensField: .maxTokens)
+        var editor = ProviderConnectionSettings(connection: connection)
+        editor.apiSurface = .responses
+        let original = try XCTUnwrap(editor.takeSaveRequest(requestID: "compatible-update-recovery"))
+        let recovery = ProviderSettingsSaveRecovery(editor: editor, connections: [connection], request: original)
+        let replay = try XCTUnwrap(recovery.retryRequest(apiKey: nil))
+        XCTAssertEqual(replay, original)
+        XCTAssertTrue(replay.clearsChatMaxTokensField)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(replay)) as? [String: Any])
+        XCTAssertTrue(object["chat_max_tokens_field"] is NSNull)
+    }
+
     func testUndeliveredCreateCanBeExplicitlyRetriedWithSameRequestAndReenteredKey() async throws {
         let client = FakeProviderSettingsClient(connections: [], scenario: .init(saveFailure: ProviderSettingsFailure(.transport)))
         let store = ProviderSettingsStore(client: client)

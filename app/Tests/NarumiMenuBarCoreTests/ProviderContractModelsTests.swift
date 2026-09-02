@@ -59,13 +59,21 @@ final class ProviderContractModelsTests: XCTestCase {
         }
     }
 
-    func testAllNineProviderToolResponseContracts() throws {
+    func testAllProviderToolResponseContracts() throws {
         let providers = try all(ListProvidersResponse.self, "list_providers")
-        XCTAssertEqual(providers[0].providers.map(\.providerID), [.anthropicAPI, .claudeAgentSDK, .ollama, .codexAppServer, .openaiAPI])
+        XCTAssertEqual(providers[0].providers.map(\.providerID), ProviderID.connectionPickerOrder)
         XCTAssertEqual(providers[0].providers[1].authMethods, [.apiKey])
         XCTAssertEqual(providers[0].providers[1].runtime.state, .notPrepared)
+        XCTAssertEqual(providers[0].providers[3].authMethods, [.apiKey, .none])
         let connections = try all(ListProviderConnectionsResponse.self, "list_provider_connections")
-        XCTAssertEqual(connections[0].connections[1].authMethod, .none)
+        XCTAssertEqual(
+            connections[0].connections.first { $0.providerID == .ollama }?.authMethod,
+            ProviderAuthMethod.none)
+        let compatible = try XCTUnwrap(connections[0].connections.first {
+            $0.providerID == .openAICompatibleAPI
+        })
+        XCTAssertEqual(compatible.apiSurface, .chatCompletions)
+        XCTAssertEqual(compatible.chatMaxTokensField, .maxCompletionTokens)
         XCTAssertTrue(connections[1].connections.isEmpty)
         let saved = try all(ProviderConnectionResponse.self, "set_provider_connection")
         XCTAssertFalse(saved[0].connection.credentialPresent)
@@ -87,6 +95,11 @@ final class ProviderContractModelsTests: XCTestCase {
         XCTAssertNil(models[0].models[0].billing.inputUSDPerMillionTokens)
         XCTAssertEqual(models[0].models[0].parameterSchema.properties["max_tokens"]?.type, .integer)
         XCTAssertTrue(models[1].models.isEmpty)
+        let verified = try all(VerifyProviderModelResponse.self, "verify_provider_model")[0]
+        XCTAssertEqual(verified.connectionID, "conn-222233334444")
+        XCTAssertEqual(verified.model.availability, .available)
+        XCTAssertEqual(verified.catalogState, .ready)
+        XCTAssertFalse(verified.verifiedAt.isEmpty)
         XCTAssertEqual(
             try all(PrepareProviderRuntimeResponse.self, "prepare_provider_runtime")[0].jobID,
             "job-0123456789ab")
@@ -150,7 +163,8 @@ final class ProviderContractModelsTests: XCTestCase {
         var operation = try XCTUnwrap(first("get_provider_auth_status")["operation"] as? [String: Any])
         operation["authorization_url"] = "https://example.invalid/login"
         XCTAssertThrowsError(try decode(ProviderAuthOperation.self, operation))
-        var connection = try firstArrayItem("list_provider_connections", "connections", index: 1)
+        var connection = try XCTUnwrap((first("list_provider_connections")["connections"] as? [[String: Any]])?
+            .first { $0["provider_id"] as? String == "ollama" })
         connection["credential_present"] = true
         XCTAssertThrowsError(try decode(ProviderConnection.self, connection))
         let descriptor = try firstArrayItem("list_providers", "providers", index: 1)
@@ -162,6 +176,36 @@ final class ProviderContractModelsTests: XCTestCase {
         XCTAssertThrowsError(try decode(ProviderRuntimeResource.self, resource))
         resource["sha256"] = String(repeating: "a", count: 64)
         XCTAssertNoThrow(try decode(ProviderRuntimeResource.self, resource))
+    }
+
+    func testCompatibleConnectionFieldsRemainProviderSpecificAndClosed() throws {
+        var anthropic = try firstArrayItem("list_provider_connections", "connections")
+        anthropic["api_surface"] = "responses"
+        XCTAssertThrowsError(try decode(ProviderConnection.self, anthropic))
+
+        var compatible = try XCTUnwrap((first("list_provider_connections")["connections"] as? [[String: Any]])?
+            .first { $0["provider_id"] as? String == "openai-compatible-api" })
+        compatible.removeValue(forKey: "api_surface")
+        XCTAssertThrowsError(try decode(ProviderConnection.self, compatible))
+        compatible["api_surface"] = "chat_completions"
+        compatible.removeValue(forKey: "chat_max_tokens_field")
+        XCTAssertThrowsError(try decode(ProviderConnection.self, compatible))
+        compatible["api_surface"] = "responses"
+        compatible["chat_max_tokens_field"] = "max_tokens"
+        XCTAssertThrowsError(try decode(ProviderConnection.self, compatible))
+        compatible.removeValue(forKey: "chat_max_tokens_field")
+        compatible["endpoint"] = "http://127.0.0.1:8080/v1"
+        compatible["auth_method"] = "none"
+        compatible["credential_present"] = true
+        XCTAssertThrowsError(try decode(ProviderConnection.self, compatible))
+        compatible["credential_present"] = false
+        XCTAssertNoThrow(try decode(ProviderConnection.self, compatible))
+    }
+
+    func testModelVerificationRequiresVerifiedAtRatherThanCatalogFetchTime() throws {
+        var receipt = try first("verify_provider_model")
+        receipt["fetched_at"] = receipt.removeValue(forKey: "verified_at")
+        XCTAssertThrowsError(try decode(VerifyProviderModelResponse.self, receipt))
     }
 
     func testParameterSchemaRemainsClosedAndBillingUnknownIsNotZero() throws {
@@ -277,6 +321,13 @@ final class ProviderContractModelsTests: XCTestCase {
         let next = try encoded(ListProviderModelsRequest(
             connectionID: "conn-0123456789ab", role: .llm, cursor: "opaque-cursor", refresh: false))
         XCTAssertEqual(next["cursor"] as? String, "opaque-cursor")
+        let verification = try encoded(VerifyProviderModelRequest(
+            connectionID: "conn-222233334444", expectedRevision: 3,
+            modelID: "compatible-model", confirmation: .sendTestPromptAndMayCharge,
+            requestID: "verify-request"))
+        XCTAssertEqual(verification["confirmation"] as? String, "send_test_prompt_and_may_charge")
+        XCTAssertEqual(verification["expected_revision"] as? Int, 3)
+        XCTAssertEqual(verification["request_id"] as? String, "verify-request")
         let setup = try encoded(PrepareProviderRuntimeRequest(
             providerID: .claudeAgentSDK, resourceID: "claude-sdk", expectedCatalogRevision: "bundled-v1",
             action: .update, requestID: "runtime-request"))
@@ -360,6 +411,9 @@ final class ProviderContractModelsTests: XCTestCase {
             XCTAssertThrowsError(try encoded(SetProviderConnectionRequest(
                 providerID: .openaiAPI, displayName: "Meeting API", authMethod: .apiKey, endpoint: endpoint)))
         }
+        XCTAssertThrowsError(try encoded(SetProviderConnectionRequest(
+            providerID: .anthropicAPI, displayName: "Anthropic", authMethod: .apiKey,
+            apiSurface: .responses)))
     }
 
     func testDeviceAuthorizationChallengeIsAcceptedOnlyWhileLoginIsPending() throws {

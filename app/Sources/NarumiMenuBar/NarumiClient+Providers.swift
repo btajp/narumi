@@ -33,6 +33,10 @@ extension NarumiClient: ProviderSettingsClient {
         try await providerCall(ToolCatalog.listProviderModels, request)
     }
 
+    func verifyProviderModel(_ request: VerifyProviderModelRequest) async throws -> VerifyProviderModelResponse {
+        try await providerCall(ToolCatalog.verifyProviderModel, request)
+    }
+
     func prepareProviderRuntime(_ request: PrepareProviderRuntimeRequest) async throws -> PrepareProviderRuntimeResponse {
         try await providerCall(ToolCatalog.prepareProviderRuntime, request)
     }

@@ -31,6 +31,9 @@ public struct SetProviderConnectionRequest: Encodable, Equatable, Sendable,
     public let enabled: Bool?
     public let endpoint: String?
     public let authMethod: ProviderAuthMethod?
+    public let apiSurface: ProviderAPISurface?
+    public let chatMaxTokensField: ProviderChatMaxTokensField?
+    public let clearsChatMaxTokensField: Bool
     public let apiKey: ProviderCredentialUpdate
     public let requestID: String
 
@@ -41,13 +44,17 @@ public struct SetProviderConnectionRequest: Encodable, Equatable, Sendable,
         case displayName = "display_name"
         case enabled, endpoint
         case authMethod = "auth_method"
+        case apiSurface = "api_surface"
+        case chatMaxTokensField = "chat_max_tokens_field"
         case apiKey = "api_key"
         case requestID = "request_id"
     }
 
     public init(
         providerID: ProviderID, displayName: String, authMethod: ProviderAuthMethod,
-        enabled: Bool = true, endpoint: String? = nil, apiKey: ProviderCredentialUpdate = .unchanged,
+        enabled: Bool = true, endpoint: String? = nil, apiSurface: ProviderAPISurface? = nil,
+        chatMaxTokensField: ProviderChatMaxTokensField? = nil,
+        apiKey: ProviderCredentialUpdate = .unchanged,
         requestID: String = UUID().uuidString
     ) {
         connectionID = nil
@@ -57,6 +64,9 @@ public struct SetProviderConnectionRequest: Encodable, Equatable, Sendable,
         self.enabled = enabled
         self.endpoint = endpoint
         self.authMethod = authMethod
+        self.apiSurface = apiSurface
+        self.chatMaxTokensField = chatMaxTokensField
+        clearsChatMaxTokensField = false
         self.apiKey = apiKey
         self.requestID = requestID
     }
@@ -64,6 +74,8 @@ public struct SetProviderConnectionRequest: Encodable, Equatable, Sendable,
     public init(
         connectionID: String, expectedRevision: Int, displayName: String? = nil,
         enabled: Bool? = nil, endpoint: String? = nil, authMethod: ProviderAuthMethod? = nil,
+        apiSurface: ProviderAPISurface? = nil, chatMaxTokensField: ProviderChatMaxTokensField? = nil,
+        clearChatMaxTokensField: Bool = false,
         apiKey: ProviderCredentialUpdate = .unchanged, requestID: String = UUID().uuidString
     ) {
         self.connectionID = connectionID
@@ -73,6 +85,9 @@ public struct SetProviderConnectionRequest: Encodable, Equatable, Sendable,
         self.enabled = enabled
         self.endpoint = endpoint
         self.authMethod = authMethod
+        self.apiSurface = apiSurface
+        self.chatMaxTokensField = chatMaxTokensField
+        clearsChatMaxTokensField = clearChatMaxTokensField
         self.apiKey = apiKey
         self.requestID = requestID
     }
@@ -83,10 +98,12 @@ public struct SetProviderConnectionRequest: Encodable, Equatable, Sendable,
     public func encode(to encoder: Encoder) throws {
         if connectionID != nil {
             guard let expectedRevision, expectedRevision > 0,
-                displayName != nil || enabled != nil || endpoint != nil || authMethod != nil || apiKey != .unchanged
+                displayName != nil || enabled != nil || endpoint != nil || authMethod != nil
+                    || apiSurface != nil || chatMaxTokensField != nil || clearsChatMaxTokensField
+                    || apiKey != .unchanged
             else { throw invalidProviderRequest(encoder) }
         }
-        if let providerID, authMethod != providerID.supportedAuthMethod {
+        if let providerID, !providerID.supportedAuthMethods.contains(authMethod ?? providerID.defaultAuthMethod) {
             throw invalidProviderRequest(encoder)
         }
         if providerID == .openaiAPI,
@@ -98,6 +115,29 @@ public struct SetProviderConnectionRequest: Encodable, Equatable, Sendable,
                 endpoint == nil || endpoint == ProviderConnectionSettings.codexEndpoint else {
                 throw invalidProviderRequest(encoder)
             }
+        }
+        if providerID == .openaiAPI, apiSurface != nil && apiSurface != .responses {
+            throw invalidProviderRequest(encoder)
+        }
+        if let providerID, ![ProviderID.openaiAPI, .openAICompatibleAPI].contains(providerID), apiSurface != nil {
+            throw invalidProviderRequest(encoder)
+        }
+        if providerID == .openAICompatibleAPI {
+            guard let endpoint, let authMethod, let apiSurface,
+                ProviderConnectionSettings.isCompatibleEndpointValid(endpoint, authMethod: authMethod),
+                (apiSurface == .chatCompletions) == (chatMaxTokensField != nil),
+                !clearsChatMaxTokensField else {
+                throw invalidProviderRequest(encoder)
+            }
+        } else if providerID != nil && chatMaxTokensField != nil {
+            throw invalidProviderRequest(encoder)
+        }
+        if clearsChatMaxTokensField {
+            guard connectionID != nil, apiSurface == .responses, chatMaxTokensField == nil else {
+                throw invalidProviderRequest(encoder)
+            }
+        } else if (apiSurface == .chatCompletions) != (chatMaxTokensField != nil) {
+            throw invalidProviderRequest(encoder)
         }
         if case .replace(let value) = apiKey {
             guard !value.isEmpty, value.count <= 4096,
@@ -113,6 +153,12 @@ public struct SetProviderConnectionRequest: Encodable, Equatable, Sendable,
         try container.encodeIfPresent(enabled, forKey: .enabled)
         try container.encodeIfPresent(endpoint, forKey: .endpoint)
         try container.encodeIfPresent(authMethod, forKey: .authMethod)
+        try container.encodeIfPresent(apiSurface, forKey: .apiSurface)
+        if clearsChatMaxTokensField {
+            try container.encodeNil(forKey: .chatMaxTokensField)
+        } else {
+            try container.encodeIfPresent(chatMaxTokensField, forKey: .chatMaxTokensField)
+        }
         switch apiKey {
         case .unchanged: break
         case .clear: try container.encodeNil(forKey: .apiKey)
@@ -256,6 +302,49 @@ public struct ListProviderModelsRequest: Encodable, Equatable, Sendable {
         self.role = role
         self.cursor = cursor
         self.refresh = refresh
+    }
+}
+
+public enum ProviderModelVerificationConfirmation: String, Codable, Sendable {
+    case sendTestPromptAndMayCharge = "send_test_prompt_and_may_charge"
+}
+
+public struct VerifyProviderModelRequest: Encodable, Equatable, Sendable {
+    public let connectionID: String
+    public let expectedRevision: Int
+    public let modelID: String
+    public let confirmation: ProviderModelVerificationConfirmation
+    public let requestID: String
+
+    enum CodingKeys: String, CodingKey {
+        case connectionID = "connection_id"
+        case expectedRevision = "expected_revision"
+        case modelID = "model_id"
+        case confirmation
+        case requestID = "request_id"
+    }
+
+    public init(
+        connectionID: String, expectedRevision: Int, modelID: String,
+        confirmation: ProviderModelVerificationConfirmation,
+        requestID: String = UUID().uuidString
+    ) {
+        self.connectionID = connectionID
+        self.expectedRevision = expectedRevision
+        self.modelID = modelID
+        self.confirmation = confirmation
+        self.requestID = requestID
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        guard expectedRevision > 0, !modelID.isEmpty, modelID.count <= 256,
+            confirmation == .sendTestPromptAndMayCharge else { throw invalidProviderRequest(encoder) }
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(connectionID, forKey: .connectionID)
+        try container.encode(expectedRevision, forKey: .expectedRevision)
+        try container.encode(modelID, forKey: .modelID)
+        try container.encode(confirmation, forKey: .confirmation)
+        try container.encode(requestID, forKey: .requestID)
     }
 }
 

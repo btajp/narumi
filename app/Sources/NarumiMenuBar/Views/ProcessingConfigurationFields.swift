@@ -17,7 +17,9 @@ struct ProcessingConfigurationFields: View {
         capabilityPicker("話者分離エンジン", selection: $form.diarizationEngine,
                          options: capabilities?.diarizationEngines ?? [])
         capabilityPicker("従来の LLM プロバイダ", selection: $form.llmProvider,
-                         options: (capabilities?.llmProviders ?? []).filter { !["codex-app-server", "openai-api"].contains($0) })
+                         options: (capabilities?.llmProviders ?? []).filter {
+                             !["codex-app-server", "openai-api"].contains($0)
+                         }, display: providerName)
         Text("発話統合・画像解析などは従来の LLM 設定を使います。音声認識とテキスト議事録の接続・モデルは、下で別々に選びます。")
             .font(.caption).foregroundStyle(.secondary)
         Picker("外部送信ポリシー", selection: $form.externalSendPolicy) {
@@ -26,7 +28,7 @@ struct ProcessingConfigurationFields: View {
             Text("subscription_ok — サブスク LLM 可").tag("subscription_ok")
             Text("api_ok — 従量 API も可").tag("api_ok")
         }
-        Text("OpenAI API の音声認識と OpenAI API・Anthropic API の議事録生成には api_ok、Codex には subscription_ok または api_ok の明示が必要です。Ollama は local_only で利用できます。モデルの選択だけでは送信許可を変更しません。")
+        Text("OpenAI API の音声認識と Claude Agent SDK・OpenAI API・OpenAI互換API・Anthropic API の議事録生成には api_ok、Codex には subscription_ok または api_ok の明示が必要です。Ollama は local_only で利用できます。モデルの選択だけでは送信許可を変更しません。")
             .font(.caption).foregroundStyle(.secondary)
         TextField("言語（auto / ja / en など）", text: $form.language)
         Text("API 音声認識では auto（自動判定）または小文字2文字の ISO 639-1 コードを使います。空欄は現在の値を維持し、未設定なら ja です。")
@@ -51,12 +53,19 @@ struct ProcessingConfigurationFields: View {
             .font(.caption).foregroundStyle(.secondary)
     }
 
-    private func capabilityPicker(_ title: String, selection: Binding<String>, options: [String]) -> some View {
+    private func capabilityPicker(
+        _ title: String, selection: Binding<String>, options: [String],
+        display: @escaping (String) -> String = { $0 }
+    ) -> some View {
         Picker(title, selection: selection) {
             Text(isProfile ? "（設定しない／既存値を維持）" : "（変更しない）").tag("")
             let values = options.contains(selection.wrappedValue) || selection.wrappedValue.isEmpty
                 ? options : options + [selection.wrappedValue]
-            ForEach(values, id: \.self) { Text($0).tag($0) }
+            ForEach(values, id: \.self) { Text(display($0)).tag($0) }
         }
+    }
+
+    private func providerName(_ value: String) -> String {
+        ProviderID(rawValue: value).map(ProviderDisplay.name) ?? value
     }
 }

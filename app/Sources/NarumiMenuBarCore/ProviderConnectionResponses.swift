@@ -126,6 +126,48 @@ public struct ListProviderModelsResponse: Decodable, Equatable, Sendable {
     }
 }
 
+public struct VerifyProviderModelResponse: Decodable, Equatable, Sendable {
+    public let connectionID: String
+    public let connectionRevision: Int
+    public let model: ProviderModelDescriptor
+    public let catalogState: ProviderCatalogState
+    public let verifiedAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case connectionID = "connection_id"
+        case connectionRevision = "connection_revision"
+        case model
+        case catalogState = "catalog_state"
+        case verifiedAt = "verified_at"
+    }
+
+    public init(
+        connectionID: String, connectionRevision: Int, model: ProviderModelDescriptor,
+        catalogState: ProviderCatalogState, verifiedAt: String
+    ) {
+        self.connectionID = connectionID
+        self.connectionRevision = connectionRevision
+        self.model = model
+        self.catalogState = catalogState
+        self.verifiedAt = verifiedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        connectionID = try container.decode(String.self, forKey: .connectionID)
+        connectionRevision = try container.decode(Int.self, forKey: .connectionRevision)
+        model = try container.decode(ProviderModelDescriptor.self, forKey: .model)
+        catalogState = try container.decode(ProviderCatalogState.self, forKey: .catalogState)
+        verifiedAt = try container.decode(String.self, forKey: .verifiedAt)
+        guard connectionRevision > 0, model.availability == .available,
+            catalogState == .ready, !verifiedAt.isEmpty else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .model, in: container,
+                debugDescription: "A successful model verification must return an available cached model")
+        }
+    }
+}
+
 public struct PrepareProviderRuntimeResponse: Decodable, Equatable, Sendable {
     public let jobID: String
 

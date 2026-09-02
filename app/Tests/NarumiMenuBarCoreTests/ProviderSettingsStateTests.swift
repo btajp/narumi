@@ -3,6 +3,17 @@ import XCTest
 @testable import NarumiMenuBarCore
 
 final class ProviderSettingsStateTests: XCTestCase {
+    func testSixProvidersUseCanonicalPickerOrderAndNames() {
+        XCTAssertEqual(ProviderID.connectionPickerOrder, [
+            .codexAppServer, .claudeAgentSDK, .openaiAPI, .openAICompatibleAPI, .anthropicAPI, .ollama,
+        ])
+        XCTAssertEqual(ProviderID.connectionPickerOrder.map(ProviderDisplay.name), [
+            "Codex App Server", "Claude Agent SDK", "OpenAI API", "OpenAI互換API", "Anthropic API", "Ollama",
+        ])
+        XCTAssertEqual(ProviderID.openAICompatibleAPI.rawValue, "openai-compatible-api")
+        XCTAssertEqual(ProviderID.openAICompatibleAPI.supportedAuthMethods, [.apiKey, .none])
+    }
+
     func testSavedCredentialNeverPopulatesInputAndBlankUpdateRetainsIt() throws {
         var editor = ProviderConnectionSettings(connection: ProviderSettingsFixtures.connection())
         XCTAssertEqual(editor.apiKey, "")
@@ -98,7 +109,12 @@ final class ProviderSettingsStateTests: XCTestCase {
         XCTAssertEqual(request.providerID, .openaiAPI)
         XCTAssertEqual(request.endpoint, "https://api.openai.com")
         XCTAssertEqual(request.authMethod, .apiKey)
+        XCTAssertNil(request.apiSurface, "official OpenAI must stay encodable for contract 4/5 servers")
         XCTAssertEqual(request.apiKey, .replace("fixture-openai-key"))
+        let encoded = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(request)) as? [String: Any])
+        XCTAssertNil(encoded["api_surface"])
+        XCTAssertNil(encoded["chat_max_tokens_field"])
         XCTAssertEqual(editor.apiKey, "")
         editor.adopt(ProviderSettingsFixtures.connection(providerID: .openaiAPI))
         XCTAssertEqual(editor.apiKey, "")
@@ -106,6 +122,118 @@ final class ProviderSettingsStateTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(editor.takeSaveRequest()).apiKey, .unchanged)
         editor.setClearAPIKey(true)
         XCTAssertEqual(try XCTUnwrap(editor.takeSaveRequest()).apiKey, .clear)
+    }
+
+    func testOpenAICompatibleEditorValidatesDestinationAuthAndSurface() throws {
+        var editor = ProviderConnectionSettings(providerID: .openAICompatibleAPI)
+        editor.displayName = "Compatible API"
+        editor.endpoint = "https://compatible.example.invalid/v1"
+        XCTAssertTrue(editor.canSave)
+        editor.selectAuthMethod(.none)
+        XCTAssertFalse(editor.canSave, "remote no-auth must be rejected")
+        editor.endpoint = "http://127.0.0.1:8080/v1"
+        XCTAssertTrue(editor.canSave, "numeric loopback may use HTTP without auth")
+        editor.apiSurface = .chatCompletions
+        editor.chatMaxTokensField = .maxCompletionTokens
+        let request = try XCTUnwrap(editor.takeSaveRequest(requestID: "compatible-create"))
+        XCTAssertEqual(request.providerID, .openAICompatibleAPI)
+        XCTAssertEqual(request.authMethod, ProviderAuthMethod.none)
+        XCTAssertEqual(request.apiSurface, .chatCompletions)
+        XCTAssertEqual(request.chatMaxTokensField, .maxCompletionTokens)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(request)) as? [String: Any])
+        XCTAssertEqual(object["endpoint"] as? String, "http://127.0.0.1:8080/v1")
+        XCTAssertEqual(object["api_surface"] as? String, "chat_completions")
+        XCTAssertEqual(object["chat_max_tokens_field"] as? String, "max_completion_tokens")
+        XCTAssertNil(object["api_key"])
+    }
+
+    func testOpenAICompatibleEndpointRejectsObviousUnsafeShapes() {
+        let valid = [
+            "https://api.example.com/v1", "https://LLM.Example.COM:443/api-v1/models_v2~beta",
+            "http://127.0.0.1:8080/v1", "https://[::1]:8443/api/v1",
+        ]
+        for endpoint in valid {
+            XCTAssertTrue(ProviderConnectionSettings.isCompatibleEndpointValid(endpoint, authMethod: .apiKey), endpoint)
+        }
+        let invalid = [
+            "http://api.example.com/v1", "https://api.example.com/v1/", "https://user@api.example.com/v1",
+            "https://api.example.com/v1?key=x", "https://api.example.com/v1#x", "https://api.example.com/v1//chat",
+            "https://api.example.com/v1/../chat", "https://api.example.com/%76%31", "https://localhost/v1",
+            "https://127.0.0.1:080/v1", "https://127.00.0.1/v1", "https://api.example.com/v1/@chat",
+            "https://api.example.com/-v1", "https://api..example.com/v1", "https://-api.example.com/v1",
+            "https://api.example.com:/v1", "https://api.example.com:65536/v1",
+            "HTTPS://api.example.com/v1",
+            "https://api.example.com/" + String(repeating: "a", count: 129),
+        ]
+        for endpoint in invalid {
+            XCTAssertFalse(ProviderConnectionSettings.isCompatibleEndpointValid(endpoint, authMethod: .apiKey), endpoint)
+        }
+        XCTAssertFalse(ProviderConnectionSettings.isCompatibleEndpointValid(
+            "https://api.example.com/v1", authMethod: .none))
+    }
+
+    func testCompatibleSwitchToNoAuthExplicitlyClearsSavedCredential() throws {
+        var editor = ProviderConnectionSettings(connection: ProviderSettingsFixtures.connection(
+            providerID: .openAICompatibleAPI, credential: true))
+        editor.endpoint = "http://127.0.0.1:8080/v1"
+        editor.selectAuthMethod(.none)
+        let request = try XCTUnwrap(editor.takeSaveRequest(requestID: "compatible-no-auth"))
+        XCTAssertEqual(request.apiKey, .clear)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(request)) as? [String: Any])
+        XCTAssertTrue(object["api_key"] is NSNull)
+    }
+
+    func testCompatibleEndpointChangeNeverReusesThePreviousAPIKey() throws {
+        let connection = ProviderSettingsFixtures.connection(
+            providerID: .openAICompatibleAPI, credential: true)
+        var editor = ProviderConnectionSettings(connection: connection)
+        editor.endpoint = "https://other.example.invalid/v1"
+        XCTAssertTrue(editor.requiresAPIKeyReentryForEndpointChange)
+        XCTAssertFalse(editor.canSave)
+        editor.apiKey = "fixture-key-for-new-endpoint"
+        XCTAssertTrue(editor.canSave)
+        XCTAssertEqual(
+            try XCTUnwrap(editor.takeSaveRequest()).apiKey,
+            .replace("fixture-key-for-new-endpoint"))
+
+        var clearing = ProviderConnectionSettings(connection: connection)
+        clearing.endpoint = "https://other.example.invalid/v1"
+        clearing.setClearAPIKey(true)
+        XCTAssertFalse(clearing.requiresAPIKeyReentryForEndpointChange)
+        XCTAssertTrue(clearing.canSave)
+        XCTAssertEqual(try XCTUnwrap(clearing.takeSaveRequest()).apiKey, .clear)
+    }
+
+    func testCompatibleEndpointEditClearsAKeyTypedForThePreviousDestination() throws {
+        var editor = ProviderConnectionSettings(providerID: .openAICompatibleAPI)
+        editor.displayName = "Compatible API"
+        editor.endpoint = "https://first.example.invalid/v1"
+        editor.apiKey = "fixture-key-for-first-endpoint"
+
+        editor.endpoint = "https://second.example.invalid/v1"
+
+        XCTAssertTrue(editor.apiKey.isEmpty)
+        XCTAssertFalse(editor.canSave, "the key must be entered again for the final endpoint")
+        editor.apiKey = "fixture-key-for-second-endpoint"
+        let request = try XCTUnwrap(editor.takeSaveRequest(requestID: "compatible-endpoint-change"))
+        XCTAssertEqual(request.endpoint, "https://second.example.invalid/v1")
+        XCTAssertEqual(request.apiKey, .replace("fixture-key-for-second-endpoint"))
+    }
+
+    func testCompatibleUpdateExplicitlyClearsChatTokenFieldForResponses() throws {
+        let connection = ProviderSettingsFixtures.connection(
+            providerID: .openAICompatibleAPI, apiSurface: .chatCompletions,
+            chatMaxTokensField: .maxCompletionTokens)
+        var editor = ProviderConnectionSettings(connection: connection)
+        editor.apiSurface = .responses
+        let request = try XCTUnwrap(editor.takeSaveRequest(requestID: "compatible-update"))
+        XCTAssertTrue(request.clearsChatMaxTokensField)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(request)) as? [String: Any])
+        XCTAssertEqual(object["api_surface"] as? String, "responses")
+        XCTAssertTrue(object["chat_max_tokens_field"] is NSNull)
     }
 
     func testOpenAIMetadataMessagesDistinguishGenerationAndBalanceChecks() throws {

@@ -21,6 +21,16 @@ public enum ProviderGenerationState: String, Codable, Sendable {
     case never, succeeded, failed, cancelled, unknown
 }
 
+public enum ProviderAPISurface: String, Codable, CaseIterable, Sendable {
+    case responses
+    case chatCompletions = "chat_completions"
+}
+
+public enum ProviderChatMaxTokensField: String, Codable, CaseIterable, Sendable {
+    case maxTokens = "max_tokens"
+    case maxCompletionTokens = "max_completion_tokens"
+}
+
 public struct ProviderActiveAuth: Decodable, Equatable, Sendable {
     public let operationID: String
     public let startRequestID: String
@@ -54,6 +64,8 @@ public struct ProviderConnection: Decodable, Equatable, Sendable {
     public let enabled: Bool
     public let endpoint: String?
     public let authMethod: ProviderAuthMethod
+    public let apiSurface: ProviderAPISurface?
+    public let chatMaxTokensField: ProviderChatMaxTokensField?
     public let credentialPresent: Bool
     public let authState: ProviderAuthState
     public let catalogState: ProviderCatalogState
@@ -68,6 +80,8 @@ public struct ProviderConnection: Decodable, Equatable, Sendable {
         case displayName = "display_name"
         case enabled, endpoint
         case authMethod = "auth_method"
+        case apiSurface = "api_surface"
+        case chatMaxTokensField = "chat_max_tokens_field"
         case credentialPresent = "credential_present"
         case authState = "auth_state"
         case catalogState = "catalog_state"
@@ -79,6 +93,7 @@ public struct ProviderConnection: Decodable, Equatable, Sendable {
     public init(
         connectionID: String, revision: Int, providerID: ProviderID, displayName: String,
         enabled: Bool, endpoint: String?, authMethod: ProviderAuthMethod,
+        apiSurface: ProviderAPISurface? = nil, chatMaxTokensField: ProviderChatMaxTokensField? = nil,
         credentialPresent: Bool, authState: ProviderAuthState, catalogState: ProviderCatalogState,
         checkedAt: String?, activeAuth: ProviderActiveAuth?, lastGenerationState: ProviderGenerationState
     ) {
@@ -89,6 +104,8 @@ public struct ProviderConnection: Decodable, Equatable, Sendable {
         self.enabled = enabled
         self.endpoint = endpoint
         self.authMethod = authMethod
+        self.apiSurface = apiSurface
+        self.chatMaxTokensField = chatMaxTokensField
         self.credentialPresent = credentialPresent
         self.authState = authState
         self.catalogState = catalogState
@@ -106,16 +123,27 @@ public struct ProviderConnection: Decodable, Equatable, Sendable {
         enabled = try container.decode(Bool.self, forKey: .enabled)
         endpoint = try container.decode(String?.self, forKey: .endpoint)
         authMethod = try container.decode(ProviderAuthMethod.self, forKey: .authMethod)
+        apiSurface = try container.decodeIfPresent(ProviderAPISurface.self, forKey: .apiSurface)
+        chatMaxTokensField = try container.decodeIfPresent(ProviderChatMaxTokensField.self, forKey: .chatMaxTokensField)
         credentialPresent = try container.decode(Bool.self, forKey: .credentialPresent)
         authState = try container.decode(ProviderAuthState.self, forKey: .authState)
         catalogState = try container.decode(ProviderCatalogState.self, forKey: .catalogState)
         checkedAt = try container.decode(String?.self, forKey: .checkedAt)
         activeAuth = try container.decode(ProviderActiveAuth?.self, forKey: .activeAuth)
         lastGenerationState = try container.decode(ProviderGenerationState.self, forKey: .lastGenerationState)
-        guard revision > 0, authMethod == providerID.supportedAuthMethod,
+        guard revision > 0, providerID.supportedAuthMethods.contains(authMethod),
             providerID != .ollama || !credentialPresent,
             providerID != .openaiAPI || endpoint == ProviderConnectionSettings.openaiEndpoint,
-            providerID != .codexAppServer || endpoint == ProviderConnectionSettings.codexEndpoint
+            providerID != .codexAppServer || endpoint == ProviderConnectionSettings.codexEndpoint,
+            providerID != .openaiAPI || apiSurface == nil || apiSurface == .responses,
+            [.openaiAPI, .openAICompatibleAPI].contains(providerID) || apiSurface == nil,
+            providerID == .openAICompatibleAPI || chatMaxTokensField == nil,
+            providerID != .openAICompatibleAPI || ProviderConnectionSettings.isCompatibleEndpointValid(
+                endpoint ?? "", authMethod: authMethod),
+            providerID != .openAICompatibleAPI || apiSurface != nil,
+            providerID != .openAICompatibleAPI || authMethod != .none || !credentialPresent,
+            apiSurface != .chatCompletions || chatMaxTokensField != nil,
+            apiSurface == .chatCompletions || chatMaxTokensField == nil
         else {
             throw DecodingError.dataCorruptedError(
                 forKey: .authMethod, in: container,

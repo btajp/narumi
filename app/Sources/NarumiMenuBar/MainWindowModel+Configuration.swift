@@ -148,13 +148,11 @@ extension MainWindowModel {
 
     private var supportsMinutesModels: Bool {
         // Legacy operations remain available against an authenticated contract 2 server.
-        guard let version = serverInfo?.contractVersion, RecordingPermissionContract.supportsSetup(version) else { return false }
-        return ["3", "4", "5"].contains(String(version.split(separator: ".").first ?? ""))
+        RecordingPermissionContract.supportsMinutesModelSelection(serverInfo?.contractVersion)
     }
 
     var supportsTranscriptionModels: Bool {
-        guard let version = serverInfo?.contractVersion, RecordingPermissionContract.supportsSetup(version) else { return false }
-        return version.split(separator: ".").first == "5"
+        RecordingPermissionContract.supportsTranscriptionModelSelection(serverInfo?.contractVersion)
     }
 
     func configurationValidationMessage(for form: ProcessingConfigurationForm) -> String? {

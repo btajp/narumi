@@ -17,6 +17,7 @@ enum MinutesModelFixtures {
     static func model(
         id: String = modelID, availability: ProviderAvailability = .available,
         inputs: [ProviderModality] = [.text], outputs: [ProviderModality] = [.text],
+        roles: [ProviderRole] = [.llm],
         billing: ProviderBillingKind? = nil, required: [String] = [], provider: String = "codex-app-server",
         parameterSchema: ProviderParameterSchema? = nil, maxOutputTokens: Int? = 10_000,
         availabilityExpiresOn: String? = nil
@@ -26,13 +27,13 @@ enum MinutesModelFixtures {
             properties["reasoning_effort"] = ProviderModelParameter(
                 type: .string, enumValues: [.string("low"), .string("high")], defaultValue: .string("low"))
         }
-        if provider != "codex-app-server" {
+        if !["codex-app-server", "claude-agent-sdk"].contains(provider) {
             properties["max_tokens"] = ProviderModelParameter(type: .integer, minimum: 1, maximum: 32768)
         }
         let billingKind = billing ?? (provider == "codex-app-server" ? .subscription : (provider == "ollama" ? .local : .api))
         return ProviderModelDescriptor(
             modelID: id, displayName: "Fixture Codex model", resolvedRevision: "fixture-revision",
-            inputModalities: inputs, outputModalities: outputs, roles: [.llm], timestampSupport: .none,
+            inputModalities: inputs, outputModalities: outputs, roles: roles, timestampSupport: .none,
             contextWindow: 100_000, maxOutputTokens: maxOutputTokens,
             parameterSchema: parameterSchema ?? ProviderParameterSchema(properties: properties, required: required),
             availability: availability, reason: nil, source: .runtime,

@@ -3,16 +3,29 @@ import Foundation
 public enum ProviderID: String, Codable, CaseIterable, Sendable {
     case anthropicAPI = "anthropic-api"
     case openaiAPI = "openai-api"
+    case openAICompatibleAPI = "openai-compatible-api"
     case claudeAgentSDK = "claude-agent-sdk"
     case ollama
     case codexAppServer = "codex-app-server"
 
+    public static let connectionPickerOrder: [ProviderID] = [
+        .codexAppServer, .claudeAgentSDK, .openaiAPI, .openAICompatibleAPI, .anthropicAPI, .ollama,
+    ]
+
     public var supportedAuthMethod: ProviderAuthMethod {
+        defaultAuthMethod
+    }
+
+    public var defaultAuthMethod: ProviderAuthMethod {
         switch self {
-        case .anthropicAPI, .openaiAPI, .claudeAgentSDK: return .apiKey
+        case .anthropicAPI, .openaiAPI, .openAICompatibleAPI, .claudeAgentSDK: return .apiKey
         case .ollama: return .none
         case .codexAppServer: return .chatgpt
         }
+    }
+
+    public var supportedAuthMethods: [ProviderAuthMethod] {
+        self == .openAICompatibleAPI ? [.apiKey, .none] : [defaultAuthMethod]
     }
 }
 
@@ -216,7 +229,8 @@ public struct ProviderDescriptor: Decodable, Equatable, Sendable {
         reason = try container.decode(String?.self, forKey: .reason)
         runtime = try container.decode(ProviderRuntime.self, forKey: .runtime)
         guard !roles.isEmpty, Set(roles).count == roles.count,
-            authMethods == [providerID.supportedAuthMethod]
+            authMethods.count == providerID.supportedAuthMethods.count,
+            Set(authMethods) == Set(providerID.supportedAuthMethods)
         else {
             throw DecodingError.dataCorruptedError(
                 forKey: .authMethods, in: container,

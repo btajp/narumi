@@ -19,6 +19,9 @@ struct ProviderSettingsSaveRecovery: Equatable, Sendable {
     let requestEnabled: Bool?
     let requestEndpoint: String?
     let requestAuthMethod: ProviderAuthMethod?
+    let requestAPISurface: ProviderAPISurface?
+    let requestChatMaxTokensField: ProviderChatMaxTokensField?
+    let requestClearsChatMaxTokensField: Bool
     private(set) var receiptConnectionID: String?
 
     init(editor: ProviderConnectionSettings, connections: [ProviderConnection], request: SetProviderConnectionRequest) {
@@ -43,6 +46,9 @@ struct ProviderSettingsSaveRecovery: Equatable, Sendable {
         requestEnabled = request.enabled
         requestEndpoint = request.endpoint
         requestAuthMethod = request.authMethod
+        requestAPISurface = request.apiSurface
+        requestChatMaxTokensField = request.chatMaxTokensField
+        requestClearsChatMaxTokensField = request.clearsChatMaxTokensField
     }
 
     func confirmedConnection(in connections: [ProviderConnection]) -> ProviderConnection? {
@@ -78,12 +84,17 @@ struct ProviderSettingsSaveRecovery: Equatable, Sendable {
             return SetProviderConnectionRequest(
                 connectionID: connectionID, expectedRevision: expectedRevision,
                 displayName: requestDisplayName, enabled: requestEnabled, endpoint: requestEndpoint,
-                authMethod: requestAuthMethod, apiKey: credential, requestID: requestID)
+                authMethod: requestAuthMethod, apiSurface: requestAPISurface,
+                chatMaxTokensField: requestChatMaxTokensField,
+                clearChatMaxTokensField: requestClearsChatMaxTokensField,
+                apiKey: credential, requestID: requestID)
         }
         guard let requestProviderID, let requestDisplayName, let requestAuthMethod else { return nil }
         return SetProviderConnectionRequest(
             providerID: requestProviderID, displayName: requestDisplayName, authMethod: requestAuthMethod,
-            enabled: requestEnabled ?? true, endpoint: requestEndpoint, apiKey: credential, requestID: requestID)
+            enabled: requestEnabled ?? true, endpoint: requestEndpoint, apiSurface: requestAPISurface,
+            chatMaxTokensField: requestChatMaxTokensField,
+            apiKey: credential, requestID: requestID)
     }
 
     private static func origin(_ endpoint: String) -> String {

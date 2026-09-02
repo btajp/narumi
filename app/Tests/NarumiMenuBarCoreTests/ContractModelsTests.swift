@@ -336,12 +336,13 @@ final class ContractModelsTests: XCTestCase {
         XCTAssertFalse(String(decoding: try JSONEncoder().encode(error), as: UTF8.self).contains("untrusted"))
     }
 
-    func testASRCapabilityIsExplicitAndRestrictedToContractFiveHTTP() throws {
+    func testASRCapabilityIsExplicitAndRestrictedToContractsFiveAndSixHTTP() throws {
         var info = try XCTUnwrap(try decodeAll(ServerInfo.self, tool: "get_server_info").first)
-        for version in ["2.0.0", "3.0.0", "4.0.0", "5.0.0-rc.1", "6.0.0"] {
+        for version in ["2.0.0", "3.0.0", "4.0.0", "5.0.0-rc.1", "6.0.0-rc.1", "7.0.0"] {
             XCTAssertTrue(info.capabilities.supportedTranscriptionModelProviders(contractVersion: version).isEmpty, version)
         }
         XCTAssertEqual(info.capabilities.supportedTranscriptionModelProviders(contractVersion: "5.0.0"), ["openai-api"])
+        XCTAssertEqual(info.capabilities.supportedTranscriptionModelProviders(contractVersion: "6.0.0"), ["openai-api"])
         info.capabilities.transcriptionModelProviders = ["openai-api", "codex-app-server", "unknown"]
         XCTAssertEqual(info.capabilities.supportedTranscriptionModelProviders(contractVersion: "5.0.0"), ["openai-api"])
         info.capabilities.transports = ["stdio"]

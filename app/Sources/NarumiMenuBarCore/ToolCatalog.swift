@@ -59,6 +59,7 @@ public enum ToolCatalog {
     public static let getProviderAuthStatus = "get_provider_auth_status"
     public static let testProviderConnection = "test_provider_connection"
     public static let listProviderModels = "list_provider_models"
+    public static let verifyProviderModel = "verify_provider_model"
 
     // Diagnostics
     public static let getServerInfo = "get_server_info"
@@ -101,6 +102,7 @@ public enum ToolCatalog {
         getProviderAuthStatus,
         testProviderConnection,
         listProviderModels,
+        verifyProviderModel,
         getServerInfo,
         rebuildCatalog,
     ]

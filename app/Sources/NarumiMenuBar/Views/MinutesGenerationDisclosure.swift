@@ -28,13 +28,16 @@ struct MinutesGenerationDisclosure: View {
                 if selection.provider == "codex-app-server" || selection.provider == "openai-api" {
                     LabeledContent("推論量", value: reasoningDescription(selection))
                 }
-                if selection.provider != "codex-app-server" {
+                if !["codex-app-server", "claude-agent-sdk"].contains(selection.provider) {
                     LabeledContent("要求する出力上限", value: outputLimitDescription(selection))
                     LabeledContent("モデルの出力上限", value: selectedModel?.maxOutputTokens.map { "\($0) tokens" } ?? "未確認")
                     Text("出力上限は 1 回の生成要求に適用します。複数回の処理を含む総利用量や金額の上限ではありません。")
                         .foregroundStyle(.secondary)
-                } else {
+                } else if selection.provider == "codex-app-server" {
                     Text("Codex では出力トークン数の上限を指定できません。利用枠の消費量の上限は保証しません。")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Claude Agent SDK では出力トークン数の上限を指定しません。API 利用量や金額の上限は保証しません。")
                         .foregroundStyle(.secondary)
                 }
                 LabeledContent("生成の試行番号", value: String(selection.cacheEpoch))
@@ -44,7 +47,8 @@ struct MinutesGenerationDisclosure: View {
                      : "処理する内容: 文字起こし・話者名・会議名・議事録に使うコンテキストのテキスト。")
                 Text("このテキスト議事録の工程には音声・動画・画像を渡しません。音声認識には別の音声認識設定、発話統合などには従来の設定を適用します。")
                     .foregroundStyle(.secondary)
-                if selection.provider == "openai-api" || selection.provider == "anthropic-api" {
+                if ["claude-agent-sdk", "openai-api", "openai-compatible-api", "anthropic-api"]
+                    .contains(selection.provider) {
                     Text("取消しても、サービス側の処理や課金の停止は保証できません。送信後に結果が不明になっても自動再送せず、新しい試行では API 利用料が重複する場合があります。")
                         .foregroundStyle(.secondary)
                 } else if selection.provider == "codex-app-server" {
@@ -101,6 +105,15 @@ struct MinutesGenerationDisclosure: View {
             return "送信先: OpenAI（https://chatgpt.com）。テキストを送信し、ChatGPT の利用枠を使用します。subscription_ok または api_ok が必要で、API 課金へは切り替えません。"
         case "openai-api":
             return "送信先: OpenAI（https://api.openai.com/v1/responses）。api_ok の許可に基づきテキストを送信し、従量 API 課金を使用します。ChatGPT の利用枠とは別です。"
+        case "openai-compatible-api":
+            let connection = catalog.connection(selection.connectionID)
+            let endpoint = connection?.revision == selection.connectionRevision
+                && connection?.providerID == .openAICompatibleAPI ? connection?.endpoint ?? "接続先は未確認"
+                : "保存時の接続先は再確認が必要"
+            let surface = connection?.apiSurface == .chatCompletions ? "/chat/completions" : "/responses"
+            return "送信先: 保存した OpenAI互換API（\(endpoint)\(surface)）。api_ok に基づき送信します。ローカル URL でも外部中継の可能性があり、別形式・別プロバイダへ自動切替しません。"
+        case "claude-agent-sdk":
+            return "送信先: Claude Agent SDK から Anthropic API（https://api.anthropic.com）。api_ok に基づく従量 API 課金で、Claude のサブスクリプションログインは使用しません。"
         case "anthropic-api":
             return "送信先: Anthropic（https://api.anthropic.com）。api_ok の許可に基づきテキストを送信し、従量 API 課金を使用します。Claude のサブスクリプションとは別です。"
         case "ollama":
@@ -109,7 +122,7 @@ struct MinutesGenerationDisclosure: View {
                 ? connection?.endpoint ?? "接続先は未確認" : "保存時の接続先は再確認が必要"
             return "接続先: この Mac の Ollama（\(endpoint)）。ローカル実行を確認したモデルでテキストを処理します。local_only で利用でき、API 課金のプロバイダへは切り替えません。"
         default:
-            return "このサーバーで選択したプロバイダを利用できるか確認してください。未対応のプロバイダでは生成しません。"
+            return "このサーバーで選択したプロバイダの接続・実行環境・モデルが利用可能か確認してください。"
         }
     }
 }
