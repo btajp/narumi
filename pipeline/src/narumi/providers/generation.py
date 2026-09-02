@@ -9,7 +9,9 @@ from __future__ import annotations
 import copy
 import ipaddress
 import re
+import threading
 import uuid
+import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -114,6 +116,106 @@ class _Selection:
     api_surface: str | None
     chat_max_tokens_field: str | None
     expected_runtime: dict[str, str] | None
+
+
+@dataclass(frozen=True)
+class _FailedGenerationRelease:
+    provider_id: str
+    connection_id: str
+    token: str
+    server_instance_id: str
+
+
+_FAILED_RELEASES_LOCK = threading.RLock()
+_FAILED_RELEASES: weakref.WeakKeyDictionary[
+    ProviderService, dict[str, _FailedGenerationRelease]
+] = weakref.WeakKeyDictionary()
+_FAILED_RELEASE_WORKERS: weakref.WeakKeyDictionary[ProviderService, set[str]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _remember_failed_release(
+    service: ProviderService,
+    *,
+    provider_id: str,
+    connection_id: str,
+    token: str,
+) -> _FailedGenerationRelease:
+    recovery = _FailedGenerationRelease(
+        provider_id=provider_id,
+        connection_id=connection_id,
+        token=token,
+        server_instance_id=service.server_instance_id,
+    )
+    with _FAILED_RELEASES_LOCK:
+        pending = _FAILED_RELEASES.setdefault(service, {})
+        existing = pending.get(provider_id)
+        if existing is not None and existing != recovery:
+            raise RuntimeError("Conflicting provider generation lease recovery")
+        pending[provider_id] = recovery
+    return recovery
+
+
+def _recover_failed_release(service: ProviderService, provider_id: str) -> bool:
+    """Release only the exact lease whose completed cleanup failed in this process."""
+    with _FAILED_RELEASES_LOCK:
+        pending = _FAILED_RELEASES.get(service)
+        recovery = None if pending is None else pending.get(provider_id)
+        if recovery is None:
+            return False
+        with service.store.transaction() as document:
+            check = document["checks"].get(provider_id)
+            if check is not None:
+                expected = {
+                    "token": recovery.token,
+                    "server_instance_id": recovery.server_instance_id,
+                    "connection_id": recovery.connection_id,
+                    "kind": "generation",
+                }
+                if check != expected:
+                    raise RuntimeError("Provider generation lease changed during recovery")
+                service.catalog.release_check(document, provider_id, recovery.token)
+            record = document["connections"].get(recovery.connection_id)
+            if record is not None:
+                record["last_generation_state"] = "unknown"
+        del pending[provider_id]
+        if not pending:
+            del _FAILED_RELEASES[service]
+        return True
+
+
+def _schedule_failed_release_recovery(service: ProviderService, provider_id: str) -> None:
+    """Retry exact local cleanup without ever repeating the external generation."""
+    with _FAILED_RELEASES_LOCK:
+        workers = _FAILED_RELEASE_WORKERS.setdefault(service, set())
+        if provider_id in workers:
+            return
+        workers.add(provider_id)
+
+    def recover() -> None:
+        delay = 0.01
+        try:
+            while not service.closed.wait(delay):
+                try:
+                    if _recover_failed_release(service, provider_id):
+                        return
+                    return
+                except Exception:
+                    delay = min(delay * 2, 1.0)
+        finally:
+            with _FAILED_RELEASES_LOCK:
+                workers = _FAILED_RELEASE_WORKERS.get(service)
+                if workers is not None:
+                    workers.discard(provider_id)
+                    if not workers:
+                        del _FAILED_RELEASE_WORKERS[service]
+
+    threading.Thread(
+        target=recover,
+        name=f"narumi-{provider_id}-lease-recovery",
+        daemon=True,
+    ).start()
 
 
 class MinutesResolver:
@@ -464,6 +566,14 @@ class _ConnectedMinutesProvider:
         if self._cancelled():
             raise CancelledError("Minutes generation was cancelled")
         service = self.resolver.service
+        try:
+            recovered_release = _recover_failed_release(service, self.name)
+        except Exception:
+            raise _safe_error(ErrorCode.ENGINE_UNAVAILABLE, unknown=True) from None
+        if recovered_release:
+            # This invocation repaired the previous attempt's lease. It must not also
+            # become a fresh external send; the durable checkpoint decides retries.
+            raise _safe_error(ErrorCode.ENGINE_UNAVAILABLE, unknown=True)
         token = uuid.uuid4().hex
         with service.store.transaction() as document:
             current = self.resolver._selection(self.config, document)
@@ -529,6 +639,20 @@ class _ConnectedMinutesProvider:
                         record["last_generation_state"] = state
             except Exception:
                 # A known reply with an uncommitted receipt must not become retryable.
+                self.last_completion_metadata = None
+                try:
+                    _remember_failed_release(
+                        service,
+                        provider_id=self.name,
+                        connection_id=self.selection.connection_id,
+                        token=token,
+                    )
+                    _recover_failed_release(service, self.name)
+                except Exception:
+                    try:
+                        _schedule_failed_release_recovery(service, self.name)
+                    except Exception:
+                        pass
                 raise _safe_error(ErrorCode.ENGINE_UNAVAILABLE, unknown=True) from None
 
     def _http_complete(self, current: _Selection, prompt: str, system: str | None) -> str:

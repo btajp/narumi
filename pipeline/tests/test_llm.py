@@ -110,6 +110,7 @@ def test_available_providers_always_has_local_ones():
     assert names[:2] == ["none", "fake"]
     assert "ollama" in names
     assert "claude-agent-sdk" not in names
+    assert "anthropic-api" not in names
     assert set(names) <= set(provider_names())
 
 
@@ -119,7 +120,7 @@ def test_available_providers_excludes_legacy_claude_stub_when_sdk_is_importable(
     assert "claude-agent-sdk" not in available_providers()
 
 
-def test_anthropic_registry_does_not_require_or_import_generation_sdk(monkeypatch):
+def test_anthropic_legacy_registry_requires_connection_model_selection(monkeypatch):
     original_import = builtins.__import__
 
     def without_sdk(name, *args, **kwargs):
@@ -129,8 +130,15 @@ def test_anthropic_registry_does_not_require_or_import_generation_sdk(monkeypatc
     monkeypatch.setattr(builtins, "__import__", without_sdk)
     monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fixture-registry-key-not-real")
-    assert "anthropic-api" in available_providers()
-    assert get_provider("anthropic-api").name == "anthropic-api"
+    assert "anthropic-api" not in available_providers()
+    with pytest.raises(EngineUnavailableError) as failure:
+        get_provider("anthropic-api")
+    assert failure.value.details == {
+        "provider": "anthropic-api",
+        "reason": "legacy_provider_requires_connection_model_selection",
+    }
+    assert "provider connection" in failure.value.message
+    assert "minutes model" in failure.value.message
 
 
 def test_get_provider_none_and_fake():
@@ -144,21 +152,19 @@ def test_get_provider_none_and_fake():
 
 def test_select_provider_enforces_policy_without_instantiating(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    config = MeetingConfig(llm_provider="anthropic-api", external_send_policy="local_only")
-    with pytest.raises(PolicyViolationError) as info:
-        select_provider(config)
-    assert info.value.details["provider"] == "anthropic-api"
-    with pytest.raises(PolicyViolationError):
-        select_provider(
-            MeetingConfig(llm_provider="anthropic-api", external_send_policy="subscription_ok")
-        )
     with pytest.raises(PolicyViolationError):
         select_provider(
             MeetingConfig(llm_provider="claude-agent-sdk", external_send_policy="local_only")
         )
-    # allowed by policy but no key → engine_unavailable, not policy_violation
-    with pytest.raises(EngineUnavailableError):
-        select_provider(MeetingConfig(llm_provider="anthropic-api", external_send_policy="api_ok"))
+    for policy in ("local_only", "subscription_ok", "api_ok"):
+        with pytest.raises(EngineUnavailableError) as failure:
+            select_provider(
+                MeetingConfig(llm_provider="anthropic-api", external_send_policy=policy)
+            )
+        assert failure.value.details == {
+            "provider": "anthropic-api",
+            "reason": "legacy_provider_requires_connection_model_selection",
+        }
 
 
 def test_select_provider_local_defaults(monkeypatch):

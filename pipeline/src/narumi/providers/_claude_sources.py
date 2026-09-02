@@ -5,10 +5,14 @@ from __future__ import annotations
 import hashlib
 
 RESOURCE_SHA256_FIELD = "resource_sha256"
-RESOURCE_DOMAIN = b"narumi-claude-agent-sdk-runtime-v3\0"
+RESOURCE_DOMAIN = b"narumi-claude-agent-sdk-runtime-v4\0"
 
 ADAPTER_SOURCE_PATHS = (
     "__init__.py",
+    "brief/__init__.py",
+    "brief/builder.py",
+    "brief/gaia_context.py",
+    "brief/models.py",
     "bundle/hashing.py",
     "errors.py",
     "generate/bounded.py",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -846,6 +847,48 @@ def test_reply_persistence_failure_does_not_resend(
         run_generate(bundle, minutes_resolver=resolver)
     assert failure.value.details["reason"] == OUTCOME_UNKNOWN
     assert len(completions(backend)) == 1
+
+
+def test_failed_generation_lease_release_is_recovered_without_resending(generation, monkeypatch):
+    service, backend, config = generation
+    provider = MinutesResolver(service).resolve(config)
+    original_commit = service.store.commit
+    release_writes_fail = [True]
+
+    def commit(document):
+        check = document["checks"].get("codex-app-server")
+        if completions(backend) and check is None and release_writes_fail[0]:
+            raise NarumiError("fixture release persistence failure")
+        return original_commit(document)
+
+    monkeypatch.setattr(service.store, "commit", commit)
+    with pytest.raises(NarumiError) as initial:
+        provider.complete("fixture prompt")
+    assert initial.value.details["reason"] == OUTCOME_UNKNOWN
+    assert provider.last_completion_metadata is None
+    assert len(completions(backend)) == 1
+    assert service.store.read()["checks"]["codex-app-server"]["kind"] == "generation"
+
+    release_writes_fail[0] = False
+    deadline = time.monotonic() + 2
+    while service.store.read()["checks"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(completions(backend)) == 1
+    saved = service.store.read()
+    assert saved["checks"] == {}
+    assert (
+        saved["connections"][config.minutes_model.connection_id]["last_generation_state"]
+        == "unknown"
+    )
+
+    # The stale lease no longer blocks unrelated provider operations in this process.
+    tested = service.test_connection(
+        {
+            "connection_id": config.minutes_model.connection_id,
+            "expected_revision": config.minutes_model.connection_revision,
+        }
+    )
+    assert tested["connected"] is True
 
 
 def test_guard_resolution_sync_failure_keeps_verifiable_receipt(tmp_path, generation, monkeypatch):

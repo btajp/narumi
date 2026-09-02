@@ -6,7 +6,7 @@ import pytest
 from narumi.align import build_alignment, build_intervals, run_align
 from narumi.bundle import Bundle
 from narumi.diarize.layer3 import NameSuggestion
-from narumi.errors import NotFoundError, PolicyViolationError
+from narumi.errors import EngineUnavailableError, NotFoundError
 from narumi.generate import (
     INTEGRATE_KEY,
     INTEGRATE_PROMPT_VERSION,
@@ -606,23 +606,28 @@ def test_run_integrate_with_fake_provider(tmp_path: Path):
     assert "（fake）" in generated.path.read_text(encoding="utf-8")
 
 
-def test_run_stages_enforce_policy_before_instantiation(tmp_path: Path, monkeypatch):
+def test_run_stages_reject_legacy_anthropic_before_dispatch(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     bundle = prepared_bundle(
-        tmp_path, MeetingConfig(llm_provider="anthropic-api", external_send_policy="local_only")
+        tmp_path, MeetingConfig(llm_provider="anthropic-api", external_send_policy="api_ok")
     )
-    with pytest.raises(PolicyViolationError):
+    with pytest.raises(EngineUnavailableError) as integration_failure:
         run_integrate(bundle)
+    assert integration_failure.value.details == {
+        "provider": "anthropic-api",
+        "reason": "legacy_provider_requires_connection_model_selection",
+    }
     assert bundle.artifact(INTEGRATE_KEY) is None
     bundle.manifest.config = MeetingConfig(llm_provider="none")
     bundle.save()
     run_integrate(bundle)
     bundle.manifest.config = MeetingConfig(
-        llm_provider="anthropic-api", external_send_policy="local_only"
+        llm_provider="anthropic-api", external_send_policy="api_ok"
     )
     bundle.save()
-    with pytest.raises(PolicyViolationError):
+    with pytest.raises(EngineUnavailableError) as minutes_failure:
         run_generate(bundle)
+    assert minutes_failure.value.details == integration_failure.value.details
     assert bundle.manifest.minutes_versions == []
 
 

@@ -40,7 +40,14 @@ RESOURCES = {
 # Resolve the trusted import path once; inspection walks never follow symlinks.
 _PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 _MAX_SOURCE_BYTES = 512 * 1024
+_BRIEF_EXECUTION_SOURCES = (
+    "brief/__init__.py",
+    "brief/builder.py",
+    "brief/gaia_context.py",
+    "brief/models.py",
+)
 _TEXT_EXECUTION_SOURCES = (
+    *_BRIEF_EXECUTION_SOURCES,
     "bundle/hashing.py",
     "errors.py",
     "generate/bounded.py",
@@ -154,6 +161,7 @@ _CODEX_APP_SERVER_SOURCES = _closed_sources(
         "providers/codex/_runtime.py",
         "providers/codex/_runtime_lock.py",
         "providers/codex/_session.py",
+        "providers/codex/_supervisor.py",
         "providers/codex/backend.py",
     ),
 )
@@ -280,7 +288,7 @@ def _runtime_digest(provider_id: str, metadata: str, record: str) -> str | None:
             source_digest = _provider_source_digest(_PROVIDER_SOURCE_SETS[provider_id])
         except (OSError, ValueError):
             return None
-        payload += f"\0narumi-{provider_id}-sources-v3\0".encode("ascii") + source_digest
+        payload += f"\0narumi-{provider_id}-sources-v4\0".encode("ascii") + source_digest
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -387,7 +395,7 @@ class RuntimeInspector:
                 raise EngineUnavailableError(
                     "Codex adapter source inventory is unavailable"
                 ) from None
-            payload += b"\0narumi-codex-app-server-sources-v3\0" + source_digest
+            payload += b"\0narumi-codex-app-server-sources-v5\0" + source_digest
         return hashlib.sha256(payload).hexdigest()
 
     def prepare(

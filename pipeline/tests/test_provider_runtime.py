@@ -552,7 +552,7 @@ def test_distribution_fingerprint_is_required_only_for_http_runtime(
     service.close()
 
 
-def test_openai_api_runtime_uses_the_complete_v3_fingerprint_format(
+def test_openai_api_runtime_uses_the_complete_v4_fingerprint_format(
     openai_source_package,
 ):
     source_digest = hashlib.sha256()
@@ -561,7 +561,7 @@ def test_openai_api_runtime_uses_the_complete_v3_fingerprint_format(
         source_digest.update(relative_path.encode("ascii") + b"\0" + digest)
     payload = (
         b"fixture metadata\nfixture record"
-        + b"\0narumi-openai-api-sources-v3\0"
+        + b"\0narumi-openai-api-sources-v4\0"
         + source_digest.digest()
     )
     assert (
@@ -571,6 +571,10 @@ def test_openai_api_runtime_uses_the_complete_v3_fingerprint_format(
 
 def test_provider_runtime_source_sets_cover_dispatch_checkpoints_prompts_and_policy():
     common = {
+        "brief/__init__.py",
+        "brief/builder.py",
+        "brief/gaia_context.py",
+        "brief/models.py",
         "bundle/hashing.py",
         "errors.py",
         "generate/bounded.py",
@@ -599,6 +603,7 @@ def test_provider_runtime_source_sets_cover_dispatch_checkpoints_prompts_and_pol
     for provider_id, sources in runtime_catalog_module._PROVIDER_SOURCE_SETS.items():
         assert len(sources) == len(set(sources)), provider_id
         assert common <= set(sources), provider_id
+        assert set(runtime_catalog_module._BRIEF_EXECUTION_SOURCES) <= set(sources), provider_id
 
     assert {
         "providers/codex/_generation.py",
@@ -607,6 +612,7 @@ def test_provider_runtime_source_sets_cover_dispatch_checkpoints_prompts_and_pol
         "providers/codex/_rpc.py",
         "providers/codex/_runtime.py",
         "providers/codex/_session.py",
+        "providers/codex/_supervisor.py",
         "providers/codex/backend.py",
     } <= set(runtime_catalog_module._CODEX_APP_SERVER_SOURCES)
     assert {
@@ -652,7 +658,40 @@ def test_provider_runtime_source_sets_cover_dispatch_checkpoints_prompts_and_pol
     } <= set(runtime_catalog_module._CLAUDE_ADAPTER_SOURCES)
 
 
-def test_openai_compatible_runtime_uses_the_complete_v3_fingerprint_format(
+@pytest.mark.parametrize("relative_path", runtime_catalog_module._BRIEF_EXECUTION_SOURCES)
+def test_each_brief_source_changes_every_text_provider_runtime_identity(
+    openai_source_package, relative_path
+):
+    inspector = RuntimeInspector()
+    before = {
+        provider_id: inspector.resource(provider_id)
+        for provider_id in runtime_catalog_module.RESOURCES
+    }
+    codex_resource = {
+        "resource_id": "codex-runtime",
+        "sha256": "a" * 64,
+        "version": "fixture",
+    }
+    codex_before = inspector.catalog_revision(codex_resource)
+    source = openai_source_package / relative_path
+    original = source.read_bytes()
+    source.write_bytes(original + b"fixture changed meeting brief behavior\n")
+    try:
+        after = {
+            provider_id: inspector.resource(provider_id)
+            for provider_id in runtime_catalog_module.RESOURCES
+        }
+        for provider_id in runtime_catalog_module.RESOURCES:
+            assert after[provider_id]["sha256"] != before[provider_id]["sha256"]
+            assert inspector.catalog_revision(after[provider_id]) != inspector.catalog_revision(
+                before[provider_id]
+            )
+        assert inspector.catalog_revision(codex_resource) != codex_before
+    finally:
+        source.write_bytes(original)
+
+
+def test_openai_compatible_runtime_uses_the_complete_v4_fingerprint_format(
     openai_source_package,
 ):
     source_digest = hashlib.sha256()
@@ -661,7 +700,7 @@ def test_openai_compatible_runtime_uses_the_complete_v3_fingerprint_format(
         source_digest.update(relative_path.encode("ascii") + b"\0" + digest)
     payload = (
         b"fixture metadata\nfixture record"
-        + b"\0narumi-openai-compatible-api-sources-v3\0"
+        + b"\0narumi-openai-compatible-api-sources-v4\0"
         + source_digest.digest()
     )
     assert (
@@ -670,7 +709,7 @@ def test_openai_compatible_runtime_uses_the_complete_v3_fingerprint_format(
     )
 
 
-def test_codex_catalog_revision_binds_binary_resource_to_v3_adapter_sources(
+def test_codex_catalog_revision_binds_binary_resource_to_v4_adapter_sources(
     openai_source_package,
 ):
     resource = {
@@ -684,7 +723,7 @@ def test_codex_catalog_revision_binds_binary_resource_to_v3_adapter_sources(
         source_digest.update(relative_path.encode("ascii") + b"\0" + digest)
     payload = (
         json.dumps(resource, sort_keys=True).encode()
-        + b"\0narumi-codex-app-server-sources-v3\0"
+        + b"\0narumi-codex-app-server-sources-v5\0"
         + source_digest.digest()
     )
     assert RuntimeInspector.catalog_revision(resource) == hashlib.sha256(payload).hexdigest()
@@ -703,6 +742,31 @@ def test_each_codex_source_changes_codex_catalog_revision(openai_source_package)
         original = source.read_bytes()
         source.write_bytes(original + b"fixture changed Codex adapter behavior\n")
         assert inspector.catalog_revision(resource) != before
+        source.write_bytes(original)
+
+
+def test_codex_supervisor_changes_only_the_codex_runtime_identity(openai_source_package):
+    inspector = RuntimeInspector()
+    provider_before = {
+        provider_id: inspector.resource(provider_id)
+        for provider_id in runtime_catalog_module.RESOURCES
+    }
+    codex_resource = {
+        "resource_id": "codex-runtime",
+        "sha256": "a" * 64,
+        "version": "fixture",
+    }
+    codex_before = inspector.catalog_revision(codex_resource)
+    source = openai_source_package / "providers/codex/_supervisor.py"
+    original = source.read_bytes()
+    source.write_bytes(original + b"fixture changed Codex supervision behavior\n")
+    try:
+        assert inspector.catalog_revision(codex_resource) != codex_before
+        assert {
+            provider_id: inspector.resource(provider_id)
+            for provider_id in runtime_catalog_module.RESOURCES
+        } == provider_before
+    finally:
         source.write_bytes(original)
 
 
@@ -755,7 +819,7 @@ def test_each_openai_api_source_changes_the_affected_runtime_identities(
         ("ollama", runtime_catalog_module._OLLAMA_SOURCES),
     ],
 )
-def test_http_runtime_uses_the_complete_v3_fingerprint_format(
+def test_http_runtime_uses_the_complete_v4_fingerprint_format(
     openai_source_package, provider_id, sources
 ):
     source_digest = hashlib.sha256()
@@ -764,7 +828,7 @@ def test_http_runtime_uses_the_complete_v3_fingerprint_format(
         source_digest.update(relative_path.encode("ascii") + b"\0" + digest)
     payload = (
         b"fixture metadata\nfixture record"
-        + f"\0narumi-{provider_id}-sources-v3\0".encode("ascii")
+        + f"\0narumi-{provider_id}-sources-v4\0".encode("ascii")
         + source_digest.digest()
     )
     assert RuntimeInspector().resource(provider_id)["sha256"] == hashlib.sha256(payload).hexdigest()
