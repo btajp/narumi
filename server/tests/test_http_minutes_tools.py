@@ -322,6 +322,145 @@ def test_unknown_http_result_survives_restart_and_requires_new_epoch(
         resumed.close()
 
 
+@pytest.mark.parametrize("http_context", ["openai-api"], indirect=True)
+@pytest.mark.parametrize("surface", ["meeting", "profile"])
+def test_minutes_cache_epoch_is_monotonic_for_the_same_selection(http_context, surface):
+    ctx, _, _, backend, config = http_context
+    if surface == "meeting":
+        meeting_id = saved_meeting(ctx, config)
+
+        def current():
+            return result(ctx, "get_meeting", {"meeting_id": meeting_id})["config"]
+
+        def save(changes, expected):
+            return result(
+                ctx,
+                "set_meeting_config",
+                {
+                    "meeting_id": meeting_id,
+                    **changes,
+                    "expected_config": expected,
+                    "request_id": str(uuid4()),
+                },
+            )["config"]
+
+        def reject_save(changes, expected):
+            reject(
+                ctx,
+                "set_meeting_config",
+                {
+                    "meeting_id": meeting_id,
+                    **changes,
+                    "expected_config": expected,
+                    "request_id": str(uuid4()),
+                },
+                "invalid_argument",
+            )
+
+    else:
+        result(
+            ctx,
+            "set_profile",
+            {
+                "name": "epoch-guard",
+                "config": config.model_dump(mode="json"),
+                "request_id": str(uuid4()),
+            },
+        )
+
+        def current():
+            return result(ctx, "get_profile", {"name": "epoch-guard"})["profile"]["config"]
+
+        def save(changes, expected):
+            return result(
+                ctx,
+                "set_profile",
+                {
+                    "name": "epoch-guard",
+                    "config": changes,
+                    "expected_config": expected,
+                    "request_id": str(uuid4()),
+                },
+            )["profile"]["config"]
+
+        def reject_save(changes, expected):
+            reject(
+                ctx,
+                "set_profile",
+                {
+                    "name": "epoch-guard",
+                    "config": changes,
+                    "expected_config": expected,
+                    "request_id": str(uuid4()),
+                },
+                "invalid_argument",
+            )
+
+    snapshot = current()
+    advanced = copy.deepcopy(snapshot["minutes_model"])
+    advanced["cache_epoch"] = 2
+    snapshot = save({"minutes_model": advanced}, snapshot)
+    assert snapshot["minutes_model"]["cache_epoch"] == 2
+
+    snapshot = save({"language": "en"}, snapshot)
+    assert snapshot["minutes_model"]["cache_epoch"] == 2
+    regressed = copy.deepcopy(snapshot["minutes_model"])
+    regressed["cache_epoch"] = 1
+    regressed["connection_revision"] += 1
+    reject_save({"minutes_model": regressed}, snapshot)
+    assert current() == snapshot
+
+    changed_identity = copy.deepcopy(snapshot["minutes_model"])
+    changed_identity.update(parameters={"max_tokens": 1024}, cache_epoch=0)
+    saved = save({"minutes_model": changed_identity}, snapshot)
+    assert saved["minutes_model"] == changed_identity
+    assert backend.calls == []
+
+
+@pytest.mark.parametrize("http_context", ["openai-api"], indirect=True)
+def test_profile_epoch_guard_rechecks_after_internal_cas_conflict(http_context, monkeypatch):
+    ctx, _, _, backend, config = http_context
+    result(
+        ctx,
+        "set_profile",
+        {
+            "name": "racing-epoch",
+            "config": config.model_dump(mode="json"),
+            "request_id": str(uuid4()),
+        },
+    )
+    original_set = ctx.profiles.set
+    concurrent = config.model_copy(deep=True)
+    assert concurrent.minutes_model is not None
+    concurrent.minutes_model.cache_epoch = 3
+    raced = False
+
+    def racing_set(name, **kwargs):
+        nonlocal raced
+        if not raced:
+            raced = True
+            original_set(name, config=concurrent)
+        return original_set(name, **kwargs)
+
+    monkeypatch.setattr(ctx.profiles, "set", racing_set)
+    requested = config.minutes_model.model_dump(mode="json")
+    requested["cache_epoch"] = 1
+    reject(
+        ctx,
+        "set_profile",
+        {
+            "name": "racing-epoch",
+            "config": {"minutes_model": requested},
+            "request_id": str(uuid4()),
+        },
+        "invalid_argument",
+    )
+    stored = result(ctx, "get_profile", {"name": "racing-epoch"})["profile"]["config"]
+    assert raced is True
+    assert stored == concurrent.model_dump(mode="json")
+    assert backend.calls == []
+
+
 @pytest.mark.parametrize("transport", ["streamable-http", "stdio", "in-process"])
 def test_minutes_capabilities_only_advertise_resident_adapters(home, transport):
     ctx = context(home, MemorySecretStore(), FakeMetadata(), FakeHTTPBackend(), transport=transport)
@@ -330,7 +469,14 @@ def test_minutes_capabilities_only_advertise_resident_adapters(home, transport):
         resident = transport == "streamable-http"
         assert capabilities["workflow"]["stage_model_selection"] is resident
         assert set(capabilities["minutes_model_providers"]) == (
-            {*PROVIDERS, "codex-app-server"} if resident else set()
+            {
+                *PROVIDERS,
+                "codex-app-server",
+                "claude-agent-sdk",
+                "openai-compatible-api",
+            }
+            if resident
+            else set()
         )
     finally:
         ctx.close()

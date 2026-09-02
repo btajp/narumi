@@ -105,15 +105,19 @@ def test_server_reports_resident_capabilities_for_mixed_transports(home):
         assert info["capabilities"]["workflow"] == {
             "provider_connections": True,
             "provider_models": True,
+            "provider_model_verification": True,
             "stage_model_selection": True,
             "ensemble_generation": False,
         }
         assert info["capabilities"]["minutes_model_providers"] == [
             "codex-app-server",
+            "claude-agent-sdk",
+            "openai-api",
+            "openai-compatible-api",
             "anthropic-api",
             "ollama",
-            "openai-api",
         ]
+        assert "claude-agent-sdk" not in info["capabilities"]["llm_providers"]
         assert info["capabilities"]["transcription_model_providers"] == ["openai-api"]
         assert info["secure_transport"] == {
             "mode": "pinned_tls",
