@@ -609,6 +609,7 @@ def test_provider_runtime_source_sets_cover_dispatch_checkpoints_prompts_and_pol
         "providers/codex/_generation.py",
         "providers/codex/_models.py",
         "providers/codex/_policy.py",
+        "providers/codex/_process_tree.py",
         "providers/codex/_rpc.py",
         "providers/codex/_runtime.py",
         "providers/codex/_session.py",
@@ -742,6 +743,34 @@ def test_each_codex_source_changes_codex_catalog_revision(openai_source_package)
         original = source.read_bytes()
         source.write_bytes(original + b"fixture changed Codex adapter behavior\n")
         assert inspector.catalog_revision(resource) != before
+        source.write_bytes(original)
+
+
+def test_codex_process_tree_changes_source_fingerprint_and_catalog_revision(
+    openai_source_package,
+):
+    inspector = RuntimeInspector()
+    resource = {
+        "resource_id": "codex-runtime",
+        "sha256": "a" * 64,
+        "version": "fixture",
+    }
+    source = openai_source_package / "providers/codex/_process_tree.py"
+    original = source.read_bytes()
+    before_fingerprint = runtime_catalog_module._provider_source_digest(
+        runtime_catalog_module._CODEX_APP_SERVER_SOURCES
+    )
+    before_revision = inspector.catalog_revision(resource)
+    source.write_bytes(original + b"fixture changed Codex process-tree behavior\n")
+    try:
+        assert (
+            runtime_catalog_module._provider_source_digest(
+                runtime_catalog_module._CODEX_APP_SERVER_SOURCES
+            )
+            != before_fingerprint
+        )
+        assert inspector.catalog_revision(resource) != before_revision
+    finally:
         source.write_bytes(original)
 
 

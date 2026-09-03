@@ -143,6 +143,7 @@ class FakeCodexBackend:
     def __init__(self):
         self.calls = []
         self.authenticated = set()
+        self.auth_generations = {}
         self.version = "1.0.0"
         self.error = None
         self.complete_error = None
@@ -190,6 +191,11 @@ class FakeCodexBackend:
             raise self.error
 
     def authenticate(self, connection_id, *, on_authorization_code, cancelled, operation_id=None):
+        if operation_id is not None and self.auth_generations.get(connection_id) != (
+            operation_id,
+            "prepared",
+        ):
+            raise CancelledError("fixture authentication generation is no longer current")
         self.calls.append(("authenticate", connection_id))
         on_authorization_code(self.authorization_url, self.user_code)
         if self.on_auth is not None:
@@ -199,6 +205,33 @@ class FakeCodexBackend:
         if self.error is not None:
             raise self.error
         self.authenticated.add(connection_id)
+        if operation_id is not None:
+            self.auth_generations[connection_id] = (operation_id, "settled")
+
+    def register_auth_generation(self, connection_id, *, operation_id, replace, cleanup_required):
+        current = self.auth_generations.get(connection_id)
+        if current is not None and current[0] == operation_id:
+            if cleanup_required and current[1] == "registered":
+                self.auth_generations[connection_id] = (operation_id, "cleanup_required")
+            return True
+        if current is not None and not replace:
+            return False
+        phase = "cleanup_required" if cleanup_required else "registered"
+        self.auth_generations[connection_id] = (operation_id, phase)
+        return True
+
+    def is_auth_generation_current(self, connection_id, *, operation_id):
+        current = self.auth_generations.get(connection_id)
+        return current is not None and current[0] == operation_id
+
+    def prepare_auth(self, connection_id, *, operation_id):
+        current = self.auth_generations.get(connection_id)
+        if current != (operation_id, "registered"):
+            return False
+        self.calls.append(("prepare_auth", connection_id))
+        self.authenticated.discard(connection_id)
+        self.auth_generations[connection_id] = (operation_id, "prepared")
+        return True
 
     def list_models(self, connection_id):
         self.calls.append(("list_models", connection_id))
@@ -213,10 +246,16 @@ class FakeCodexBackend:
         if self.error is not None:
             raise self.error
         self.authenticated.discard(connection_id)
+        self.auth_generations.pop(connection_id, None)
 
     def cancel_auth(self, connection_id, *, operation_id=None):
+        current = self.auth_generations.get(connection_id)
+        if operation_id is not None and (current is None or current[0] != operation_id):
+            return False
         self.calls.append(("cancel_auth", connection_id))
-        self.authenticated.discard(connection_id)
+        if current is None or current[1] != "registered":
+            self.authenticated.discard(connection_id)
+        self.auth_generations.pop(connection_id, None)
         return True
 
     def complete(

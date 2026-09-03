@@ -120,7 +120,17 @@ class CodexAuthentication:
     def _prepare_login(self, operation_id: str, snapshot: dict[str, Any]) -> bool:
         """Delete an older session before asking App Server to install a replacement."""
         try:
-            cleanup_verified = self.service.codex_backend.cancel_auth(
+            with self.service.store.transaction() as document:
+                operation = document["auth_operations"].get(operation_id)
+                record = document["connections"].get(snapshot["connection_id"])
+                if operation is None or not self._matches(operation, record, snapshot):
+                    return False
+                record["credential_present"] = False
+        except Exception:
+            self._mark_login_cleanup_unknown(operation_id, snapshot)
+            return False
+        try:
+            cleanup_verified = self.service.codex_backend.prepare_auth(
                 snapshot["connection_id"], operation_id=operation_id
             )
         except Exception:
@@ -128,17 +138,7 @@ class CodexAuthentication:
         if cleanup_verified is False:
             self._mark_login_cleanup_unknown(operation_id, snapshot)
             return False
-        try:
-            with self.service.store.transaction() as document:
-                operation = document["auth_operations"].get(operation_id)
-                record = document["connections"].get(snapshot["connection_id"])
-                if operation is None or not self._matches(operation, record, snapshot):
-                    return False
-                record["credential_present"] = False
-            return True
-        except Exception:
-            self._mark_login_cleanup_unknown(operation_id, snapshot)
-            return False
+        return True
 
     def _mark_login_cleanup_unknown(self, operation_id: str, snapshot: dict[str, Any]) -> None:
         try:
@@ -155,7 +155,6 @@ class CodexAuthentication:
                     updated_at=timestamp(),
                 )
                 record.update(
-                    credential_present=True,
                     active_auth=self.auth._active(operation),
                     auth_state="unknown",
                     checked_at=None,
@@ -176,6 +175,9 @@ class CodexAuthentication:
                     record is not None
                     and record["revision"] == snapshot["revision"]
                     and (active is None or active.get("operation_id") == operation_id)
+                    and self.service.codex_backend.is_auth_generation_current(
+                        snapshot["connection_id"], operation_id=operation_id
+                    )
                 )
                 cleanup_verified = False
                 if owns_record:
@@ -213,7 +215,7 @@ class CodexAuthentication:
                         )
                     else:
                         record.update(
-                            credential_present=True,
+                            credential_present=False,
                             active_auth=self.auth._active(operation),
                             auth_state="unknown",
                             checked_at=None,
@@ -347,6 +349,7 @@ class CodexAuthentication:
             ):
                 raise BusyError("Provider runtime preparation is active")
             active = record["active_auth"]
+            active_operation_id = None if active is None else active["operation_id"]
             cancel_auth(document, record, "connection_logged_out")
             if active is not None:
                 self.forget(active["operation_id"])
@@ -366,7 +369,18 @@ class CodexAuthentication:
             response = service.requests.complete(receipt, {"operation": operation})
             snapshot = copy.deepcopy(record)
         try:
-            service.codex_backend.cancel_auth(snapshot["connection_id"])
+            if active_operation_id is not None:
+                registered = service.codex_backend.register_auth_generation(
+                    snapshot["connection_id"],
+                    operation_id=active_operation_id,
+                    replace=False,
+                    cleanup_required=not snapshot["credential_present"],
+                )
+                cleaned = registered and service.codex_backend.cancel_auth(
+                    snapshot["connection_id"], operation_id=active_operation_id
+                )
+                if not cleaned:
+                    raise NarumiError("Codex authentication generation is no longer current")
             service.auth_executor.submit(self._run_logout, operation["operation_id"], snapshot)
         except Exception:
             self.auth._submission_failed(operation["operation_id"], snapshot)

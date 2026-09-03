@@ -21,6 +21,7 @@ from narumi.errors import (
     InvalidArgumentError,
 )
 from narumi.providers.codex import _generation, _policy, _rpc, _runtime, _session
+from narumi.providers.codex import backend as _backend
 from narumi.providers.codex.backend import CodexBackend
 
 CONNECTION = "conn-0123456789abcdef"
@@ -61,6 +62,9 @@ class FakeRPC:
         ]
         self.calls, self.notifications, self.waited = [], [], []
         self.closed, self.cancel_count, self.config_count = False, 0, 0
+        self.cleanup_attempts = []
+        self.cleanup_results = list(options.get("cleanup_results", []))
+        self.termination_result = None
         self.cancelled, self.waiting, self.release = (
             threading.Event(),
             threading.Event(),
@@ -168,11 +172,24 @@ class FakeRPC:
     def cancel(self):
         self.cancel_count += 1
         self.cancelled.set()
+        self.termination_result = self.cleanup_results.pop(0) if self.cleanup_results else True
+        self.cleanup_attempts.append(self.termination_result)
 
     def close(self):
         self.closed = True
-        if self.options.get("close_error"):
-            raise RuntimeError(SECRET)
+        attempts = 1 if self.termination_result is False else 2
+        for _ in range(attempts):
+            self.termination_result = self.cleanup_results.pop(0) if self.cleanup_results else True
+            self.cleanup_attempts.append(self.termination_result)
+            if self.termination_result:
+                break
+        if not self.termination_result:
+            raise _rpc.unavailable(_rpc.PROCESS_CLEANUP_REASON)
+        close_error = self.options.get("close_error")
+        if close_error:
+            if isinstance(close_error, BaseException):
+                raise close_error
+            raise _rpc.unavailable(_rpc.PROCESS_CLEANUP_REASON)
 
 
 @pytest.fixture
@@ -215,7 +232,12 @@ def setup(tmp_path, monkeypatch):
     monkeypatch.setattr(_policy, "check_callback_ports", no_process, raising=False)
     monkeypatch.setattr(backend.runtime, "require_prepared", prepared)
     yield fixture
-    backend.close()
+    try:
+        backend.close()
+    except EngineUnavailableError as error:
+        if not backend._poisoned_connections:
+            raise
+        assert_private(error, _rpc.PROCESS_CLEANUP_REASON)
 
 
 def save_credentials(fixture, connection=CONNECTION, contents=ORIGINAL):
@@ -241,6 +263,14 @@ def force_terminated_credential_write(fixture, connection=CONNECTION, marker="a"
 def authenticate(fixture, connection=CONNECTION, *, callback=None, operation_id=None):
     authorizations = []
     receive = callback or (lambda url, code: authorizations.append((url, code)))
+    if operation_id is not None:
+        assert fixture.backend.register_auth_generation(
+            connection,
+            operation_id=operation_id,
+            replace=True,
+            cleanup_required=False,
+        )
+        assert fixture.backend.prepare_auth(connection, operation_id=operation_id)
     fixture.backend.authenticate(
         connection,
         on_authorization_code=receive,
@@ -398,6 +428,40 @@ def test_success_without_fresh_credentials_is_not_reported_as_complete(setup, op
     with pytest.raises(EngineUnavailableError) as failure:
         authenticate(setup) if operation == "auth" else setup.backend.list_models(CONNECTION)
     assert_private(failure.value, "codex_credentials_missing")
+    assert CONNECTION not in setup.backend._poisoned_connections
+    setup.options.append({"credentials": REFRESHED})
+    if operation == "auth":
+        authenticate(setup)
+    else:
+        setup.backend.list_models(CONNECTION)
+    assert_clean(setup)
+
+
+def test_rejected_credentials_do_not_poison_connection_and_auth_can_retry(setup):
+    setup.options.append({"credentials": b""})
+    with pytest.raises(EngineUnavailableError) as failure:
+        authenticate(setup)
+
+    assert_private(failure.value, "codex_credential_file_rejected")
+    assert CONNECTION not in setup.backend._poisoned_connections
+    authenticate(setup)
+    assert_clean(setup)
+
+
+def test_pre_replace_credential_install_failure_does_not_poison_connection(setup, monkeypatch):
+    original_replace = _session.os.replace
+
+    def reject_replace(*args, **kwargs):
+        raise OSError(SECRET)
+
+    monkeypatch.setattr(_session.os, "replace", reject_replace)
+    with pytest.raises(EngineUnavailableError) as failure:
+        authenticate(setup)
+
+    assert_private(failure.value, "codex_operation_failed")
+    assert CONNECTION not in setup.backend._poisoned_connections
+    monkeypatch.setattr(_session.os, "replace", original_replace)
+    authenticate(setup)
     assert_clean(setup)
 
 
@@ -426,6 +490,10 @@ def test_post_replace_directory_sync_failure_reports_unknown_credential_install(
     assert_private(failure.value, "codex_credential_install_outcome_unknown")
     saved = _session.connection_directory(setup.root, CONNECTION) / "state/auth.json"
     assert saved.read_bytes() == REFRESHED
+    assert CONNECTION in setup.backend._poisoned_connections
+    with pytest.raises(EngineUnavailableError) as blocked:
+        setup.backend.list_models(CONNECTION)
+    assert_private(blocked.value, _rpc.PROCESS_CLEANUP_REASON)
     assert_clean(setup)
 
 
@@ -567,27 +635,197 @@ def test_stale_auth_cancel_cannot_stop_a_new_operation(setup):
             assert not new.cancelled.is_set()
             new.release.set()
             second.result(timeout=2)
+            assert setup.backend.cancel_auth(CONNECTION, operation_id="old-auth") is False
+            assert saved.read_bytes() == REFRESHED
         finally:
             setup.backend.close()
     assert saved.read_bytes() == REFRESHED
     assert_clean(setup)
 
 
+def test_unknown_auth_cancel_never_deletes_current_credentials(setup):
+    authenticate(setup, operation_id="current-auth")
+    saved = _session.connection_directory(setup.root, CONNECTION) / "state/auth.json"
+    created = len(setup.rpcs)
+
+    assert setup.backend.cancel_auth(CONNECTION, operation_id="unknown-auth") is False
+    assert saved.read_bytes() == REFRESHED and len(setup.rpcs) == created
+    assert setup.backend.cancel_auth(CONNECTION, operation_id="current-auth") is True
+    assert not saved.exists()
+    assert setup.backend.cancel_auth(CONNECTION, operation_id="current-auth") is False
+
+
+def test_cancelling_queued_reauthentication_preserves_existing_credentials(setup):
+    authenticate(setup, operation_id="initial-auth")
+    saved = _session.connection_directory(setup.root, CONNECTION) / "state/auth.json"
+    before = saved.read_bytes()
+    assert setup.backend.register_auth_generation(
+        CONNECTION,
+        operation_id="queued-reauth",
+        replace=True,
+        cleanup_required=False,
+    )
+
+    assert setup.backend.cancel_auth(CONNECTION, operation_id="queued-reauth") is True
+    assert saved.read_bytes() == before
+    assert CONNECTION not in setup.backend._auth_generations
+
+
+def test_recovered_auth_cancellation_removes_unverified_credentials(setup):
+    saved = save_credentials(setup)
+    assert setup.backend.register_auth_generation(
+        CONNECTION,
+        operation_id="recovered-auth",
+        replace=False,
+        cleanup_required=True,
+    )
+
+    assert setup.backend.cancel_auth(CONNECTION, operation_id="recovered-auth") is True
+    assert not saved.exists()
+
+
+def test_registered_auth_generation_must_match_prepare_and_authenticate(setup):
+    assert setup.backend.register_auth_generation(
+        CONNECTION,
+        operation_id="registered-auth",
+        replace=False,
+        cleanup_required=False,
+    )
+    assert not setup.backend.register_auth_generation(
+        CONNECTION,
+        operation_id="unknown-auth",
+        replace=False,
+        cleanup_required=False,
+    )
+    assert setup.backend.prepare_auth(CONNECTION, operation_id="registered-auth")
+
+    with pytest.raises(CancelledError):
+        setup.backend.authenticate(
+            CONNECTION,
+            on_authorization_code=lambda *_: None,
+            cancelled=lambda: False,
+            operation_id="unknown-auth",
+        )
+    assert setup.rpcs == []
+    setup.backend.authenticate(
+        CONNECTION,
+        on_authorization_code=lambda *_: None,
+        cancelled=lambda: False,
+        operation_id="registered-auth",
+    )
+    assert setup.backend.cancel_auth(CONNECTION, operation_id="registered-auth") is True
+
+
+def test_credential_commit_callback_can_cancel_without_lock_reentry_deadlock():
+    result = queue.Queue()
+    holder = {}
+
+    def cancel_from_callback():
+        holder["operation"].cancel()
+        return False
+
+    operation = _backend._Operation(
+        CONNECTION,
+        "auth",
+        threading.Event(),
+        cancel_from_callback,
+        lambda _: None,
+    )
+    holder["operation"] = operation
+    worker = threading.Thread(
+        target=lambda: result.put(operation.install_credentials(lambda: None)), daemon=True
+    )
+    worker.start()
+    worker.join(2)
+
+    assert not worker.is_alive()
+    assert result.get_nowait() is False
+
+
+def test_failed_auth_prepare_keeps_generation_for_explicit_reconciliation(setup, monkeypatch):
+    saved = save_credentials(setup)
+    assert setup.backend.register_auth_generation(
+        CONNECTION,
+        operation_id="reconcile-auth",
+        replace=True,
+        cleanup_required=False,
+    )
+    original_clear = _backend.clear_credentials
+
+    def reject_cleanup(*args, **kwargs):
+        raise OSError(SECRET)
+
+    monkeypatch.setattr(_backend, "clear_credentials", reject_cleanup)
+    with pytest.raises(EngineUnavailableError) as failure:
+        setup.backend.prepare_auth(CONNECTION, operation_id="reconcile-auth")
+    assert_private(failure.value, "codex_operation_failed")
+    assert saved.read_bytes() == ORIGINAL
+
+    monkeypatch.setattr(_backend, "clear_credentials", original_clear)
+    assert setup.backend.cancel_auth(CONNECTION, operation_id="reconcile-auth") is True
+    assert not saved.exists()
+    assert setup.backend.cancel_auth(CONNECTION, operation_id="reconcile-auth") is False
+
+
+def test_cancel_waits_for_active_auth_prepare_then_finishes_cleanup(setup, monkeypatch):
+    saved = save_credentials(setup)
+    assert setup.backend.register_auth_generation(
+        CONNECTION,
+        operation_id="preparing-auth",
+        replace=True,
+        cleanup_required=False,
+    )
+    entered, release = threading.Event(), threading.Event()
+    original_clear = _backend.clear_credentials
+    calls = 0
+
+    def block_first_cleanup(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            assert release.wait(3)
+        return original_clear(*args, **kwargs)
+
+    monkeypatch.setattr(_backend, "clear_credentials", block_first_cleanup)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        preparing = executor.submit(
+            setup.backend.prepare_auth, CONNECTION, operation_id="preparing-auth"
+        )
+        assert entered.wait(2)
+        assert setup.backend.register_auth_generation(
+            CONNECTION,
+            operation_id="preparing-auth",
+            replace=False,
+            cleanup_required=True,
+        )
+        cancelling = executor.submit(
+            setup.backend.cancel_auth, CONNECTION, operation_id="preparing-auth"
+        )
+        assert not cancelling.done()
+        release.set()
+        assert preparing.result(timeout=2) is True
+        assert cancelling.result(timeout=2) is True
+
+    assert calls == 2
+    assert not saved.exists()
+    assert CONNECTION not in setup.backend._auth_generations
+
+
 def test_cancel_waits_past_late_credential_copy_and_verifies_cleanup(setup, monkeypatch):
     copied = threading.Event()
-    original_copy = _session._copy_credentials
+    release_install = threading.Event()
+    original_install = _session._install_credentials
     state = _session.connection_directory(setup.root, CONNECTION) / "state"
 
-    def copy_then_wait_for_cancel(source, destination, root, **kwargs):
-        result = original_copy(source, destination, root, **kwargs)
-        if destination == state and result:
+    def install_then_wait_for_cancel(contents, destination, root, **kwargs):
+        original_install(contents, destination, root, **kwargs)
+        if destination == state:
             copied.set()
-            operation = setup.backend._operations[CONNECTION]
-            assert operation.cancelled.wait(2)
-        return result
+            assert release_install.wait(2)
 
-    monkeypatch.setattr(_session, "_copy_credentials", copy_then_wait_for_cancel)
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    monkeypatch.setattr(_session, "_install_credentials", install_then_wait_for_cancel)
+    with ThreadPoolExecutor(max_workers=2) as executor:
         future = executor.submit(
             authenticate,
             setup,
@@ -595,9 +833,14 @@ def test_cancel_waits_past_late_credential_copy_and_verifies_cleanup(setup, monk
         )
         assert copied.wait(2)
         assert (state / "auth.json").exists()
-        assert (
-            setup.backend.cancel_auth(CONNECTION, operation_id="late-copy-authentication") is True
+        cancellation = executor.submit(
+            setup.backend.cancel_auth,
+            CONNECTION,
+            operation_id="late-copy-authentication",
         )
+        assert not cancellation.done()
+        release_install.set()
+        assert cancellation.result(timeout=2) is True
         future.result(timeout=2)
     assert not (state / "auth.json").exists()
     runs = state.parent / "runs"
@@ -728,7 +971,8 @@ def test_close_cancels_all_owned_operations_and_prevents_new_children(setup):
     with pytest.raises(EngineUnavailableError) as failure:
         setup.backend.list_models(CONNECTION)
     assert_private(failure.value, "codex_backend_closed")
-    assert len(setup.rpcs) == 2 and all(path.read_bytes() == ORIGINAL for path in saved)
+    assert len(setup.rpcs) == 2
+    assert not saved[0].exists() and saved[1].read_bytes() == ORIGINAL
     assert_clean(setup)
 
 
@@ -796,11 +1040,239 @@ def test_logout_waits_for_active_auth_cancellation_before_removing_credential(se
 
 def test_rpc_close_failure_still_discards_private_home_and_credentials(setup):
     saved = save_credentials(setup)
-    setup.options.append({"close_error": True})
+    setup.options.append({"cleanup_results": [False, False]})
     with pytest.raises(EngineUnavailableError) as failure:
         authenticate(setup)
-    assert_private(failure.value, "codex_operation_failed")
+    assert_private(failure.value, _rpc.PROCESS_CLEANUP_REASON)
     assert saved.read_bytes() == ORIGINAL
+    assert CONNECTION in setup.backend._poisoned_connections
+    assert all(not rpc.run.exists() for rpc in setup.rpcs)
+    created = len(setup.rpcs)
+    with pytest.raises(EngineUnavailableError) as blocked:
+        setup.backend.list_models(CONNECTION)
+    assert_private(blocked.value, _rpc.PROCESS_CLEANUP_REASON)
+    assert len(setup.rpcs) == created
+    assert setup.backend.list_models(OTHER_CONNECTION)[0]["model_id"] == "fixture-model"
+    with pytest.raises(EngineUnavailableError) as cleanup:
+        setup.backend.logout(CONNECTION)
+    assert_private(cleanup.value, _rpc.PROCESS_CLEANUP_REASON)
+    assert not saved.exists()
+    assert_clean(setup)
+
+
+def test_rpc_constructor_cleanup_uncertainty_poisons_only_its_connection(setup, monkeypatch):
+    working_rpc = _session.StdioRPC
+    failed_runs = []
+
+    def fail_selected_connection(command, **kwargs):
+        run = Path(kwargs["cwd"]).parent
+        if CONNECTION in run.parts:
+            failed_runs.append(run)
+            raise _rpc.unavailable(_rpc.PROCESS_CLEANUP_REASON)
+        return working_rpc(command, **kwargs)
+
+    monkeypatch.setattr(_session, "StdioRPC", fail_selected_connection)
+    with pytest.raises(EngineUnavailableError) as failure:
+        setup.backend.list_models(CONNECTION)
+    assert_private(failure.value, _rpc.PROCESS_CLEANUP_REASON)
+    assert len(failed_runs) == 1 and not failed_runs[0].exists()
+    assert CONNECTION in setup.backend._poisoned_connections
+
+    with pytest.raises(EngineUnavailableError) as blocked:
+        setup.backend.list_models(CONNECTION)
+    assert_private(blocked.value, _rpc.PROCESS_CLEANUP_REASON)
+    assert len(failed_runs) == 1
+    assert setup.backend.list_models(OTHER_CONNECTION)[0]["model_id"] == "fixture-model"
+
+
+@pytest.mark.parametrize("action", ["cancel_auth", "logout"])
+def test_poisoned_connection_cleanup_is_offline_but_never_clears_poison(setup, action):
+    assert setup.backend.register_auth_generation(
+        CONNECTION,
+        operation_id="poisoned-auth",
+        replace=True,
+        cleanup_required=True,
+    )
+    setup.backend._poisoned_connections.add(CONNECTION)
+    saved = save_credentials(setup)
+    interrupted = force_terminated_credential_write(setup)
+
+    with pytest.raises(EngineUnavailableError) as failure:
+        if action == "cancel_auth":
+            setup.backend.cancel_auth(CONNECTION, operation_id="poisoned-auth")
+        else:
+            setup.backend.logout(CONNECTION)
+
+    assert_private(failure.value, _rpc.PROCESS_CLEANUP_REASON)
+    assert not saved.exists() and not interrupted.exists()
+    assert CONNECTION in setup.backend._poisoned_connections
+    assert setup.rpcs == []
+
+
+def test_backend_close_reports_existing_poison_without_an_active_operation(setup):
+    setup.backend._poisoned_connections.add(CONNECTION)
+    with pytest.raises(EngineUnavailableError) as failure:
+        setup.backend.close()
+    assert_private(failure.value, _rpc.PROCESS_CLEANUP_REASON)
+
+
+def test_run_cleanup_failure_never_persists_credentials_and_poisons_connection(setup, monkeypatch):
+    saved = save_credentials(setup)
+    original_rmtree = _session.shutil.rmtree
+
+    def fail_run_cleanup(path, *args, **kwargs):
+        raise OSError(SECRET)
+
+    monkeypatch.setattr(_session.shutil, "rmtree", fail_run_cleanup)
+    with pytest.raises(EngineUnavailableError) as failure:
+        authenticate(setup)
+
+    assert_private(failure.value, "codex_session_cleanup_unverified")
+    rpc = setup.rpcs[0]
+    assert saved.read_bytes() == ORIGINAL and rpc.run.exists()
+    assert CONNECTION in setup.backend._poisoned_connections
+    with pytest.raises(EngineUnavailableError) as blocked:
+        setup.backend.list_models(CONNECTION)
+    assert_private(blocked.value, _rpc.PROCESS_CLEANUP_REASON)
+
+    monkeypatch.setattr(_session.shutil, "rmtree", original_rmtree)
+    original_rmtree(rpc.run)
+    assert_clean(setup)
+
+
+def test_cancel_cleanup_false_then_close_success_does_not_poison_connection(setup):
+    save_credentials(setup)
+    setup.options.append({"block": True, "cleanup_results": [False, True]})
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            authenticate,
+            setup,
+            operation_id="transient-cleanup-authentication",
+        )
+        rpc = setup.created.get(timeout=2)
+        assert rpc.waiting.wait(2)
+        assert (
+            setup.backend.cancel_auth(CONNECTION, operation_id="transient-cleanup-authentication")
+            is True
+        )
+        with pytest.raises(CancelledError):
+            future.result(timeout=2)
+
+    assert rpc.cleanup_attempts == [False, True]
+    assert CONNECTION not in setup.backend._poisoned_connections
+    assert setup.backend.list_models(CONNECTION)[0]["model_id"] == "fixture-model"
+    assert_clean(setup)
+
+
+def test_cancel_cleanup_persistent_false_waits_and_cleans_without_reporting_success(setup):
+    saved = save_credentials(setup)
+    setup.options.append({"block": True, "cleanup_results": [False, False]})
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            authenticate,
+            setup,
+            operation_id="persistent-cleanup-authentication",
+        )
+        rpc = setup.created.get(timeout=2)
+        assert rpc.waiting.wait(2)
+        with pytest.raises(EngineUnavailableError) as cleanup:
+            setup.backend.cancel_auth(CONNECTION, operation_id="persistent-cleanup-authentication")
+        assert_private(cleanup.value, _rpc.PROCESS_CLEANUP_REASON)
+        assert future.done()
+        with pytest.raises(CancelledError):
+            future.result(timeout=2)
+
+    assert rpc.cleanup_attempts == [False, False]
+    assert not saved.exists() and not rpc.run.exists()
+    assert CONNECTION in setup.backend._poisoned_connections
+    created = len(setup.rpcs)
+    with pytest.raises(EngineUnavailableError) as blocked:
+        setup.backend.list_models(CONNECTION)
+    assert_private(blocked.value, _rpc.PROCESS_CLEANUP_REASON)
+    assert len(setup.rpcs) == created
+    assert setup.backend.list_models(OTHER_CONNECTION)[0]["model_id"] == "fixture-model"
+    assert_clean(setup)
+
+
+def test_connection_cleanup_poison_does_not_cancel_another_connection(setup):
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        try:
+            other_future, other_rpc = start_auth(
+                setup,
+                executor,
+                connection=OTHER_CONNECTION,
+                operation_id="independent-authentication",
+            )
+            setup.options.append({"cleanup_results": [False, False]})
+            with pytest.raises(EngineUnavailableError) as failure:
+                authenticate(setup, CONNECTION)
+            assert_private(failure.value, _rpc.PROCESS_CLEANUP_REASON)
+            assert not other_rpc.cancelled.is_set()
+            other_rpc.release.set()
+            other_future.result(timeout=2)
+        finally:
+            with pytest.raises(EngineUnavailableError) as cleanup:
+                setup.backend.close()
+            assert_private(cleanup.value, _rpc.PROCESS_CLEANUP_REASON)
+
+    assert CONNECTION in setup.backend._poisoned_connections
+    assert OTHER_CONNECTION not in setup.backend._poisoned_connections
+    assert_clean(setup)
+
+
+def test_backend_close_cannot_leave_credentials_committed_by_active_auth(setup, monkeypatch):
+    installed = threading.Event()
+    release_install = threading.Event()
+    original_install = _session._install_credentials
+    state = _session.connection_directory(setup.root, CONNECTION) / "state"
+
+    def install_then_pause(contents, destination, root, **kwargs):
+        original_install(contents, destination, root, **kwargs)
+        if destination == state:
+            installed.set()
+            assert release_install.wait(2)
+
+    monkeypatch.setattr(_session, "_install_credentials", install_then_pause)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        authentication = executor.submit(authenticate, setup, operation_id="closing-authentication")
+        assert installed.wait(2) and (state / "auth.json").read_bytes() == REFRESHED
+        closing = executor.submit(setup.backend.close)
+        assert setup.backend._closed.wait(2)
+        release_install.set()
+        with pytest.raises(CancelledError):
+            authentication.result(timeout=2)
+        closing.result(timeout=2)
+
+    assert not (state / "auth.json").exists()
+    assert CONNECTION not in setup.backend._poisoned_connections
+    assert_clean(setup)
+
+
+def test_backend_close_never_deletes_credentials_from_non_auth_operation(setup, monkeypatch):
+    saved = save_credentials(setup)
+    installed = threading.Event()
+    release_install = threading.Event()
+    original_install = _session._install_credentials
+
+    def install_then_pause(contents, destination, root, **kwargs):
+        original_install(contents, destination, root, **kwargs)
+        if destination == saved.parent:
+            installed.set()
+            assert release_install.wait(2)
+
+    monkeypatch.setattr(_session, "_install_credentials", install_then_pause)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        listing = executor.submit(setup.backend.list_models, CONNECTION)
+        assert installed.wait(2) and saved.exists()
+        closing = executor.submit(setup.backend.close)
+        assert setup.backend._closed.wait(2)
+        release_install.set()
+        with pytest.raises(CancelledError):
+            listing.result(timeout=2)
+        closing.result(timeout=2)
+
+    assert saved.read_bytes() == REFRESHED
+    assert CONNECTION not in setup.backend._poisoned_connections
     assert_clean(setup)
 
 
@@ -852,6 +1324,32 @@ def test_generation_success_followed_by_credential_save_failure_is_unknown(setup
     assert_clean(setup)
 
 
+def test_generation_success_followed_by_process_cleanup_failure_is_unknown(setup, monkeypatch):
+    saved = save_credentials(setup)
+    metadata_credential = b'{"fixture_token":"metadata refresh"}'
+    generation_credential = b'{"fixture_token":"generation refresh"}'
+    setup.options.extend(
+        [
+            {"credentials": metadata_credential},
+            {"credentials": generation_credential, "cleanup_results": [False, False]},
+        ]
+    )
+
+    def generate(session, *args, **kwargs):
+        session.generation_attempted = True
+        return "Synthetic minutes whose process cleanup is unverified"
+
+    monkeypatch.setattr(_generation, "generate", generate)
+    with pytest.raises(EngineUnavailableError) as failure:
+        setup.backend.complete(CONNECTION, "fixture-model", {}, "Synthetic transcript")
+
+    assert_private(failure.value, "codex_generation_outcome_unknown")
+    assert saved.read_bytes() == metadata_credential
+    assert CONNECTION in setup.backend._poisoned_connections
+    assert all(not rpc.run.exists() for rpc in setup.rpcs)
+    assert_clean(setup)
+
+
 @pytest.mark.parametrize("primary", ["cancelled", "unknown"])
 def test_generation_primary_failure_survives_rpc_cleanup_failure(setup, monkeypatch, primary):
     save_credentials(setup)
@@ -872,7 +1370,93 @@ def test_generation_primary_failure_survives_rpc_cleanup_failure(setup, monkeypa
     assert failure.value is original
     if primary == "cancelled":
         assert failure.value.details == {"outcome_unknown": False}
+    assert CONNECTION in setup.backend._poisoned_connections
     assert_clean(setup)
+
+
+def test_operation_cancel_failure_preserves_primary_and_finalizes_registry(setup):
+    class FailingCancelRPC:
+        def cancel(self):
+            raise RuntimeError(SECRET)
+
+    original = CancelledError("Fixture primary cancellation")
+    operation = None
+    with pytest.raises(CancelledError) as failure:
+        with setup.backend._operation(CONNECTION, "fixture") as operation:
+            operation.attach(FailingCancelRPC())
+            raise original
+
+    assert failure.value is original
+    assert operation is not None and operation.done.is_set()
+    assert setup.backend._operations == {}
+    assert CONNECTION in setup.backend._poisoned_connections
+
+
+def test_backend_close_attempts_every_operation_before_reporting_cancel_failure(setup):
+    class ClosingRPC:
+        def __init__(self, *, fail):
+            self.fail = fail
+            self.cancel_count = 0
+
+        def cancel(self):
+            self.cancel_count += 1
+            if self.fail:
+                raise RuntimeError(SECRET)
+
+    first_rpc, second_rpc = ClosingRPC(fail=True), ClosingRPC(fail=False)
+    ready = [threading.Event(), threading.Event()]
+
+    def hold(connection, rpc, started):
+        with setup.backend._operation(connection, "fixture") as operation:
+            operation.attach(rpc)
+            started.set()
+            assert operation.cancelled.wait(2)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(hold, CONNECTION, first_rpc, ready[0]),
+            executor.submit(hold, OTHER_CONNECTION, second_rpc, ready[1]),
+        ]
+        assert all(event.wait(2) for event in ready)
+        with pytest.raises(EngineUnavailableError) as failure:
+            setup.backend.close()
+        assert_private(failure.value, _rpc.PROCESS_CLEANUP_REASON)
+        assert first_rpc.cancel_count >= 1 and second_rpc.cancel_count >= 1
+        with pytest.raises(EngineUnavailableError):
+            futures[0].result(timeout=2)
+        futures[1].result(timeout=2)
+
+    assert setup.backend._operations == {}
+
+
+def test_backend_close_waits_for_persistent_cleanup_failure_and_all_operations(setup):
+    saved = [save_credentials(setup, connection) for connection in (CONNECTION, OTHER_CONNECTION)]
+    setup.options.append({"block": True, "cleanup_results": [False, False]})
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(authenticate, setup, CONNECTION)
+        first_rpc = setup.created.get(timeout=2)
+        assert first_rpc.waiting.wait(2)
+        setup.options.append({"block": True})
+        second = executor.submit(authenticate, setup, OTHER_CONNECTION)
+        second_rpc = setup.created.get(timeout=2)
+        assert second_rpc.waiting.wait(2)
+
+        with pytest.raises(EngineUnavailableError) as failure:
+            setup.backend.close()
+
+        assert_private(failure.value, _rpc.PROCESS_CLEANUP_REASON)
+        assert first.done() and second.done()
+        for future in (first, second):
+            with pytest.raises(CancelledError):
+                future.result(timeout=2)
+
+    assert first_rpc.cleanup_attempts == [False, False]
+    assert second_rpc.cancel_count > 0
+    assert CONNECTION in setup.backend._poisoned_connections
+    assert OTHER_CONNECTION not in setup.backend._poisoned_connections
+    assert setup.backend._operations == {}
+    assert all(not path.exists() for path in saved)
+    assert all(not rpc.run.exists() for rpc in setup.rpcs)
 
 
 @pytest.mark.parametrize("identifier", ["../other", "conn-../../other", "conn-not-hex", ""])

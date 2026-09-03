@@ -145,7 +145,17 @@ class Connections:
                 snapshot = copy.deepcopy(record)
         if cancel_codex is not None:
             try:
-                service.codex_backend.cancel_auth(cancel_codex[0], operation_id=cancel_codex[1])
+                registered = service.codex_backend.register_auth_generation(
+                    cancel_codex[0],
+                    operation_id=cancel_codex[1],
+                    replace=False,
+                    cleanup_required=not snapshot["credential_present"],
+                )
+                cleaned = registered and service.codex_backend.cancel_auth(
+                    cancel_codex[0], operation_id=cancel_codex[1]
+                )
+                if not cleaned:
+                    raise NarumiError("Codex authentication generation is no longer current")
             except Exception:
                 service.auth._codex_cancellation_failed(
                     args["request_id"], snapshot["provider_id"], cancel_codex[2]

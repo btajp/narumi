@@ -16,11 +16,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO
 
+from narumi.providers.codex import _process_tree
+from narumi.providers.codex._process_tree import WATCHDOG_PROGRAM
+
 POLL_INTERVAL = 0.05
 PROCESS_REAP_TIMEOUT = 0.5
 TERM_GROUP_TIMEOUT = 1.5
 KILL_GROUP_TIMEOUT = 1.5
-STATE_INSPECTION_TIMEOUT = 1.0
 WATCHDOG_START_TIMEOUT = 3.0
 WATCHDOG_EXIT_TIMEOUT = TERM_GROUP_TIMEOUT + KILL_GROUP_TIMEOUT + 2.0
 _ALLOWED_ENVIRONMENT = frozenset(
@@ -68,279 +70,6 @@ if hasattr(os, "register_at_fork"):
 
 # The watchdog receives only fixed launch metadata and pipe numbers. Request bytes,
 # API keys, auth files and credential descriptors remain outside this process.
-_WATCHDOG_PROGRAM = r"""
-import json
-import os
-import select
-import signal
-import subprocess
-import sys
-import time
-
-POLL = 0.05
-TERM_TIMEOUT = 1.5
-KILL_TIMEOUT = 1.5
-PS_TIMEOUT = 1.0
-START_TIMEOUT = 3.0
-LAUNCHER = r'''\
-import os
-import sys
-
-request_path, response_path, guardian_path, ready_fd = (
-    sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
-)
-command = sys.argv[5:]
-request_fd = os.open(request_path, os.O_RDONLY)
-response_fd = os.open(response_path, os.O_WRONLY)
-guardian_fd = os.open(guardian_path, os.O_RDONLY)
-os.dup2(request_fd, 0)
-os.dup2(response_fd, 1)
-if request_fd not in {0, 1}:
-    os.close(request_fd)
-if response_fd not in {0, 1}:
-    os.close(response_fd)
-anchor_pid = os.fork()
-if anchor_pid == 0:
-    os.close(ready_fd)
-    for descriptor in (0, 1, 2):
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
-    try:
-        while os.read(guardian_fd, 1):
-            pass
-    except OSError:
-        pass
-    os._exit(0)
-os.close(guardian_fd)
-os.write(ready_fd, (str(anchor_pid) + "\n").encode("ascii"))
-os.close(ready_fd)
-os.execvpe(command[0], command, os.environ)
-'''
-
-def close_fd(descriptor):
-    try:
-        os.close(descriptor)
-    except OSError:
-        pass
-
-def read_config(descriptor):
-    chunks = []
-    size = 0
-    while True:
-        block = os.read(descriptor, 65536)
-        if not block:
-            break
-        size += len(block)
-        if size > 131072:
-            raise RuntimeError("watchdog config is too large")
-        chunks.append(block)
-    value = json.loads(b"".join(chunks))
-    if not isinstance(value, dict):
-        raise RuntimeError("invalid watchdog config")
-    return value
-
-def child_status(process):
-    status = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-    if status is None:
-        return None
-    if status.si_pid != process.pid:
-        raise RuntimeError("unexpected child identity")
-    if status.si_code == os.CLD_EXITED:
-        return int(status.si_status)
-    if status.si_code in {os.CLD_KILLED, os.CLD_DUMPED}:
-        return -int(status.si_status)
-    raise RuntimeError("unexpected child status")
-
-def reserved(process):
-    try:
-        status = child_status(process)
-        if status is not None:
-            return True
-        try:
-            return os.getpgid(process.pid) == process.pid
-        except ProcessLookupError:
-            return child_status(process) is not None
-    except (ChildProcessError, OSError, RuntimeError):
-        return False
-
-def group_state(group):
-    proc = "/proc"
-    if os.path.isdir(proc):
-        states = []
-        try:
-            entries = os.listdir(proc)
-        except OSError:
-            return None
-        for entry in entries:
-            if not entry.isdigit():
-                continue
-            try:
-                with open(os.path.join(proc, entry, "stat"), "r", encoding="ascii") as source:
-                    raw = source.read()
-                fields = raw[raw.rindex(") ") + 2:].split()
-                if len(fields) >= 3 and int(fields[2]) == group:
-                    states.append(fields[0])
-            except (OSError, ValueError):
-                continue
-        return bool(states), any(value not in {"Z", "X"} for value in states)
-    try:
-        result = subprocess.run(
-            ["/bin/ps", "-axo", "pgid=,state="],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=PS_TIMEOUT,
-            env={"PATH": "/usr/bin:/bin", "LANG": "C"},
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
-    states = []
-    for line in result.splitlines():
-        fields = line.split()
-        if len(fields) >= 2 and fields[0].isdigit() and int(fields[0]) == group:
-            states.append(fields[1][:1])
-    return bool(states), any(value not in {"Z", "X"} for value in states)
-
-def signal_group(process, requested):
-    if not reserved(process):
-        return False
-    try:
-        os.killpg(process.pid, requested)
-    except ProcessLookupError:
-        return True
-    except PermissionError:
-        state = group_state(process.pid)
-        return state is not None and not state[1]
-    except OSError:
-        return False
-    return True
-
-def wait_quiescent(process, duration):
-    deadline = time.monotonic() + duration
-    while True:
-        state = group_state(process.pid)
-        if state is not None and not state[1]:
-            return True
-        if state is None or time.monotonic() >= deadline:
-            return False
-        time.sleep(POLL)
-
-def cleanup(process):
-    if not signal_group(process, signal.SIGTERM):
-        return False
-    if not wait_quiescent(process, TERM_TIMEOUT):
-        if not signal_group(process, signal.SIGKILL):
-            return False
-        if not wait_quiescent(process, KILL_TIMEOUT):
-            return False
-    try:
-        process.wait(timeout=0.5)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return process.returncode is not None
-
-def main():
-    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
-    config_fd, lifeline_fd, status_fd = (int(value) for value in sys.argv[1:4])
-    config = read_config(config_fd)
-    close_fd(config_fd)
-    process = None
-    try:
-        readable, _, _ = select.select([lifeline_fd], [], [], 0)
-        if readable and os.read(lifeline_fd, 1) == b"":
-            return 3
-        ready_read, ready_write = os.pipe()
-        process = subprocess.Popen(
-            [
-                sys.executable,
-                "-I",
-                "-S",
-                "-c",
-                LAUNCHER,
-                config["request_path"],
-                config["response_path"],
-                config["guardian_path"],
-                str(ready_write),
-                *config["command"],
-            ],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            cwd=config["cwd"],
-            env=config["environment"],
-            bufsize=0,
-            close_fds=True,
-            start_new_session=True,
-            umask=0o077,
-            pass_fds=(ready_write,),
-        )
-        if os.getpgid(process.pid) != process.pid:
-            raise RuntimeError("child process group is not isolated")
-        close_fd(ready_write)
-        os.set_blocking(ready_read, False)
-        ready = bytearray()
-        startup_deadline = time.monotonic() + START_TIMEOUT
-        parent_gone = False
-        while b"\n" not in ready:
-            if child_status(process) is not None:
-                raise RuntimeError("child launcher failed")
-            if time.monotonic() >= startup_deadline:
-                raise RuntimeError("child launcher timed out")
-            readable, _, _ = select.select(
-                [ready_read, lifeline_fd], [], [], min(POLL, startup_deadline - time.monotonic())
-            )
-            if lifeline_fd in readable and os.read(lifeline_fd, 1) == b"":
-                parent_gone = True
-                break
-            if ready_read in readable:
-                block = os.read(ready_read, 32)
-                if not block:
-                    raise RuntimeError("child launcher failed")
-                ready.extend(block)
-                if len(ready) > 32:
-                    raise RuntimeError("invalid child launcher status")
-        if parent_gone:
-            close_fd(ready_read)
-            close_fd(status_fd)
-            close_fd(lifeline_fd)
-            return 2 if cleanup(process) else 4
-        if not ready.endswith(b"\n") or not ready[:-1].isdigit():
-            raise RuntimeError("child launcher failed")
-        anchor_pid = int(ready[:-1])
-        if anchor_pid <= 1:
-            raise RuntimeError("invalid child anchor")
-        close_fd(ready_read)
-        os.write(status_fd, f"{process.pid} {anchor_pid}\n".encode("ascii"))
-        close_fd(status_fd)
-        for descriptor in (0, 1, 2):
-            close_fd(descriptor)
-        status = None
-        parent_gone = False
-        while status is None and not parent_gone:
-            status = child_status(process)
-            if status is not None:
-                break
-            readable, _, _ = select.select([lifeline_fd], [], [], POLL)
-            if readable:
-                parent_gone = os.read(lifeline_fd, 1) == b""
-        close_fd(lifeline_fd)
-        if not cleanup(process):
-            return 4
-        if parent_gone:
-            return 2
-        return 0 if status == 0 else 1
-    except BaseException:
-        if process is not None:
-            cleanup(process)
-        return 4
-    finally:
-        close_fd(status_fd)
-        close_fd(lifeline_fd)
-
-raise SystemExit(main())
-"""
 
 
 @dataclass(frozen=True)
@@ -361,6 +90,8 @@ class SupervisedProcess:
     pid: int
     identity: tuple[int, str]
     anchor_identity: tuple[int, str]
+    ownership_marker: str
+    descendant_identities: set[tuple[int, str]] = field(default_factory=set)
 
     def poll(self) -> int | None:
         return self.watchdog.poll()
@@ -550,6 +281,8 @@ def start(command: list[str], environment: dict[str, str], cwd: Path) -> Supervi
     if not set(environment).issubset(_ALLOWED_ENVIRONMENT):
         raise ValueError("Codex child environment is not allowlisted")
     token = secrets.token_hex(16)
+    child_environment = dict(environment)
+    child_environment[_process_tree.OWNERSHIP_ENV] = token
     request_path = cwd / f".codex-request-{token}.fifo"
     response_path = cwd / f".codex-response-{token}.fifo"
     guardian_path = cwd / f".codex-guardian-{token}.fifo"
@@ -581,11 +314,12 @@ def start(command: list[str], environment: dict[str, str], cwd: Path) -> Supervi
         config = json.dumps(
             {
                 "command": command,
-                "environment": environment,
+                "environment": child_environment,
                 "cwd": os.fspath(cwd),
                 "request_path": os.fspath(request_path),
                 "response_path": os.fspath(response_path),
                 "guardian_path": os.fspath(guardian_path),
+                "ownership_marker": token,
             },
             ensure_ascii=True,
             allow_nan=False,
@@ -599,7 +333,7 @@ def start(command: list[str], environment: dict[str, str], cwd: Path) -> Supervi
                 "-I",
                 "-S",
                 "-c",
-                _WATCHDOG_PROGRAM,
+                WATCHDOG_PROGRAM,
                 str(config_read.descriptor),
                 str(lifeline_read.descriptor),
                 str(status_write.descriptor),
@@ -683,6 +417,8 @@ def start(command: list[str], environment: dict[str, str], cwd: Path) -> Supervi
             group,
             identity,
             anchor_identity,
+            token,
+            {identity, anchor_identity},
         )
         return managed_process
     except BaseException:
@@ -746,6 +482,14 @@ def start(command: list[str], environment: dict[str, str], cwd: Path) -> Supervi
 def terminate(process: SupervisedProcess) -> bool:
     pending: BaseException | None = None
 
+    descendants, _ = _freeze_identities(
+        process.pid,
+        process.descendant_identities,
+        marker=process.ownership_marker,
+        required_identity=process.identity,
+    )
+    process.descendant_identities = descendants
+
     def cleanup(action) -> None:
         nonlocal pending
         try:
@@ -790,24 +534,31 @@ def terminate(process: SupervisedProcess) -> bool:
 
 def _finish_cleanup(process: SupervisedProcess) -> bool:
     state = _group_state(process.pid)
-    if process.watchdog.returncode is None or state is None:
+    status = process.watchdog.returncode
+    if status is None or state is None:
         return False
-    if not state[1]:
-        return True
-    return _terminate_unwatched(process.pid, (process.identity, process.anchor_identity))
+    active = _active_identities(process.descendant_identities)
+    if active is None:
+        return False
+    cleaned = not state[1] and not active
+    if not cleaned:
+        cleaned = _terminate_unwatched(
+            process.pid,
+            tuple(process.descendant_identities),
+            marker=process.ownership_marker,
+        )
+    return cleaned and status in {0, 1, 2}
 
 
-def _terminate_unwatched(group: int, ownership: tuple[tuple[int, str], ...]) -> bool:
-    identities = _group_identities(group)
-    if identities is None or not identities.intersection(ownership):
-        return False
-    if not _signal_identified(group, signal.SIGTERM, identities):
-        return False
-    if _wait_quiescent(group, TERM_GROUP_TIMEOUT):
-        return True
-    if not _signal_identified(group, signal.SIGKILL, identities):
-        return False
-    return _wait_quiescent(group, KILL_GROUP_TIMEOUT)
+def _terminate_unwatched(
+    group: int,
+    ownership: tuple[tuple[int, str], ...],
+    *,
+    marker: str | None = None,
+) -> bool:
+    owned, frozen = _freeze_identities(group, set(ownership), marker=marker)
+    killed = _kill_identities(group, owned, marker=marker)
+    return frozen and killed
 
 
 def _signal_identified(
@@ -828,13 +579,126 @@ def _signal_identified(
     return True
 
 
-def _wait_quiescent(group: int, duration: float) -> bool:
+def _freeze_identities(
+    group: int,
+    ownership: set[tuple[int, str]],
+    *,
+    marker: str | None = None,
+    required_identity: tuple[int, str] | None = None,
+) -> tuple[set[tuple[int, str]], bool]:
+    deadline = time.monotonic() + TERM_GROUP_TIMEOUT
+    owned = set(ownership)
+    first = True
+    while True:
+        processes = _process_table()
+        if processes is None:
+            return owned, False
+        if marker is not None:
+            marked = _process_tree.marked_identities(marker, processes)
+            if marked is None:
+                return owned, False
+            owned.update(marked)
+        active = {
+            identity
+            for identity in owned
+            if (process := processes.get(identity[0])) is not None
+            and process[3] == identity[1]
+            and process[2] not in {"Z", "X"}
+        }
+        if first and required_identity is not None and required_identity not in active:
+            return owned, False
+        first = False
+        owned = _extend_descendant_identities(owned, processes)
+        group_identities = {
+            (pid, started)
+            for pid, (_, process_group, state, started) in processes.items()
+            if process_group == group and state not in {"Z", "X"}
+        }
+        group_owned = group_identities & owned
+        if group_owned:
+            owned.update(group_identities)
+            owned = _extend_descendant_identities(owned, processes)
+            if not _signal_identified(group, signal.SIGSTOP, group_owned):
+                return owned, False
+        active = _active_identities(owned)
+        if active is None or not active:
+            return owned, False
+        if not _signal_identities(active, signal.SIGSTOP, missing_ok=marker is not None):
+            return owned, False
+
+        verified = _process_table()
+        if verified is None:
+            return owned, False
+        expanded = _extend_descendant_identities(owned, verified)
+        if marker is not None:
+            marked = _process_tree.marked_identities(marker, verified)
+            if marked is None:
+                return owned, False
+            expanded.update(marked)
+        verified_group = {
+            (pid, started)
+            for pid, (_, process_group, state, started) in verified.items()
+            if process_group == group and state not in {"Z", "X"}
+        }
+        if verified_group & expanded:
+            expanded.update(verified_group)
+        if expanded != owned:
+            owned = expanded
+            continue
+        states = [
+            process[2]
+            for pid, started in owned
+            if (process := verified.get(pid)) is not None
+            and process[3] == started
+            and process[2] not in {"Z", "X"}
+        ]
+        if states and all(state == "T" for state in states):
+            return owned, True
+        if time.monotonic() >= deadline:
+            return owned, False
+        time.sleep(POLL_INTERVAL)
+
+
+def _kill_identities(
+    group: int,
+    ownership: set[tuple[int, str]],
+    *,
+    marker: str | None = None,
+) -> bool:
+    identities = _group_identities(group)
+    active = _active_identities(ownership)
+    if identities is None or active is None:
+        return False
+    group_owned = identities & ownership
+    success = True
+    if group_owned:
+        success = _signal_identified(group, signal.SIGKILL, group_owned)
+    success = _signal_identities(active, signal.SIGKILL) and success
+    return success and _wait_cleanup(group, ownership, KILL_GROUP_TIMEOUT, marker=marker)
+
+
+def _wait_cleanup(
+    group: int,
+    ownership: set[tuple[int, str]],
+    duration: float,
+    *,
+    marker: str | None = None,
+) -> bool:
     deadline = time.monotonic() + duration
     while True:
         state = _group_state(group)
-        if state is not None and not state[1]:
+        active = _active_identities(ownership)
+        marked = _process_tree.marked_identities(marker) if marker is not None else set()
+        if (
+            state is not None
+            and active is not None
+            and marked is not None
+            and not state[1]
+            and not active
+            and not marked
+        ):
             return True
-        if state is None or time.monotonic() >= deadline:
+        if state is None or active is None or marked is None or time.monotonic() >= deadline:
             return False
         time.sleep(POLL_INTERVAL)
 
@@ -871,110 +735,35 @@ def _read_status(descriptor: int, watchdog: subprocess.Popen[bytes]) -> tuple[in
                 raise OSError("Codex watchdog failed to start child")
 
 
-def _write(descriptor: int, payload: bytes) -> None:
-    offset = 0
-    while offset < len(payload):
-        count = os.write(descriptor, payload[offset:])
-        if count <= 0:
-            raise OSError("Codex watchdog config pipe closed")
-        offset += count
+_write = _process_tree.write_all
+_close = _process_tree.close_fd
 
 
-def _close(descriptor: int) -> None:
-    try:
-        os.close(descriptor)
-    except OSError:
-        pass
+_process_table = _process_tree.process_table
+_group_state = _process_tree.group_state
+_process_identity = _process_tree.process_identity
+_group_identities = _process_tree.group_identities
+_extend_descendant_identities = _process_tree.extend_descendants
+_active_identities = _process_tree.active_identities
 
 
-def _group_state(group: int) -> tuple[bool, bool] | None:
-    proc = Path("/proc")
-    if proc.is_dir():
-        states: list[str] = []
+def _signal_identities(
+    ownership: set[tuple[int, str]],
+    requested: signal.Signals,
+    *,
+    missing_ok: bool = True,
+) -> bool:
+    active = _active_identities(ownership)
+    if active is None:
+        return False
+    if not missing_ok and active != ownership:
+        return False
+    for pid, _ in active:
         try:
-            entries = proc.iterdir()
-            for entry in entries:
-                if not entry.name.isdigit():
-                    continue
-                try:
-                    raw = (entry / "stat").read_text()
-                    fields = raw[raw.rindex(") ") + 2 :].split()
-                    if len(fields) >= 3 and int(fields[2]) == group:
-                        states.append(fields[0])
-                except (OSError, ValueError):
-                    continue
+            os.kill(pid, requested)
+        except ProcessLookupError:
+            if not missing_ok:
+                return False
         except OSError:
-            return None
-        return bool(states), any(state not in {"Z", "X"} for state in states)
-    try:
-        output = subprocess.run(
-            ["/bin/ps", "-axo", "pgid=,state="],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=STATE_INSPECTION_TIMEOUT,
-            env={"PATH": "/usr/bin:/bin", "LANG": "C"},
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
-    states = []
-    for line in output.splitlines():
-        fields = line.split()
-        if len(fields) >= 2 and fields[0].isdigit() and int(fields[0]) == group:
-            states.append(fields[1][:1])
-    return bool(states), any(state not in {"Z", "X"} for state in states)
-
-
-def _process_identity(pid: int, *, expected_group: int) -> tuple[int, str] | None:
-    identities = _group_identities(expected_group)
-    if identities is None:
-        return None
-    return next((identity for identity in identities if identity[0] == pid), None)
-
-
-def _group_identities(group: int) -> set[tuple[int, str]] | None:
-    proc = Path("/proc")
-    if proc.is_dir():
-        identities: set[tuple[int, str]] = set()
-        try:
-            entries = proc.iterdir()
-            for entry in entries:
-                if not entry.name.isdigit():
-                    continue
-                try:
-                    raw = (entry / "stat").read_text()
-                    fields = raw[raw.rindex(") ") + 2 :].split()
-                    if (
-                        len(fields) >= 20
-                        and int(fields[2]) == group
-                        and fields[0] not in {"Z", "X"}
-                    ):
-                        identities.add((int(entry.name), fields[19]))
-                except (OSError, ValueError):
-                    continue
-        except OSError:
-            return None
-        return identities
-    try:
-        output = subprocess.run(
-            ["/bin/ps", "-axo", "pid=,pgid=,state=,lstart="],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=STATE_INSPECTION_TIMEOUT,
-            env={"PATH": "/usr/bin:/bin", "LANG": "C"},
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
-    identities = set()
-    for line in output.splitlines():
-        fields = line.split()
-        if (
-            len(fields) >= 8
-            and fields[0].isdigit()
-            and fields[1].isdigit()
-            and int(fields[1]) == group
-            and fields[2][:1] not in {"Z", "X"}
-        ):
-            identities.add((int(fields[0]), " ".join(fields[3:])))
-    return identities
+            return False
+    return True

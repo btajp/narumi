@@ -11,10 +11,15 @@ from pathlib import Path
 from typing import Any
 
 from narumi import __version__
-from narumi.errors import AuthenticationRequiredError, EngineUnavailableError, InvalidArgumentError
+from narumi.errors import (
+    AuthenticationRequiredError,
+    CancelledError,
+    EngineUnavailableError,
+    InvalidArgumentError,
+)
 from narumi.providers._io import _open_directory, _open_regular
 from narumi.providers.codex import _policy
-from narumi.providers.codex._rpc import StdioRPC, unavailable
+from narumi.providers.codex._rpc import PROCESS_CLEANUP_REASON, StdioRPC, unavailable
 from narumi.providers.codex._runtime import CodexRuntime, private_environment, write_private_json
 
 _AUTH_TEMPORARY_NAME = re.compile(r"\.auth\.[0-9a-f]{32}\.tmp")
@@ -100,21 +105,26 @@ class CodexSession:
             self.rpc.notify("initialized")
             self.verify_configuration()
             return self
-        except BaseException:
+        except BaseException as error:
+            if (
+                isinstance(error, EngineUnavailableError)
+                and error.details.get("reason") == PROCESS_CLEANUP_REASON
+            ):
+                self.operation.mark_cleanup_unverified()
             try:
                 self.close()
-            except Exception:
+            except BaseException:
                 pass
             raise
 
     def __exit__(self, exception_type: Any, *_: Any) -> None:
         try:
             self.close(persist=exception_type is None)
-        except Exception:
+        except BaseException as cleanup_error:
             if exception_type is not None:
                 # Preserve the primary failure/cancellation and its outcome flag.
                 return
-            if self.generation_attempted:
+            if self.generation_attempted and isinstance(cleanup_error, Exception):
                 raise unavailable("codex_generation_outcome_unknown") from None
             raise
 
@@ -162,24 +172,95 @@ class CodexSession:
             raise unavailable("codex_skill_isolation_unverified")
 
     def close(self, *, persist: bool = False) -> None:
-        try:
-            if self.rpc is not None:
-                rpc, self.rpc = self.rpc, None
+        failure: BaseException | None = None
+        cleanup_unverified = False
+        credential_contents: bytes | None = None
+        if self.rpc is not None:
+            rpc, self.rpc = self.rpc, None
+            try:
+                rpc.close()
+            except BaseException as error:
+                failure = error
+                cleanup_unverified = True
+            finally:
                 try:
-                    rpc.close()
-                finally:
                     self.operation.detach(rpc)
+                except BaseException as detach_error:
+                    if failure is None:
+                        failure = detach_error
+        try:
             if persist and self._authenticated and not self.operation.should_cancel():
-                if not _copy_credentials(
-                    self.codex_home,
-                    self.credential_directory,
-                    self.runtime.root,
-                    report_unknown_install=True,
-                ):
-                    raise unavailable("codex_credentials_missing")
-        finally:
-            if self.run_directory.is_dir() and not self.run_directory.is_symlink():
-                shutil.rmtree(self.run_directory)
+                if failure is None:
+                    credential_contents = _read_credentials(self.codex_home, self.runtime.root)
+                    if credential_contents is None:
+                        raise unavailable("codex_credentials_missing")
+        except BaseException as error:
+            if failure is None:
+                failure = error
+        try:
+            _remove_session_run(self.run_directory)
+        except BaseException as cleanup_error:
+            cleanup_unverified = True
+            if failure is None:
+                failure = cleanup_error
+        if (
+            failure is None
+            and credential_contents is not None
+            and not self.operation.should_cancel()
+        ):
+            committed: bool | None = None
+            try:
+                committed = self.operation.install_credentials(
+                    lambda: _install_credentials(
+                        credential_contents,
+                        self.credential_directory,
+                        self.runtime.root,
+                        report_unknown_install=True,
+                    )
+                )
+                if not committed:
+                    if self.operation.kind == "auth":
+                        clear_credentials(self.runtime.root, self.operation.connection_id)
+                    failure = CancelledError("Codex operation was cancelled")
+            except BaseException as install_error:
+                failure = install_error
+                cleanup_unverified = (
+                    isinstance(install_error, EngineUnavailableError)
+                    and install_error.details.get("reason")
+                    in {
+                        "codex_credential_cleanup_unverified",
+                        "codex_credential_install_outcome_unknown",
+                    }
+                ) or committed is False
+        credential_contents = None
+        if failure is not None:
+            if cleanup_unverified:
+                self.operation.mark_cleanup_unverified()
+            raise failure
+
+
+def _remove_session_run(run_directory: Path) -> None:
+    try:
+        metadata = os.lstat(run_directory)
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise unavailable("codex_session_cleanup_unverified") from None
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise unavailable("codex_session_cleanup_unverified")
+    try:
+        shutil.rmtree(run_directory)
+    except FileNotFoundError:
+        pass
+    except Exception:
+        raise unavailable("codex_session_cleanup_unverified") from None
+    try:
+        os.lstat(run_directory)
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise unavailable("codex_session_cleanup_unverified") from None
+    raise unavailable("codex_session_cleanup_unverified")
 
 
 def _copy_credentials(
@@ -195,22 +276,48 @@ def _copy_credentials(
     IDs, databases, environment definitions, skills and cached configuration are
     therefore neither read nor copied into a new runtime session.
     """
+    contents = _read_credentials(source, root)
+    if contents is None:
+        return False
+    try:
+        _install_credentials(
+            contents,
+            destination,
+            root,
+            report_unknown_install=report_unknown_install,
+        )
+    finally:
+        contents = None
+    return True
+
+
+def _read_credentials(source: Path, root: Path) -> bytes | None:
     try:
         os.lstat(source)
     except FileNotFoundError:
-        return False
+        return None
     source_directory = _open_directory(source, trusted_root=root)
     try:
         try:
             descriptor = _open_regular(source_directory, "auth.json", os.O_RDONLY)
         except FileNotFoundError:
-            return False
+            return None
         with os.fdopen(descriptor, "rb") as stream:
             contents = stream.read(128 * 1024 + 1)
         if not contents or len(contents) > 128 * 1024:
             raise unavailable("codex_credential_file_rejected")
     finally:
         os.close(source_directory)
+    return contents
+
+
+def _install_credentials(
+    contents: bytes,
+    destination: Path,
+    root: Path,
+    *,
+    report_unknown_install: bool = False,
+) -> None:
     directory = _open_directory(destination, trusted_root=root)
     temporary = f".auth.{uuid.uuid4().hex}.tmp"
     installed = False
@@ -226,21 +333,54 @@ def _copy_credentials(
             stream.write(contents)
             stream.flush()
             os.fsync(stream.fileno())
-        del contents
         os.replace(temporary, "auth.json", src_dir_fd=directory, dst_dir_fd=directory)
         installed = True
         os.fsync(directory)
-        return True
     except Exception:
         if installed and report_unknown_install:
             raise unavailable("codex_credential_install_outcome_unknown") from None
         raise
     finally:
+        cleanup_error: BaseException | None = None
         try:
-            os.unlink(temporary, dir_fd=directory)
-        except FileNotFoundError:
-            pass
-        os.close(directory)
+            _remove_credential_temporary(directory, temporary)
+        except BaseException as error:
+            cleanup_error = error
+        try:
+            os.close(directory)
+        except OSError:
+            if cleanup_error is None:
+                cleanup_error = unavailable("codex_credential_cleanup_unverified")
+        if cleanup_error is not None:
+            raise cleanup_error
+
+
+def _remove_credential_temporary(directory: int, temporary: str) -> None:
+    """Remove and verify one private credential temporary before returning."""
+    cleanup_failed = False
+    removed = False
+    try:
+        os.unlink(temporary, dir_fd=directory)
+        removed = True
+    except FileNotFoundError:
+        pass
+    except OSError:
+        cleanup_failed = True
+    if removed:
+        try:
+            os.fsync(directory)
+        except OSError:
+            cleanup_failed = True
+    try:
+        os.stat(temporary, dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        cleanup_failed = True
+    else:
+        cleanup_failed = True
+    if cleanup_failed:
+        raise unavailable("codex_credential_cleanup_unverified") from None
 
 
 def clear_credentials(root: Path, connection_id: str) -> None:

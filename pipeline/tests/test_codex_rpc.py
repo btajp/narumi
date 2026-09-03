@@ -496,10 +496,13 @@ def test_request_validation_does_not_mark_unsent_payload_as_sent(rpc_factory, mo
     assert sent == []
 
 
-def test_eof_is_reported_without_child_stderr(rpc_factory):
+def test_eof_is_reported_without_child_stderr(rpc_factory, monkeypatch):
     rpc = rpc_factory(f"read()\nprint({SECRET!r}, file=sys.stderr)\nsys.exit(42)")
-    with pytest.raises(EngineUnavailableError) as failure:
-        rpc.call("account/read", {})
+    process = rpc._process
+    with monkeypatch.context() as patch:
+        patch.setattr(process.watchdog, "poll", lambda: 0)
+        with pytest.raises(EngineUnavailableError) as failure:
+            rpc.call("account/read", {})
     assert_private_failure(failure.value, "codex_process_eof")
 
 
@@ -725,6 +728,67 @@ def test_cancellation_interrupts_pending_read_and_close_reaps_child(
         assert_private_failure(failure.value, "codex_process_closed")
 
 
+@pytest.mark.parametrize("first_stop", ["cancel", "close"])
+def test_transient_unverified_cleanup_is_retried_before_close_succeeds(
+    rpc_factory, monkeypatch, first_stop
+):
+    rpc = rpc_factory("sys.stdin.read()")
+    process = rpc._process
+    real_finish = _rpc._supervisor._finish_cleanup
+    attempts = 0
+
+    def fail_once(candidate):
+        nonlocal attempts
+        attempts += 1
+        return False if attempts == 1 else real_finish(candidate)
+
+    monkeypatch.setattr(_rpc._supervisor, "_finish_cleanup", fail_once)
+    if first_stop == "cancel":
+        rpc.cancel()
+        assert rpc._termination_result is False
+        rpc.close()
+    else:
+        rpc.close()
+
+    assert rpc._termination_result is True and attempts == 2
+    for lease in (
+        process.stdin_lease,
+        process.stdout_lease,
+        process.lifeline_lease,
+        process.guardian_lease,
+    ):
+        assert lease.descriptor not in _rpc._supervisor._child_close_descriptors
+
+
+def test_persistently_unverified_cleanup_releases_fds_then_fails_closed(rpc_factory, monkeypatch):
+    rpc = rpc_factory("sys.stdin.read()")
+    process = rpc._process
+    real_finish = _rpc._supervisor._finish_cleanup
+    attempts = 0
+
+    def remain_unverified(candidate):
+        nonlocal attempts
+        attempts += 1
+        return False
+
+    monkeypatch.setattr(_rpc._supervisor, "_finish_cleanup", remain_unverified)
+
+    with pytest.raises(EngineUnavailableError) as failure:
+        rpc.close()
+
+    assert_private_failure(failure.value, _rpc.PROCESS_CLEANUP_REASON)
+    assert rpc._termination_result is False and attempts == 2
+    for lease in (
+        process.stdin_lease,
+        process.stdout_lease,
+        process.lifeline_lease,
+        process.guardian_lease,
+    ):
+        assert lease.descriptor not in _rpc._supervisor._child_close_descriptors
+    monkeypatch.setattr(_rpc._supervisor, "_finish_cleanup", real_finish)
+    rpc.close()
+
+
 def test_already_cancelled_operation_never_spawns_a_child(rpc_factory):
     with pytest.raises(CancelledError):
         rpc_factory("raise AssertionError('must not execute')", should_cancel=lambda: True)
@@ -903,8 +967,31 @@ def test_live_rpc_recovers_group_after_watchdog_sigkill(rpc_factory, tmp_path):
     process.watchdog.wait(timeout=3)
     with pytest.raises(EngineUnavailableError) as failure:
         rpc.call("account/read", {})
-    assert_private_failure(failure.value, "codex_process_unavailable")
+    assert_private_failure(failure.value, _rpc.PROCESS_CLEANUP_REASON)
     wait_for_group_quiescent(process.pid)
+    with pytest.raises(EngineUnavailableError) as cleanup_failure:
+        rpc.close()
+    assert_private_failure(cleanup_failure.value, _rpc.PROCESS_CLEANUP_REASON)
+    rpc._termination_done = True
+
+
+@pytest.mark.parametrize("watchdog_status", [1, 2, 3, 4, -signal.SIGKILL])
+def test_wait_fails_closed_for_every_nonzero_watchdog_status(
+    rpc_factory, monkeypatch, watchdog_status
+):
+    rpc = rpc_factory("sys.stdin.read()")
+    process = rpc._process
+    statuses = iter([None, watchdog_status])
+    termination_attempts = []
+
+    with monkeypatch.context() as patch:
+        patch.setattr(process.watchdog, "poll", lambda: next(statuses))
+        patch.setattr(rpc, "_terminate", lambda: termination_attempts.append(True) or False)
+        with pytest.raises(EngineUnavailableError) as failure:
+            rpc._wait(process.stdin.fileno(), _rpc.selectors.EVENT_WRITE, time.monotonic() + 1)
+
+    assert_private_failure(failure.value, _rpc.PROCESS_CLEANUP_REASON)
+    assert termination_attempts == [True]
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX fork descriptor cleanup")
@@ -1053,7 +1140,7 @@ def test_anchor_recovers_descendant_after_watchdog_and_leader_die(rpc_factory):
     child = "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)"
     rpc = rpc_factory(
         f"""
-        import signal, subprocess
+        import subprocess
         request = read()
         descendant = subprocess.Popen(
             [sys.executable, "-I", "-c", {child!r}],
@@ -1061,20 +1148,30 @@ def test_anchor_recovers_descendant_after_watchdog_and_leader_die(rpc_factory):
             stderr=subprocess.DEVNULL,
         )
         send({{"id": request["id"], "result": {{"pid": descendant.pid}}}})
-        os.kill(os.getppid(), signal.SIGKILL)
-        sys.exit(0)
+        sys.stdin.read()
         """
     )
     process = rpc_factory.processes[0]
-    rpc.call("fixture/spawn", {})
+    result = rpc.call("fixture/spawn", {})
+    descendant_identity = _rpc._supervisor._process_identity(
+        result["pid"], expected_group=process.pid
+    )
+    assert descendant_identity is not None
+    os.kill(process.watchdog.pid, signal.SIGKILL)
     process.watchdog.wait(timeout=3)
+    os.kill(process.pid, signal.SIGKILL)
     deadline = time.monotonic() + 3
     while process.identity in (_rpc._supervisor._group_identities(process.pid) or set()):
         assert time.monotonic() < deadline
         threading.Event().wait(0.01)
-    assert process.anchor_identity in (_rpc._supervisor._group_identities(process.pid) or set())
-    rpc.close()
+    identities = _rpc._supervisor._group_identities(process.pid) or set()
+    assert process.anchor_identity in identities
+    assert descendant_identity in identities
+    with pytest.raises(EngineUnavailableError) as failure:
+        rpc.close()
+    assert_private_failure(failure.value, _rpc.PROCESS_CLEANUP_REASON)
     wait_for_group_quiescent(process.pid)
+    rpc._termination_done = True
 
 
 def test_unwatched_cleanup_refuses_reused_process_group(monkeypatch):
@@ -1265,6 +1362,53 @@ def test_constructor_base_exception_after_process_start_still_reaps_group(monkey
     assert len(process) == 1
     process[0].wait(timeout=6)
     wait_for_group_quiescent(process[0].pid)
+    assert set(_rpc._supervisor._child_close_descriptors) == baseline
+
+
+def test_constructor_cleanup_uncertainty_overrides_initialization_failure(monkeypatch, tmp_path):
+    baseline = set(_rpc._supervisor._child_close_descriptors)
+    processes = []
+    real_start = _rpc._supervisor.start
+    real_terminate = _rpc._supervisor.terminate
+    real_set_blocking = os.set_blocking
+    blocking_calls = 0
+    termination_calls = 0
+
+    def observe_start(*args, **kwargs):
+        process = real_start(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    def fail_second_blocking_call(descriptor, blocking):
+        nonlocal blocking_calls
+        blocking_calls += 1
+        if blocking_calls == 2:
+            raise OSError("fixture initialization failure")
+        real_set_blocking(descriptor, blocking)
+
+    def leave_cleanup_unverified(_process):
+        nonlocal termination_calls
+        termination_calls += 1
+        return False
+
+    monkeypatch.setattr(_rpc._supervisor, "start", observe_start)
+    monkeypatch.setattr(_rpc._supervisor, "terminate", leave_cleanup_unverified)
+    monkeypatch.setattr(_rpc.os, "set_blocking", fail_second_blocking_call)
+    try:
+        with pytest.raises(EngineUnavailableError) as failure:
+            StdioRPC(
+                [sys.executable, "-I", "-u", "-c", PREAMBLE + "sys.stdin.read()"],
+                env={},
+                cwd=tmp_path,
+            )
+        assert_private_failure(failure.value, _rpc.PROCESS_CLEANUP_REASON)
+        assert termination_calls == 3 and len(processes) == 1
+        assert processes[0].stdin.closed and processes[0].stdout.closed
+    finally:
+        for process in processes:
+            real_terminate(process)
+            process.wait(timeout=6)
+            wait_for_group_quiescent(process.pid)
     assert set(_rpc._supervisor._child_close_descriptors) == baseline
 
 

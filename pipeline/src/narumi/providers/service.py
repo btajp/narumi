@@ -61,6 +61,8 @@ class ProviderService:
         self.requests = RequestLedger(self.secrets, self.namespace, self.server_instance_id)
         self.contracts = contracts if contracts is not None else load_contracts()
         self.closed = threading.Event()
+        self._close_succeeded = threading.Event()
+        self._close_lock = threading.Lock()
         self._can_recover = recover
         self._codex_backend = codex_backend
         self._codex_lock = threading.Lock()
@@ -177,6 +179,14 @@ class ProviderService:
         return self.connections.delete(self.validate("delete_provider_connection", args))
 
     def authenticate(self, args: Mapping[str, Any]) -> dict[str, Any]:
+        # Logout can accept without touching a backend until its queued worker runs.
+        # Serialize the complete acceptance boundary with shutdown so close either
+        # rejects it or observes its durable cleanup operation.
+        if args.get("action") == "logout":
+            with self._close_lock:
+                return self.auth.authenticate(
+                    self.validate("authenticate_provider_connection", args)
+                )
         return self.auth.authenticate(self.validate("authenticate_provider_connection", args))
 
     def auth_status(self, args: Mapping[str, Any]) -> dict[str, Any]:
@@ -454,11 +464,14 @@ class ProviderService:
         if not self._can_recover:
             return
         self.runtime.close()
+        codex_targets: list[tuple[str, str, str, bool]] = []
         with self.store.transaction() as document:
             for operation in document["auth_operations"].values():
-                if operation["state"] == "pending" and (
-                    operation["server_instance_id"] == self.server_instance_id
-                ):
+                if operation["server_instance_id"] != self.server_instance_id:
+                    continue
+                record = document["connections"].get(operation["connection_id"])
+                active = None if record is None else record["active_auth"]
+                if operation["state"] == "pending":
                     operation.update(
                         state="unknown",
                         authorization_url=None,
@@ -466,14 +479,74 @@ class ProviderService:
                         reason="authentication_operation_interrupted",
                         updated_at=timestamp(),
                     )
-                    record = document["connections"].get(operation["connection_id"])
-                    active = None if record is None else record["active_auth"]
                     if active is not None and active["operation_id"] == operation["operation_id"]:
                         active["state"] = "unknown"
                         record["auth_state"] = "unknown"
+                if (
+                    operation["state"] == "unknown"
+                    and record is not None
+                    and record["provider_id"] == "codex-app-server"
+                    and operation["action"] in ("start", "logout")
+                    and active is not None
+                    and active["operation_id"] == operation["operation_id"]
+                ):
+                    codex_targets.append(
+                        (
+                            record["connection_id"],
+                            operation["operation_id"],
+                            operation["action"],
+                            not record["credential_present"],
+                        )
+                    )
+        if not codex_targets:
+            return
+        with self._codex_lock:
+            if self._codex_backend is None:
+                from narumi.providers.codex import CodexBackend
+
+                self._codex_backend = CodexBackend(self.root)
+            backend = self._codex_backend
+        first_failure: Exception | None = None
+        for connection_id, operation_id, action, cleanup_required in codex_targets:
+            try:
+                if action == "logout":
+                    backend.logout(connection_id)
+                else:
+                    if not backend.register_auth_generation(
+                        connection_id,
+                        operation_id=operation_id,
+                        replace=False,
+                        cleanup_required=cleanup_required,
+                    ):
+                        raise NarumiError("Codex authentication generation is no longer current")
+                    if not backend.cancel_auth(connection_id, operation_id=operation_id):
+                        raise NarumiError("Codex authentication cleanup could not be confirmed")
+                with self.store.transaction() as document:
+                    operation = document["auth_operations"].get(operation_id)
+                    record = document["connections"].get(connection_id)
+                    if operation is None or record is None or operation["state"] != "unknown":
+                        raise NarumiError("Provider authentication shutdown state changed")
+                    self.catalog.release_check(document, record["provider_id"], operation_id)
+                    self.auth._finish_codex_cancellation(
+                        document,
+                        record,
+                        operation_id,
+                        reason="authentication_cancelled",
+                    )
+            except Exception as error:
+                if first_failure is None:
+                    first_failure = error
+        if first_failure is not None:
+            if isinstance(first_failure, NarumiError):
+                raise first_failure
+            raise NarumiError("Provider runtime shutdown could not be confirmed") from None
 
     def close(self) -> None:
-        if self.closed.is_set():
+        with self._close_lock:
+            self._close()
+
+    def _close(self) -> None:
+        if self._close_succeeded.is_set():
             return
         self.closed.set()
         failed = False
@@ -501,13 +574,22 @@ class ProviderService:
             (self._audio_lock, self._audio_backend),
         )
         for lock, backend in backends:
+            backend_closed = False
             try:
                 with lock:
                     close = None if backend is None else getattr(backend, "close", None)
                 if callable(close):
                     close()
+                    backend_closed = True
             except Exception as error:
                 remember(error)
+            if backend_closed and lock is self._codex_lock:
+                # CodexBackend is permanently closed even after a successful close.
+                # If another adapter keeps service shutdown unresolved, a later retry
+                # needs a fresh offline backend to verify any remaining auth cleanup.
+                with self._codex_lock:
+                    if self._codex_backend is backend:
+                        self._codex_backend = None
         if self._owns_executor:
             try:
                 self.auth_executor.shutdown(wait=False, cancel_futures=True)
@@ -517,6 +599,7 @@ class ProviderService:
             raise first_public_error
         if failed:
             raise NarumiError("Provider runtime shutdown could not be confirmed") from None
+        self._close_succeeded.set()
 
 
 def _contains_credential(value: Any, credentials: tuple[str, ...]) -> bool:

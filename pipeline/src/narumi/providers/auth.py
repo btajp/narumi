@@ -60,6 +60,15 @@ class Authentication:
                 self.codex.require_ready(document)
                 invalidate_checks(document, record)
             operation = self._operation(record, args)
+            if record["provider_id"] == "codex-app-server" and not (
+                service.codex_backend.register_auth_generation(
+                    record["connection_id"],
+                    operation_id=operation["operation_id"],
+                    replace=True,
+                    cleanup_required=False,
+                )
+            ):
+                raise NarumiError("Codex authentication generation could not be registered")
             document["auth_operations"][operation["operation_id"]] = operation
             record["active_auth"] = self._active(operation)
             record["auth_state"] = "authenticating"
@@ -120,10 +129,33 @@ class Authentication:
     def _submission_failed(self, operation_id: str, snapshot: dict[str, Any]) -> None:
         try:
             with self.service.store.transaction() as document:
-                self.service.catalog.release_check(document, snapshot["provider_id"], operation_id)
                 operation = document["auth_operations"].get(operation_id)
                 if operation is None or operation["state"] != "pending":
                     return
+                record = document["connections"].get(snapshot["connection_id"])
+                if (
+                    snapshot["provider_id"] == "codex-app-server"
+                    and operation["action"] == "logout"
+                ):
+                    operation.update(
+                        state="unknown",
+                        authorization_url=None,
+                        user_code=None,
+                        reason="authentication_operation_interrupted",
+                        updated_at=timestamp(),
+                    )
+                    if (
+                        record is not None
+                        and record["active_auth"] is not None
+                        and record["active_auth"]["operation_id"] == operation_id
+                    ):
+                        record.update(
+                            active_auth=self._active(operation),
+                            auth_state="unknown",
+                            checked_at=None,
+                        )
+                    return
+                self.service.catalog.release_check(document, snapshot["provider_id"], operation_id)
                 operation.update(
                     state="failed",
                     authorization_url=None,
@@ -131,7 +163,6 @@ class Authentication:
                     reason="authentication_verification_unavailable",
                     updated_at=timestamp(),
                 )
-                record = document["connections"].get(snapshot["connection_id"])
                 if (
                     record is not None
                     and record["active_auth"] is not None
@@ -145,7 +176,8 @@ class Authentication:
 
     def _cancel(self, args: dict[str, Any]) -> dict[str, Any]:
         service = self.service
-        cancel_codex = False
+        codex_cleanup_action = None
+        cleanup_required = False
         cancellation_token = None
         with service.store.transaction() as document:
             fingerprint, replay = self._replay(document, args)
@@ -156,17 +188,21 @@ class Authentication:
             operation = self._lookup(document, args)
             if operation["state"] in ("pending", "unknown"):
                 active = record["active_auth"]
-                cancel_codex = (
+                if (
                     record["provider_id"] == "codex-app-server"
                     and active is not None
                     and active["operation_id"] == operation["operation_id"]
-                    and operation["action"] == "start"
-                )
-                if cancel_codex:
+                    and operation["action"] in ("start", "logout")
+                ):
+                    codex_cleanup_action = operation["action"]
+                    cleanup_required = (
+                        codex_cleanup_action == "start" and not record["credential_present"]
+                    )
                     check = document["checks"].get(record["provider_id"])
                     if check is not None and (
                         check["connection_id"] != record["connection_id"]
-                        or check.get("kind") != "authentication"
+                        or check.get("kind")
+                        != ("authentication" if codex_cleanup_action == "start" else "logout")
                         or check["token"] != operation["operation_id"]
                     ):
                         raise BusyError("Provider authentication cancellation is active")
@@ -192,13 +228,24 @@ class Authentication:
                     )
             self.codex.forget(operation["operation_id"])
             receipt = service.requests.accept(document, args, fingerprint)
-            if not cancel_codex:
+            if codex_cleanup_action is None:
                 response = service.requests.complete(receipt, {"operation": operation})
-        if cancel_codex:
+        if codex_cleanup_action is not None:
             try:
-                service.codex_backend.cancel_auth(
-                    args["connection_id"], operation_id=operation["operation_id"]
-                )
+                if codex_cleanup_action == "logout":
+                    service.codex_backend.logout(args["connection_id"])
+                else:
+                    registered = service.codex_backend.register_auth_generation(
+                        args["connection_id"],
+                        operation_id=operation["operation_id"],
+                        replace=False,
+                        cleanup_required=cleanup_required,
+                    )
+                    cleaned = registered and service.codex_backend.cancel_auth(
+                        args["connection_id"], operation_id=operation["operation_id"]
+                    )
+                    if not cleaned:
+                        raise NarumiError("Codex authentication generation is no longer current")
             except Exception:
                 self._codex_cancellation_failed(
                     args["request_id"], record["provider_id"], cancellation_token

@@ -22,6 +22,7 @@ MAX_MESSAGE_BYTES = 8 * 1024 * 1024
 MAX_SESSION_BYTES = 32 * 1024 * 1024
 MAX_NOTIFICATIONS = 1000
 _POLL_INTERVAL = 0.1
+PROCESS_CLEANUP_REASON = "codex_process_cleanup_unverified"
 _rpc_instances: weakref.WeakSet[StdioRPC] = weakref.WeakSet()
 
 
@@ -36,6 +37,7 @@ def _after_fork_child() -> None:
         rpc._io_gate = threading.Lock()
         rpc._rpc_lock = threading.RLock()
         rpc._termination_done = True
+        rpc._termination_result = True
         rpc._process = None
 
 
@@ -87,6 +89,7 @@ class StdioRPC:
         self._rpc_lock = threading.RLock()
         self._lifecycle_lock = threading.Lock()
         self._termination_done = False
+        self._termination_result: bool | None = None
         self._counter = 0
         self._input = bytearray()
         self._received = 0
@@ -116,12 +119,16 @@ class StdioRPC:
             os.set_blocking(self._process.stdin.fileno(), False)
             os.set_blocking(self._process.stdout.fileno(), False)
         except BaseException as error:
+            cleanup_verified = False
             for _ in range(2):
                 try:
                     self.close()
-                    break
                 except BaseException:
                     continue
+                cleanup_verified = True
+                break
+            if not cleanup_verified:
+                raise unavailable(PROCESS_CLEANUP_REASON) from None
             if isinstance(error, (OSError, ValueError)):
                 raise unavailable("codex_process_unavailable") from None
             raise
@@ -137,18 +144,27 @@ class StdioRPC:
             raise unavailable("codex_process_closed")
         if self._cancelled.is_set() or self._should_cancel():
             raise CancelledError("Codex operation was cancelled")
+        self._check_watchdog()
+
+    def _check_watchdog(self) -> int | None:
         process = self._process
-        if isinstance(process, _supervisor.SupervisedProcess) and (
-            (watchdog_status := process.watchdog.poll()) is not None and watchdog_status < 0
-        ):
+        if not isinstance(process, _supervisor.SupervisedProcess):
+            return None
+        watchdog_status = process.watchdog.poll()
+        if watchdog_status is None or watchdog_status == 0:
+            return watchdog_status
+        try:
             self._terminate()
-            raise unavailable("codex_process_unavailable")
+        except Exception:
+            pass
+        raise unavailable(PROCESS_CLEANUP_REASON) from None
 
     def _check_io_state(self) -> None:
         if self._closed.is_set():
             raise unavailable("codex_process_closed")
         if self._cancelled.is_set():
             raise CancelledError("Codex operation was cancelled")
+        self._check_watchdog()
 
     def _deadline(self, timeout: float | None) -> float:
         duration = self.timeout if timeout is None else timeout
@@ -192,16 +208,13 @@ class StdioRPC:
                     _supervisor._lease_register(selector, lease, event)
                 while True:
                     self._check_cancelled()
-                    process = self._process
-                    if (
-                        isinstance(process, _supervisor.SupervisedProcess)
-                        and process.watchdog.poll() is not None
-                    ):
+                    if self._check_watchdog() is not None:
                         return
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise unavailable("codex_rpc_timeout")
                     if selector.select(min(remaining, _POLL_INTERVAL)):
+                        self._check_cancelled()
                         return
             except (OSError, ValueError):
                 self._check_cancelled()
@@ -406,7 +419,10 @@ class StdioRPC:
     def cancel(self) -> None:
         with self._io_gate:
             self._cancelled.set()
-        self._terminate()
+        try:
+            self._terminate()
+        except Exception:
+            pass
 
     @contextmanager
     def cooperative_cleanup(self):
@@ -424,15 +440,20 @@ class StdioRPC:
             finally:
                 self._should_cancel = original
 
-    def _terminate(self) -> None:
+    def _terminate(self) -> bool:
         with self._lifecycle_lock:
             process = self._process
-            if process is None or self._termination_done:
-                return
+            if process is None:
+                self._termination_done = True
+                self._termination_result = True
+                return True
+            if self._termination_done:
+                return True
+            self._termination_result = False
             if isinstance(process, _supervisor.SupervisedProcess):
-                if _supervisor.terminate(process):
-                    self._termination_done = True
-                return
+                self._termination_result = _supervisor.terminate(process)
+                self._termination_done = self._termination_result
+                return self._termination_result
             try:
                 process.terminate()
                 process.wait(timeout=0.1)
@@ -443,13 +464,36 @@ class StdioRPC:
                 except (ProcessLookupError, PermissionError, subprocess.TimeoutExpired):
                     pass
             self._termination_done = process.poll() is not None
+            self._termination_result = self._termination_done
+            return self._termination_result
 
     def close(self) -> None:
         with self._io_gate:
             self._closed.set()
-        self._terminate()
+        error: BaseException | None = None
+        terminated = False
+        with self._lifecycle_lock:
+            attempts = 1 if self._termination_result is False else 2
+        for _ in range(attempts):
+            try:
+                terminated = self._terminate()
+            except BaseException as failure:
+                error = failure
+                break
+            if terminated:
+                break
         process = self._process
         if process is not None:
             for stream in (process.stdin, process.stdout):
                 if stream is not None:
-                    stream.close()
+                    try:
+                        stream.close()
+                    except BaseException as failure:
+                        if error is None:
+                            error = failure
+        if error is not None:
+            if isinstance(error, Exception):
+                raise unavailable(PROCESS_CLEANUP_REASON) from None
+            raise error
+        if not terminated:
+            raise unavailable(PROCESS_CLEANUP_REASON)

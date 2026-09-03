@@ -157,6 +157,7 @@ _CODEX_APP_SERVER_SOURCES = _closed_sources(
         "providers/codex/_generation.py",
         "providers/codex/_models.py",
         "providers/codex/_policy.py",
+        "providers/codex/_process_tree.py",
         "providers/codex/_rpc.py",
         "providers/codex/_runtime.py",
         "providers/codex/_runtime_lock.py",
