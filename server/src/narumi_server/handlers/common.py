@@ -176,6 +176,27 @@ def config_from_mapping(base: MeetingConfig, updates: Mapping[str, Any] | None) 
         ) from exc
 
 
+def check_cache_epoch_monotonic(previous: MeetingConfig, updated: MeetingConfig) -> None:
+    """Reject moving an unchanged model selection back to an earlier send epoch."""
+    for field in ("minutes_model", "transcription_model"):
+        old = getattr(previous, field)
+        new = getattr(updated, field)
+        if old is None or new is None:
+            continue
+        old_identity = (old.provider, old.connection_id, old.model_id, old.parameters)
+        new_identity = (new.provider, new.connection_id, new.model_id, new.parameters)
+        if old_identity == new_identity and new.cache_epoch < old.cache_epoch:
+            raise InvalidArgumentError(
+                f"{field}.cache_epoch cannot decrease for the same model selection",
+                details={
+                    "reason": "cache_epoch_regression",
+                    "field": f"{field}.cache_epoch",
+                    "current": old.cache_epoch,
+                    "requested": new.cache_epoch,
+                },
+            )
+
+
 @contextmanager
 def validated_config(ctx: ServerContext, config: MeetingConfig) -> Iterator[None]:
     """Validate a config and protect its model reference until the caller saves it.

@@ -2,7 +2,10 @@ import Foundation
 
 /// A pinned, text-only minutes override. Other stages continue to use their existing config.
 public struct MinutesModelSelection: Codable, Equatable, Sendable {
-    public static let providers = ["codex-app-server", "openai-api", "anthropic-api", "ollama"]
+    public static let providers = [
+        "codex-app-server", "claude-agent-sdk", "openai-api", "openai-compatible-api", "anthropic-api", "ollama",
+    ]
+    public static let legacyProviders = ["codex-app-server", "openai-api", "anthropic-api", "ollama"]
     public let provider: String
     public var connectionID: String
     public var connectionRevision: Int
@@ -103,7 +106,7 @@ public struct MinutesModelSelection: Codable, Equatable, Sendable {
                 $0.range(of: #"\A[a-z][a-z0-9_-]{0,31}\z"#, options: .regularExpression) != nil
             } ?? true)
             && (parameters.maxTokens.map { (1...32768).contains($0) } ?? true)
-            && (provider != "codex-app-server" || parameters.maxTokens == nil)
+            && (!["codex-app-server", "claude-agent-sdk"].contains(provider) || parameters.maxTokens == nil)
             && (["codex-app-server", "openai-api"].contains(provider) || parameters.reasoningEffort == nil)
     }
 }

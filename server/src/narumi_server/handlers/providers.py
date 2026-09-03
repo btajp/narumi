@@ -88,3 +88,10 @@ def test_provider_connection(ctx: ServerContext, args: dict[str, Any]) -> dict[s
 def list_provider_models(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
     _resident(ctx)
     return ctx.providers.list_models(args)
+
+
+def verify_provider_model(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
+    _resident(ctx)
+    result = ctx.providers.verify_model(args)
+    _audit(ctx, "verify_provider_model", result)
+    return result

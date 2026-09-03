@@ -1954,7 +1954,7 @@ wheels = [
 
 [[package]]
 name = "narumi"
-version = "0.5.2"
+version = "0.6.0"
 source = { editable = "pipeline" }
 dependencies = [
     { name = "click" },
@@ -1990,7 +1990,7 @@ whisper-mlx = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.40" },
-    { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = ">=0.1" },
+    { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = "==0.2.144" },
     { name = "click", specifier = ">=8.1" },
     { name = "faster-whisper", marker = "extra == 'whisper-faster'", specifier = ">=1.1" },
     { name = "jsonschema", specifier = ">=4.23" },
@@ -2006,7 +2006,7 @@ provides-extras = ["whisper-mlx", "whisper-faster", "pyannote", "claude", "anthr
 
 [[package]]
 name = "narumi-server"
-version = "0.5.2"
+version = "0.6.0"
 source = { editable = "server" }
 dependencies = [
     { name = "anyio" },

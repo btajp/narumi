@@ -68,7 +68,7 @@ private struct ProviderModelCandidateRow: View {
                     Text("確認済みパラメータ: " + model.parameterSchema.properties.keys.sorted().joined(separator: "、"))
                         .font(.caption)
                 }
-                Text("この一覧は候補情報です。議事録のモデルは会議の「設定」またはプロファイルの「議事録の生成方法」で選択して保存します。接続だけでは会議に適用しません。Claude Agent SDK の議事録生成は未対応です。")
+                Text("この一覧は候補情報です。議事録のモデルは会議の「設定」またはプロファイルの「議事録の生成方法」で選択して保存します。接続だけでは会議に適用しません。未検証の候補は、議事録モデルの選択画面で固定テスト文の送信を確認してから検証できます。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             .font(.caption)

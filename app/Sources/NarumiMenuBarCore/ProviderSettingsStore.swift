@@ -52,19 +52,24 @@ public final class ProviderSettingsStore {
     public var isBusy: Bool { operation != nil }
     public var canEdit: Bool { isLoaded && !isBusy }
     public var saveNeedsReconciliation: Bool { pendingSave != nil }
-    public var canAddConnection: Bool { canEdit && !saveNeedsReconciliation }
+    public var canAddConnection: Bool {
+        canEdit && !saveNeedsReconciliation && !availableProviderIDs.isEmpty
+    }
     public var selectedConnection: ProviderConnection? {
         connections.first { $0.connectionID == selectedConnectionID }
     }
     public var selectedProvider: ProviderDescriptor? {
         providers.first { $0.providerID == editor.providerID }
     }
+    public var availableProviderIDs: [ProviderID] {
+        ProviderID.connectionPickerOrder.filter { id in providers.contains { $0.providerID == id } }
+    }
     public var pendingAuthentication: ProviderSettingsRecovery.Authentication? {
         selectedConnectionID.flatMap { recovery.authentications[$0] }
     }
     public var canSave: Bool {
         canEdit && !saveNeedsReconciliation && !revisionConflict && editor.canSave && pendingAuthentication?.unresolved != true
-            && selectedConnection?.activeAuth == nil
+            && selectedConnection?.activeAuth == nil && availableProviderIDs.contains(editor.providerID)
     }
     public var canUseSavedConnection: Bool {
         canEdit && !saveNeedsReconciliation && !editor.hasUnsavedChanges && !revisionConflict && selectedConnection?.enabled == true
@@ -137,9 +142,9 @@ public final class ProviderSettingsStore {
     }
 
     public func newConnection() {
-        guard canAddConnection else { return }
+        guard canAddConnection, let providerID = availableProviderIDs.first else { return }
         selectedConnectionID = nil
-        editor = ProviderConnectionSettings(providerID: providers.first?.providerID ?? .anthropicAPI)
+        editor = ProviderConnectionSettings(providerID: providerID)
         clearSelectionFeedback()
     }
 
@@ -334,7 +339,9 @@ public final class ProviderSettingsStore {
             editor = ProviderConnectionSettings(connection: first)
         } else {
             selectedConnectionID = nil
-            editor = ProviderConnectionSettings(providerID: providers.first?.providerID ?? .anthropicAPI)
+            if let providerID = availableProviderIDs.first {
+                editor = ProviderConnectionSettings(providerID: providerID)
+            }
         }
         revisionConflict = false
     }

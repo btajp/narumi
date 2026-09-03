@@ -33,19 +33,29 @@ extension NarumiClient: ProviderSettingsClient {
         try await providerCall(ToolCatalog.listProviderModels, request)
     }
 
+    func verifyProviderModel(_ request: VerifyProviderModelRequest) async throws -> VerifyProviderModelResponse {
+        try await providerCall(ToolCatalog.verifyProviderModel, request)
+    }
+
     func prepareProviderRuntime(_ request: PrepareProviderRuntimeRequest) async throws -> PrepareProviderRuntimeResponse {
         try await providerCall(ToolCatalog.prepareProviderRuntime, request)
     }
 
     private func providerCall<T: Decodable>(_ name: String) async throws -> T {
         do { return try await call(name) }
-        catch let failure as ToolFailure { throw ProviderSettingsFailure(code: failure.code) }
+        catch let failure as ToolFailure { throw providerSettingsFailure(failure, toolName: name) }
         catch { throw ProviderSettingsFailure(.internalError) }
     }
 
     private func providerCall<T: Decodable, Request: Encodable>(_ name: String, _ request: Request) async throws -> T {
         do { return try await call(name, Self.arguments(request)) }
-        catch let failure as ToolFailure { throw ProviderSettingsFailure(code: failure.code) }
+        catch let failure as ToolFailure { throw providerSettingsFailure(failure, toolName: name) }
         catch { throw ProviderSettingsFailure(.internalError) }
     }
+}
+
+func providerSettingsFailure(_ failure: ToolFailure, toolName: String) -> ProviderSettingsFailure {
+    ProviderSettingsFailure(
+        code: failure.code,
+        modelVerification: toolName == ToolCatalog.verifyProviderModel ? failure.providerModelVerification : nil)
 }

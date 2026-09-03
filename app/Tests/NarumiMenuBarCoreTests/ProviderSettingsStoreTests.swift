@@ -22,6 +22,21 @@ final class ProviderSettingsStoreTests: XCTestCase {
         XCTAssertTrue(tests.isEmpty)
     }
 
+    func testEmptyAdvertisedProviderListCannotCreateOrSaveAnInventedFallback() async {
+        let client = FakeProviderSettingsClient(connections: [], providers: [])
+        let store = ProviderSettingsStore(client: client)
+        await store.load()
+        XCTAssertTrue(store.availableProviderIDs.isEmpty)
+        XCTAssertFalse(store.canAddConnection)
+        store.newConnection()
+        store.editor.displayName = "Must not save"
+        XCTAssertFalse(store.canSave)
+        await store.save()
+        let requests = await client.saveRequests
+        XCTAssertTrue(requests.isEmpty)
+        XCTAssertNil(store.selectedConnectionID)
+    }
+
     func testSavingClearsInputAndDismissPreservesRequestWithoutApplyingLateCompletion() async throws {
         let client = FakeProviderSettingsClient(scenario: .init(holdSave: true))
         let store = ProviderSettingsStore(client: client)

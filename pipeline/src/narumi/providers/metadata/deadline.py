@@ -129,7 +129,42 @@ def _abort(connection: socket.socket) -> None:
         pass
 
 
-def _resolve(host: str, port: int, deadline: RequestDeadline) -> list[tuple]:
+def _resolved_address_info(addresses: tuple[str, ...], port: int) -> list[tuple]:
+    if not addresses or len(addresses) > 16:
+        raise OSError("Pinned DNS result is invalid")
+    result: list[tuple] = []
+    seen: set[tuple[int, str]] = set()
+    for raw in addresses:
+        if not isinstance(raw, str):
+            raise OSError("Pinned DNS result is invalid")
+        try:
+            address = ipaddress.ip_address(raw)
+        except ValueError:
+            raise OSError("Pinned DNS result is invalid") from None
+        family = socket.AF_INET if address.version == 4 else socket.AF_INET6
+        normalized = address.compressed
+        key = (family, normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        target = (normalized, port) if family == socket.AF_INET else (normalized, port, 0, 0)
+        result.append((family, socket.SOCK_STREAM, 0, "", target))
+    if not result:
+        raise OSError("Pinned DNS result is invalid")
+    return result
+
+
+def _resolve(
+    host: str,
+    port: int,
+    deadline: RequestDeadline,
+    *,
+    resolver: Callable[..., list[tuple]] | None = None,
+    resolved_addresses: tuple[str, ...] | None = None,
+    require_all_addresses: bool = False,
+) -> list[tuple]:
+    if resolved_addresses is not None:
+        return _resolved_address_info(resolved_addresses, port)
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
@@ -150,14 +185,27 @@ def _resolve(host: str, port: int, deadline: RequestDeadline) -> list[tuple]:
     finished = threading.Event()
     result: list[list[tuple] | None] = []
 
-    def resolve() -> None:
-        try:
-            result.append(socket.getaddrinfo(host, port, type=socket.SOCK_STREAM))
-        except Exception:
-            result.append(None)
-        finally:
-            finished.set()
-            _DNS_SLOTS.release()
+    if resolver is None:
+
+        def resolve() -> None:
+            try:
+                result.append(socket.getaddrinfo(host, port, type=socket.SOCK_STREAM))
+            except Exception:
+                result.append(None)
+            finally:
+                finished.set()
+                _DNS_SLOTS.release()
+
+    else:
+
+        def resolve() -> None:
+            try:
+                result.append(resolver(host, port, type=socket.SOCK_STREAM))
+            except Exception:
+                result.append(None)
+            finally:
+                finished.set()
+                _DNS_SLOTS.release()
 
     try:
         threading.Thread(target=resolve, daemon=True).start()
@@ -169,11 +217,57 @@ def _resolve(host: str, port: int, deadline: RequestDeadline) -> list[tuple]:
     deadline.remaining()
     if not result or not result[0]:
         raise OSError("DNS resolution failed")
+    if require_all_addresses and len(result[0]) > 16:
+        raise OSError("DNS resolution returned too many addresses")
     return result[0][:16]
 
 
-def _connect(host: str, port: int, deadline: RequestDeadline) -> socket.socket:
-    for family, kind, protocol, _, address in _resolve(host, port, deadline):
+def resolve_addresses(
+    host: str,
+    port: int,
+    *,
+    timeout: float,
+    resolver: Callable[..., list[tuple]] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> tuple[str, ...]:
+    """Resolve once under a deadline so a caller can validate and pin every address."""
+    deadline = RequestDeadline(timeout, should_cancel=should_cancel)
+    try:
+        deadline.start()
+        infos = _resolve(
+            host,
+            port,
+            deadline,
+            resolver=resolver,
+            require_all_addresses=True,
+        )
+        addresses: list[str] = []
+        for family, kind, _, _, target in infos:
+            if family not in {socket.AF_INET, socket.AF_INET6} or kind != socket.SOCK_STREAM:
+                continue
+            try:
+                address = ipaddress.ip_address(target[0]).compressed
+            except (ValueError, TypeError, IndexError):
+                raise OSError("DNS result is invalid") from None
+            if address not in addresses:
+                addresses.append(address)
+        if not addresses:
+            raise OSError("DNS resolution returned no usable address")
+        return tuple(addresses)
+    finally:
+        deadline.close()
+
+
+def _connect(
+    host: str,
+    port: int,
+    deadline: RequestDeadline,
+    *,
+    resolved_addresses: tuple[str, ...] | None = None,
+) -> socket.socket:
+    for family, kind, protocol, _, address in _resolve(
+        host, port, deadline, resolved_addresses=resolved_addresses
+    ):
         deadline.remaining()
         connection = socket.socket(family, kind, protocol)
         try:
@@ -260,25 +354,43 @@ class _TrackedSend:
 
 
 class _HTTPConnection(_TrackedSend, http.client.HTTPConnection):
-    def __init__(self, *args, deadline: RequestDeadline, **kwargs):
+    def __init__(
+        self,
+        *args,
+        deadline: RequestDeadline,
+        resolved_addresses: tuple[str, ...] | None = None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.deadline = deadline
+        self.resolved_addresses = resolved_addresses
 
     def connect(self) -> None:
         if self._tunnel_host is not None:
             raise OSError("HTTP tunnels are not supported")
-        self.sock = _connect(self.host, self.port, self.deadline)
+        self.sock = _connect(
+            self.host, self.port, self.deadline, resolved_addresses=self.resolved_addresses
+        )
 
 
 class _HTTPSConnection(_TrackedSend, http.client.HTTPSConnection):
-    def __init__(self, *args, deadline: RequestDeadline, **kwargs):
+    def __init__(
+        self,
+        *args,
+        deadline: RequestDeadline,
+        resolved_addresses: tuple[str, ...] | None = None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.deadline = deadline
+        self.resolved_addresses = resolved_addresses
 
     def connect(self) -> None:
         if self._tunnel_host is not None:
             raise OSError("HTTP tunnels are not supported")
-        raw = _connect(self.host, self.port, self.deadline)
+        raw = _connect(
+            self.host, self.port, self.deadline, resolved_addresses=self.resolved_addresses
+        )
         self.sock = self._context.wrap_socket(
             raw, server_hostname=self.host, do_handshake_on_connect=False
         )
@@ -289,7 +401,12 @@ class _HTTPSConnection(_TrackedSend, http.client.HTTPSConnection):
 class DeadlineHTTPHandler(urllib.request.HTTPHandler):
     def http_open(self, request):
         def connection(*args, **kwargs):
-            return _HTTPConnection(*args, deadline=request.narumi_deadline, **kwargs)
+            return _HTTPConnection(
+                *args,
+                deadline=request.narumi_deadline,
+                resolved_addresses=getattr(request, "narumi_resolved_addresses", None),
+                **kwargs,
+            )
 
         return self.do_open(connection, request)
 
@@ -297,6 +414,11 @@ class DeadlineHTTPHandler(urllib.request.HTTPHandler):
 class DeadlineHTTPSHandler(urllib.request.HTTPSHandler):
     def https_open(self, request):
         def connection(*args, **kwargs):
-            return _HTTPSConnection(*args, deadline=request.narumi_deadline, **kwargs)
+            return _HTTPSConnection(
+                *args,
+                deadline=request.narumi_deadline,
+                resolved_addresses=getattr(request, "narumi_resolved_addresses", None),
+                **kwargs,
+            )
 
         return self.do_open(connection, request, context=self._context)

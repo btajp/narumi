@@ -13,6 +13,7 @@ from narumi.models import MergedTranscript, MinutesMeta, SpeakerMap, Transcript
 
 from narumi_server.handlers.common import (
     CONFIG_KEYS,
+    check_cache_epoch_monotonic,
     check_expected_config,
     config_from_mapping,
     find_bundle,
@@ -270,6 +271,7 @@ def set_meeting_config(ctx: ServerContext, args: dict[str, Any]) -> dict[str, An
     ) as bundle:
         check_expected_config(bundle.manifest.config, args, generation=False)
         config = config_from_mapping(bundle.manifest.config, updates)
+        check_cache_epoch_monotonic(bundle.manifest.config, config)
         previous_scope = bundle.manifest.scope
         scope_changed = "new_scope" in args
         with validated_config(ctx, config):

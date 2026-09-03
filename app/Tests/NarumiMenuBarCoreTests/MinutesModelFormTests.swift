@@ -180,7 +180,7 @@ final class MinutesModelFormTests: XCTestCase {
         XCTAssertEqual(selection.cacheEpoch, 0)
         XCTAssertNil(selection.parameters.reasoningEffort)
         for (key, value) in [
-            ("provider", "claude-agent-sdk" as Any), ("connection_revision", 0), ("cache_epoch", -1),
+            ("provider", "unknown-provider" as Any), ("connection_revision", 0), ("cache_epoch", -1),
             ("model_id", ""), ("parameters", NSNull()),
             ("parameters", ["reasoning_effort": "wrong value"]),
             ("parameters", ["reasoning_effort": NSNull()]),
@@ -217,7 +217,8 @@ final class MinutesModelFormTests: XCTestCase {
             let selection = MinutesModelSelection(
                 provider: provider, connectionID: MinutesModelFixtures.connectionID, connectionRevision: 7,
                 modelID: "fixture-\(provider)", reasoningEffort: ["codex-app-server", "openai-api"].contains(provider) ? "high" : nil,
-                maxTokens: provider == "codex-app-server" ? nil : 2048, cacheEpoch: 5)
+                maxTokens: ["codex-app-server", "claude-agent-sdk"].contains(provider) ? nil : 2048,
+                cacheEpoch: 5)
             let policy = provider == "ollama" ? "local_only" : (provider == "codex-app-server" ? "subscription_ok" : "api_ok")
             let config = MeetingConfig(
                 transcriptionEngine: "auto", diarizationEngine: "none", llmProvider: "none",
@@ -245,6 +246,8 @@ final class MinutesModelFormTests: XCTestCase {
         ]
         for (provider, parameters) in [
             ("codex-app-server", ["max_tokens": 512] as [String: Any]),
+            ("claude-agent-sdk", ["max_tokens": 512]),
+            ("openai-compatible-api", ["reasoning_effort": "high"]),
             ("anthropic-api", ["reasoning_effort": "high"]),
             ("ollama", ["reasoning_effort": "high"]),
             ("openai-api", ["max_tokens": 0]),
@@ -270,7 +273,7 @@ final class MinutesModelFormTests: XCTestCase {
     }
 
     func testAPIPolicyMustBeExplicitAndOllamaCanStayLocal() {
-        for provider in ["openai-api", "anthropic-api", "ollama"] {
+        for provider in MinutesModelSelection.providers {
             let connection = MinutesModelFixtures.connection(providerID: ProviderID(rawValue: provider)!)
             let model = MinutesModelFixtures.model(provider: provider)
             var form = ProcessingConfigurationForm()
@@ -283,6 +286,9 @@ final class MinutesModelFormTests: XCTestCase {
                 externalSendPolicy: policy) }
             if provider == "ollama" {
                 XCTAssertNil(check("local_only"))
+            } else if provider == "codex-app-server" {
+                XCTAssertNotNil(check("local_only"), provider)
+                XCTAssertNil(check("subscription_ok"), provider)
             } else {
                 XCTAssertNotNil(check("local_only"), provider)
                 XCTAssertNotNil(check("subscription_ok"), provider)
@@ -338,6 +344,52 @@ final class MinutesModelFormTests: XCTestCase {
         }
     }
 
+    func testPaidVerificationOnlyTargetsUsableTextLLMCandidates() {
+        let compatible = "openai-compatible-api"
+        let valid = MinutesModelFixtures.model(availability: .unverified, provider: compatible)
+        XCTAssertTrue(MinutesModelForm.isModelVerificationCandidate(valid, provider: compatible))
+        let discoveredUnknown = MinutesModelFixtures.model(
+            id: "compatible-unknown", availability: .unverified, inputs: [], outputs: [], roles: [],
+            provider: compatible, parameterSchema: ProviderParameterSchema(), maxOutputTokens: nil,
+            contextWindow: nil, reason: "adapter_capability_verification_required", source: .providerAPI)
+        XCTAssertTrue(MinutesModelForm.isModelVerificationCandidate(
+            discoveredUnknown, provider: compatible))
+        XCTAssertTrue(MinutesModelForm.isModelVerificationCandidate(
+            MinutesModelFixtures.model(availability: .unverified, provider: "claude-agent-sdk"),
+            provider: "claude-agent-sdk"))
+
+        let unsupportedRequired = ProviderParameterSchema(properties: [
+            "temperature": ProviderModelParameter(type: .number),
+            "max_tokens": ProviderModelParameter(type: .integer),
+        ], required: ["temperature"])
+        let rejected = [
+            MinutesModelFixtures.model(
+                availability: .unverified, roles: [.transcription], provider: compatible),
+            MinutesModelFixtures.model(
+                availability: .unverified, inputs: [.audio], provider: compatible),
+            MinutesModelFixtures.model(
+                availability: .unverified, outputs: [.audio], provider: compatible),
+            MinutesModelFixtures.model(
+                availability: .unverified, billing: .unknown, provider: compatible),
+            MinutesModelFixtures.model(
+                availability: .unverified, provider: compatible,
+                parameterSchema: unsupportedRequired),
+            MinutesModelFixtures.model(
+                availability: .unverified, provider: compatible,
+                parameterSchema: ProviderParameterSchema()),
+            MinutesModelFixtures.model(
+                id: discoveredUnknown.modelID, availability: .unverified, inputs: [], outputs: [], roles: [],
+                provider: compatible, parameterSchema: ProviderParameterSchema(), maxOutputTokens: nil,
+                contextWindow: nil, reason: "model_capabilities_unavailable", source: .providerAPI),
+            MinutesModelFixtures.model(availability: .available, provider: compatible),
+        ]
+        for model in rejected {
+            XCTAssertFalse(MinutesModelForm.isModelVerificationCandidate(model, provider: compatible))
+        }
+        XCTAssertFalse(MinutesModelForm.isModelVerificationCandidate(
+            valid, provider: "openai-api"))
+    }
+
     func testProviderAndModelChangesClearBothParametersButNeverChangePolicy() {
         var form = ProcessingConfigurationForm(config: MeetingConfig(
             externalSendPolicy: "local_only", minutesModel: MinutesModelSelection(
@@ -350,7 +402,7 @@ final class MinutesModelFormTests: XCTestCase {
         XCTAssertTrue(form.minutesModel.maxTokensText.isEmpty)
         XCTAssertEqual(form.externalSendPolicy, "local_only")
         form.minutesModel.selectProvider("claude-agent-sdk")
-        XCTAssertEqual(form.minutesModel.provider, "")
+        XCTAssertEqual(form.minutesModel.provider, "claude-agent-sdk")
         XCTAssertNil(form.minutesModel.selection)
     }
 
@@ -396,7 +448,7 @@ final class MinutesModelFormTests: XCTestCase {
         XCTAssertTrue(MinutesModelFixtures.model(availabilityExpiresOn: "2026-02-30").availabilityExpired)
     }
 
-    func testServerCapabilitiesGateModelProvidersWithoutEnablingSDKGeneration() throws {
+    func testServerCapabilitiesGateLegacyAndSixProviderGeneration() throws {
         var capabilities = ServerCapabilities(
             recording: false, transports: [], transcriptionEngines: [], diarizationEngines: [],
             llmProviders: ["claude-agent-sdk", "anthropic-api", "ollama"], exportDestinations: [],
@@ -407,11 +459,15 @@ final class MinutesModelFormTests: XCTestCase {
         XCTAssertTrue(capabilities.supportedMinutesModelProviders(contractVersion: "4.0.0").isEmpty)
         capabilities.minutesModelProviders = []
         XCTAssertTrue(capabilities.supportedMinutesModelProviders(contractVersion: "4.0.0").isEmpty)
-        capabilities.minutesModelProviders = ["openai-api", "ollama", "claude-agent-sdk", "unknown"]
+        capabilities.minutesModelProviders = [
+            "openai-api", "ollama", "claude-agent-sdk", "openai-compatible-api", "unknown",
+        ]
         XCTAssertEqual(capabilities.supportedMinutesModelProviders(contractVersion: "4.0.0"), ["openai-api", "ollama"])
         XCTAssertEqual(capabilities.supportedMinutesModelProviders(contractVersion: "3.0.0"), ["codex-app-server"])
         XCTAssertEqual(capabilities.supportedMinutesModelProviders(contractVersion: "5.0.0"), ["openai-api", "ollama"])
-        XCTAssertTrue(capabilities.supportedMinutesModelProviders(contractVersion: "6.0.0").isEmpty)
+        XCTAssertEqual(capabilities.supportedMinutesModelProviders(contractVersion: "6.0.0"), [
+            "claude-agent-sdk", "openai-api", "openai-compatible-api", "ollama",
+        ])
         capabilities.workflow?.stageModelSelection = false
         XCTAssertTrue(capabilities.supportedMinutesModelProviders(contractVersion: "4.0.0").isEmpty)
         let form = ProcessingConfigurationForm(config: MeetingConfig(minutesModel: MinutesModelSelection(

@@ -103,6 +103,7 @@ async def test_get_server_info(client: PerCallClient, ctx: ServerContext):
     assert "fake" in caps["transcription_engines"]
     assert "none" in caps["diarization_engines"]
     assert "none" in caps["llm_providers"]
+    assert "claude-agent-sdk" not in caps["llm_providers"]
     assert "markdown" in caps["export_destinations"]
 
 

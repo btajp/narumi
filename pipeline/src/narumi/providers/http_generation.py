@@ -25,7 +25,7 @@ from narumi.providers.http_generation_response import (
     parse_response,
 )
 from narumi.providers.metadata import MetadataClient, validate_endpoint
-from narumi.providers.metadata.http import JSONHTTPClient
+from narumi.providers.metadata.http import JSONHTTPClient, generation_status_is_unknown
 from narumi.providers.metadata.ollama import local_selector
 from narumi.providers.metadata.openai_capabilities import reasoning_payload
 from narumi.providers.metadata.validation import MODEL_ID
@@ -282,6 +282,8 @@ def _safe_http_error(error: NarumiError) -> NarumiError:
             "The provider rejected the saved credentials", details={"reason": "credential_rejected"}
         )
     status = error.details.get("status")
+    if reason == "metadata_http_error" and generation_status_is_unknown(status):
+        return generation_unknown()
     if reason == "metadata_http_error" and type(status) is int and 400 <= status <= 499:
         return EngineUnavailableError(
             "The provider rejected this generation request",

@@ -1,7 +1,7 @@
 {
   "name": "set_provider_connection",
   "title": "Set provider connection",
-  "description": "Create or atomically update a provider connection without authenticating, fetching models or generating. OpenAI API uses auth_method=api_key and the fixed endpoint https://api.openai.com; its text generation requires api_ok and it does not reuse Codex ChatGPT credentials. Codex App Server accepts only auth_method=chatgpt and endpoint=https://chatgpt.com, rejects api_key including null, and keeps official login credentials inside its connection-specific narumi runtime without exposing them. Updates are also checked against the saved provider type. New connections require provider_id, display_name and auth_method; connection_id and expected_revision must be omitted. Updates require connection_id and expected_revision and cannot change provider_id. Omitted mutable fields are retained; enabled defaults to true on creation. api_key is write-only: omit to retain, null to delete. A new API connection without a key is saved as unconfigured. New or changed credentials invalidate authentication and catalog checks. Endpoint or authentication changes never silently reuse credentials; incompatible, active or stale changes are rejected. API keys are accepted only through the authenticated transport and stored in the connection's SecretStore, never responses, logs, request caches or diagnostics. CLI secret input uses a hidden prompt or stdin, not ordinary argv or literal --json. The same request_id returns the original result, without repeating a secret mutation. On failure returns an error_envelope (isError=true) with code: invalid_argument, not_found, configuration_conflict, busy, authentication_required, internal. All provider operations require the authenticated resident server; no implicit in-process or unauthenticated HTTP fallback is allowed.",
+  "description": "Create or atomically update one of the six provider connections without authenticating, fetching models or generating. OpenAI API uses auth_method=api_key, fixed endpoint https://api.openai.com and fixed api_surface=responses; it never reuses Codex ChatGPT credentials. OpenAI-compatible API requires an explicitly validated base endpoint and api_surface=responses|chat_completions. Remote compatible endpoints require HTTPS and api_key; auth_method=none is limited to numeric loopback. Chat Completions also requires the exact chat_max_tokens_field and never probes or falls back to another protocol or token field. Codex App Server accepts only auth_method=chatgpt and endpoint=https://chatgpt.com, rejects api_key including null, and keeps official login credentials inside its connection-specific narumi runtime without exposing them. Updates are checked against the saved provider type. New connections require provider_id, display_name and auth_method; compatible connections also require endpoint and api_surface. connection_id and expected_revision must be omitted on creation. Updates require connection_id and expected_revision and cannot change provider_id. Omitted mutable fields are retained; enabled defaults to true on creation. api_key is write-only: omit to retain, null to delete. chat_max_tokens_field is non-secret: omit to retain and use null to clear it when changing from chat_completions to responses. The merged saved configuration is revalidated before commit. A new API connection without a key is saved as unconfigured. New or changed credentials, endpoint, surface or token field invalidate authentication, model verification and catalog checks. Endpoint or authentication changes never silently reuse credentials; incompatible, active or stale changes are rejected. API keys are accepted only through the authenticated transport and stored in the connection's SecretStore, never responses, logs, request caches or diagnostics. CLI secret input uses a hidden prompt or stdin, not ordinary argv or literal --json. The same request_id returns the original result, without repeating a secret mutation. On failure returns an error_envelope (isError=true) with code: invalid_argument, not_found, configuration_conflict, busy, authentication_required, internal. All provider operations require the authenticated resident server; no implicit in-process or unauthenticated HTTP fallback is allowed.",
   "annotations": {
     "readOnlyHint": false,
     "destructiveHint": false,
@@ -33,11 +33,36 @@
         "type": "string",
         "minLength": 1,
         "maxLength": 2048,
-        "pattern": "^https?://",
-        "description": "Official Anthropic connections use https://api.anthropic.com; OpenAI API uses https://api.openai.com; Codex App Server uses https://chatgpt.com. These endpoints are fixed. Ollama accepts only numeric 127.0.0.0/8 or [::1] HTTP/HTTPS base URLs without userinfo, query or fragment; HTTPS requires normal certificate validation. DNS hostnames, redirects and proxies are not used."
+        "anyOf": [
+          {
+            "enum": [
+              "https://api.anthropic.com",
+              "https://api.openai.com",
+              "https://chatgpt.com"
+            ]
+          },
+          {
+            "$ref": "../defs/provider_connections.json#/$defs/provider_compatible_endpoint"
+          },
+          {
+            "pattern": "^https?://(127(\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|\\[::1\\])(:[0-9]{1,5})?/?$"
+          }
+        ],
+        "description": "Official Anthropic connections use https://api.anthropic.com; OpenAI API uses https://api.openai.com; Codex App Server uses https://chatgpt.com. OpenAI-compatible API accepts a remote HTTPS or numeric-loopback HTTP/HTTPS API base with no trailing slash, userinfo, query, fragment, percent encoding, dot/empty path segment, redirect or proxy fallback. Public DNS is resolved and pinned under the server's outbound-address policy before use. Ollama accepts only numeric 127.0.0.0/8 or [::1] HTTP/HTTPS base URLs."
       },
       "auth_method": {
         "$ref": "../defs/providers.json#/$defs/provider_auth_method"
+      },
+      "api_surface": {
+        "$ref": "../defs/provider_connections.json#/$defs/provider_api_surface",
+        "description": "Required on compatible creation. Omit on update to retain. Official OpenAI accepts only responses."
+      },
+      "chat_max_tokens_field": {
+        "oneOf": [
+          { "$ref": "../defs/provider_connections.json#/$defs/provider_chat_max_tokens_field" },
+          { "type": "null" }
+        ],
+        "description": "Required string for chat_completions. Omit on update to retain; null explicitly clears the saved field when changing to responses."
       },
       "api_key": {
         "type": [
@@ -114,11 +139,44 @@
             "required": [
               "api_key"
             ]
+          },
+          {
+            "required": [
+              "api_surface"
+            ]
+          },
+          {
+            "required": [
+              "chat_max_tokens_field"
+            ]
           }
         ]
       }
     ],
     "allOf": [
+      {
+        "if": {
+          "properties": { "api_surface": { "const": "chat_completions" } },
+          "required": ["api_surface"]
+        },
+        "then": {
+          "required": ["chat_max_tokens_field"],
+          "properties": {
+            "chat_max_tokens_field": {
+              "$ref": "../defs/provider_connections.json#/$defs/provider_chat_max_tokens_field"
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "properties": { "api_surface": { "const": "responses" } },
+          "required": ["api_surface"]
+        },
+        "then": {
+          "properties": { "chat_max_tokens_field": { "type": "null" } }
+        }
+      },
       {
         "if": {
           "properties": { "provider_id": { "const": "openai-api" } },
@@ -127,8 +185,61 @@
         "then": {
           "properties": {
             "auth_method": { "const": "api_key" },
-            "endpoint": { "const": "https://api.openai.com" }
+            "endpoint": { "const": "https://api.openai.com" },
+            "api_surface": { "const": "responses" },
+            "chat_max_tokens_field": { "type": "null" }
           }
+        }
+      },
+      {
+        "if": {
+          "properties": { "provider_id": { "const": "openai-compatible-api" } },
+          "required": ["provider_id"]
+        },
+        "then": {
+          "required": ["endpoint", "api_surface"],
+          "properties": {
+            "endpoint": {
+              "$ref": "../defs/provider_connections.json#/$defs/provider_compatible_endpoint"
+            },
+            "auth_method": { "enum": ["api_key", "none"] }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": { "api_surface": { "const": "chat_completions" } },
+                "required": ["api_surface"]
+              },
+              "then": {
+                "required": ["chat_max_tokens_field"],
+                "properties": {
+                  "chat_max_tokens_field": {
+                    "$ref": "../defs/provider_connections.json#/$defs/provider_chat_max_tokens_field"
+                  }
+                }
+              },
+              "else": {
+                "properties": { "chat_max_tokens_field": { "type": "null" } }
+              }
+            },
+            {
+              "if": {
+                "properties": { "auth_method": { "const": "none" } },
+                "required": ["auth_method"]
+              },
+              "then": {
+                "properties": {
+                  "endpoint": {
+                    "$ref": "../defs/provider_connections.json#/$defs/provider_compatible_loopback_endpoint"
+                  },
+                  "api_key": { "type": "null" }
+                }
+              },
+              "else": {
+                "properties": { "auth_method": { "const": "api_key" } }
+              }
+            }
+          ]
         }
       },
       {
@@ -222,6 +333,24 @@
             }
           }
         }
+      },
+      {
+        "if": {
+          "properties": {
+            "provider_id": {
+              "enum": ["codex-app-server", "claude-agent-sdk", "anthropic-api", "ollama"]
+            }
+          },
+          "required": ["provider_id"]
+        },
+        "then": {
+          "not": {
+            "anyOf": [
+              { "required": ["api_surface"] },
+              { "required": ["chat_max_tokens_field"] }
+            ]
+          }
+        }
       }
     ]
   },
@@ -276,7 +405,25 @@
         "display_name": "OpenAI 議事録",
         "auth_method": "api_key",
         "endpoint": "https://api.openai.com",
+        "api_surface": "responses",
         "request_id": "provider-openai-request-20260829-001"
+      },
+      {
+        "provider_id": "openai-compatible-api",
+        "display_name": "社内 OpenAI 互換 API",
+        "auth_method": "api_key",
+        "endpoint": "https://llm.example.com/v1",
+        "api_surface": "responses",
+        "request_id": "provider-compatible-request-20260902-001"
+      },
+      {
+        "provider_id": "openai-compatible-api",
+        "display_name": "ローカル OpenAI 互換 API",
+        "auth_method": "none",
+        "endpoint": "http://127.0.0.1:8080/v1",
+        "api_surface": "chat_completions",
+        "chat_max_tokens_field": "max_completion_tokens",
+        "request_id": "provider-compatible-request-20260902-002"
       }
     ],
     "output": [
@@ -340,6 +487,25 @@
           "enabled": true,
           "endpoint": "https://api.openai.com",
           "auth_method": "api_key",
+          "api_surface": "responses",
+          "credential_present": false,
+          "auth_state": "unconfigured",
+          "catalog_state": "unfetched",
+          "checked_at": null,
+          "active_auth": null,
+          "last_generation_state": "never"
+        }
+      },
+      {
+        "connection": {
+          "connection_id": "conn-222233334444",
+          "revision": 1,
+          "provider_id": "openai-compatible-api",
+          "display_name": "社内 OpenAI 互換 API",
+          "enabled": true,
+          "endpoint": "https://llm.example.com/v1",
+          "auth_method": "api_key",
+          "api_surface": "responses",
           "credential_present": false,
           "auth_state": "unconfigured",
           "catalog_state": "unfetched",

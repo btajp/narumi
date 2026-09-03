@@ -2,12 +2,19 @@ import NarumiMenuBarCore
 import SwiftUI
 
 struct MinutesModelSelectionView: View {
+    private struct VerificationTarget {
+        let connectionID: String
+        let connectionRevision: Int
+        let model: ProviderModelDescriptor
+    }
+
     @Binding var form: MinutesModelForm
     let catalog: MinutesModelCatalogStore
     let externalSendPolicy: String
     var isProfile = false
     @State private var showNewAttemptConfirmation = false
     @State private var preparedNewAttempt = false
+    @State private var verificationCandidate: VerificationTarget?
 
     private var connection: ProviderConnection? { catalog.connection(form.connectionID) }
     private var response: ListProviderModelsResponse? { catalog.catalogs[form.connectionID] }
@@ -15,6 +22,14 @@ struct MinutesModelSelectionView: View {
     private var models: [ProviderModelDescriptor] { response?.models ?? [] }
     private var selectedModel: ProviderModelDescriptor? {
         models.first { $0.modelID == form.modelID }
+    }
+    private var verificationCandidates: [ProviderModelDescriptor] {
+        guard let connection else { return [] }
+        return models.filter {
+            catalog.isVerificationCandidate(
+                connectionID: connection.connectionID,
+                expectedRevision: connection.revision, model: $0)
+        }
     }
     private var revisionChanged: Bool {
         connection.map { $0.revision != form.connectionRevision } ?? false
@@ -48,7 +63,11 @@ struct MinutesModelSelectionView: View {
                 if let message = catalog.errorMessage {
                     Text(message).font(.caption).foregroundStyle(.red)
                 }
-                if form.provider == "openai-api" || form.provider == "anthropic-api" {
+                if let message = catalog.verificationNotice {
+                    Text(message).font(.caption).foregroundStyle(.orange)
+                }
+                if ["claude-agent-sdk", "openai-api", "openai-compatible-api", "anthropic-api"]
+                    .contains(form.provider) {
                     Text("取消は通信を切る操作です。サービス側の処理や課金の停止は保証できません。送信後に結果が不明になっても自動再送しません。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -69,6 +88,39 @@ struct MinutesModelSelectionView: View {
         .task(id: form.catalogReadIdentity + "/" + catalog.supportedProviders.joined(separator: ",")) {
             guard form.mode == .selected else { return }
             await catalog.loadCachedCatalog(connectionID: form.connectionID, selectedModelID: form.modelID)
+        }
+        .confirmationDialog(
+            "このモデルへ固定テスト文を送信しますか？",
+            isPresented: Binding(
+                get: { verificationCandidate != nil },
+                set: { if !$0 { verificationCandidate = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("送信してモデルを検証") {
+                guard let candidate = verificationCandidate else { return }
+                verificationCandidate = nil
+                guard form.connectionID == candidate.connectionID,
+                    form.connectionRevision == candidate.connectionRevision,
+                    connection?.connectionID == candidate.connectionID,
+                    connection?.revision == candidate.connectionRevision,
+                    catalog.isVerificationCandidate(
+                        connectionID: candidate.connectionID,
+                        expectedRevision: candidate.connectionRevision,
+                        model: candidate.model) else {
+                    catalog.rejectChangedVerificationConfirmation()
+                    return
+                }
+                Task {
+                    await catalog.verifyModel(
+                        connectionID: candidate.connectionID,
+                        expectedRevision: candidate.connectionRevision,
+                        expectedModel: candidate.model,
+                        confirmation: .sendTestPromptAndMayCharge)
+                }
+            }
+            Button("キャンセル", role: .cancel) { verificationCandidate = nil }
+        } message: {
+            Text("会議データではなく固定の非機密テスト文を 1 回送信します。送信先で API 利用料が発生する場合があります。結果が不明でも自動再送しません。再実行は、状態と課金を確認してから改めて操作してください。")
         }
     }
 
@@ -174,6 +226,28 @@ struct MinutesModelSelectionView: View {
                     .disabled(catalog.isLoading)
                 }
             }
+            if let providerID = connection?.providerID,
+                [ProviderID.claudeAgentSDK, .openAICompatibleAPI].contains(providerID) {
+                ForEach(verificationCandidates, id: \.modelID) { model in
+                    Button("「\(model.displayName)」を検証…") {
+                        guard let connection else { return }
+                        verificationCandidate = VerificationTarget(
+                            connectionID: connection.connectionID,
+                            connectionRevision: connection.revision, model: model)
+                    }
+                        .disabled(catalog.isLoading || !canUseConnection)
+                }
+                if !verificationCandidates.isEmpty {
+                    Text("モデル一覧だけでは生成対応を確認できません。選択可能にするには、モデルごとに固定テスト文の送信と課金可能性を確認して検証します。自動検証は行いません。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if models.contains(where: {
+                    $0.availability == .unverified && !verificationCandidates.contains($0)
+                }) {
+                    Text("LLM・テキスト入出力・API 課金区分・安全に設定できるパラメータを確認できない候補には、課金を伴う検証を実行しません。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
             Text("画面を開いたときは保存済み候補だけを読みます。「取得・更新」はモデル一覧を通信しますが、会議内容は送信しません。")
                 .font(.caption).foregroundStyle(.secondary)
         }
@@ -202,6 +276,9 @@ struct MinutesModelSelectionView: View {
                 .font(.caption).foregroundStyle(.secondary)
         } else if form.provider == "codex-app-server" {
             Text("Codex では出力トークン数の上限を指定できません。利用枠の消費量の上限は保証しません。")
+                .font(.caption).foregroundStyle(.secondary)
+        } else if form.provider == "claude-agent-sdk" {
+            Text("Claude Agent SDK では出力トークン数の上限を指定しません。API 利用量や金額の上限は保証しません。")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
@@ -271,18 +348,24 @@ struct MinutesModelSelectionView: View {
             return "送信先: OpenAI（https://chatgpt.com）。テキストを送信し、ChatGPT の利用枠を使います。subscription_ok または api_ok の明示が必要です。API 課金へは切り替えません。"
         case "openai-api":
             return "送信先: OpenAI（https://api.openai.com/v1/responses）。テキスト送信と従量課金を許可する api_ok の明示が必要です。ChatGPT の利用枠とは別の API 課金です。"
+        case "openai-compatible-api":
+            let endpoint = connection?.endpoint ?? "接続を選ぶと表示します"
+            let surface = connection?.apiSurface == .chatCompletions ? "/chat/completions" : "/responses"
+            return "送信先: 保存した OpenAI互換API（\(endpoint)\(surface)）。ローカル URL でも外部へ中継する可能性があるため api_ok が必要です。失敗時に別形式や別プロバイダへ切り替えません。"
+        case "claude-agent-sdk":
+            return "送信先: Claude Agent SDK から Anthropic API（https://api.anthropic.com）。テキスト送信と従量 API 課金を許可する api_ok が必要です。Claude のサブスクリプションログインは使用しません。"
         case "anthropic-api":
             return "送信先: Anthropic（https://api.anthropic.com）。テキスト送信と従量課金を許可する api_ok の明示が必要です。Claude のサブスクリプションとは別の API 課金です。"
         case "ollama":
             return "接続先: この Mac の Ollama（\(connection?.endpoint ?? "接続を選ぶと表示します")）。ローカル実行を確認したモデルだけを使用します。local_only で利用でき、API 課金のプロバイダへは切り替えません。"
         default:
-            return "対応するプロバイダを選ぶと、テキストの送信先と利用条件を表示します。Claude Agent SDK の議事録生成は未対応です。"
+            return "プロバイダを選ぶと、テキストの送信先と利用条件を表示します。生成可能かどうかは接続・実行環境・モデル候補の状態で確認します。"
         }
     }
 
     private var newAttemptWarning: String {
         switch form.provider {
-        case "openai-api", "anthropic-api":
+        case "claude-agent-sdk", "openai-api", "openai-compatible-api", "anthropic-api":
             return "前の試行がサービス側で完了している可能性があります。新しく試すと API 利用料が重複して発生する場合があります。"
         case "codex-app-server":
             return "前の試行がサービス側で完了している可能性があります。新しく試すと ChatGPT の利用枠を重複して消費する場合があります。"

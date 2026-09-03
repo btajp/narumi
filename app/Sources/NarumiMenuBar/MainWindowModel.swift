@@ -81,7 +81,9 @@ final class MainWindowModel: ObservableObject {
     @Published var serverInfo: ServerInfo? {
         didSet {
             minutesModelCatalog.setSupportedProviders(
-                serverInfo?.capabilities.supportedMinutesModelProviders(contractVersion: serverInfo?.contractVersion) ?? [])
+                serverInfo?.capabilities.supportedMinutesModelProviders(contractVersion: serverInfo?.contractVersion) ?? [],
+                modelVerificationSupported:
+                    serverInfo?.capabilities.workflow?.providerModelVerification == true)
             transcriptionModelCatalog.setSupportedProviders(
                 serverInfo?.capabilities.supportedTranscriptionModelProviders(contractVersion: serverInfo?.contractVersion) ?? [])
             if transcriptionModelCatalog.supportedProviders.isEmpty {

@@ -14,6 +14,30 @@
       "minimum": 1,
       "description": "Monotonic connection version used for compare-and-set updates."
     },
+    "provider_api_surface": {
+      "type": "string",
+      "enum": ["responses", "chat_completions"],
+      "description": "Explicit OpenAI-compatible generation protocol. Official OpenAI API is fixed to responses. No protocol fallback is allowed."
+    },
+    "provider_chat_max_tokens_field": {
+      "type": "string",
+      "enum": ["max_tokens", "max_completion_tokens"],
+      "description": "Exact Chat Completions request field configured for this endpoint. It is present only with api_surface=chat_completions and is never inferred or retried with the other field."
+    },
+    "provider_compatible_endpoint": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^(?:https://(?=[^/:]*[A-Za-z])(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))+(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?|https?://(?:127(?:\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|\\[::1\\])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?)(?:/[A-Za-z0-9][A-Za-z0-9._~-]{0,127})*$",
+      "description": "Canonical OpenAI-compatible API base. Remote hosts require HTTPS and a DNS name containing a letter; local HTTP/HTTPS is numeric 127/8 or [::1]. Userinfo, query, fragment, percent encoding, backslash, trailing slash, empty/dot path segments and invalid ports are excluded. Runtime DNS/address validation is still required before persistence and every request."
+    },
+    "provider_compatible_loopback_endpoint": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^https?://(?:127(?:\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|\\[::1\\])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:/[A-Za-z0-9][A-Za-z0-9._~-]{0,127})*$",
+      "description": "Numeric-loopback subset of provider_compatible_endpoint, required when auth_method=none."
+    },
     "provider_auth_operation_id": {
       "type": "string",
       "minLength": 1,
@@ -211,10 +235,16 @@
           ],
           "minLength": 1,
           "maxLength": 2048,
-          "description": "Non-secret, validated destination. Official Anthropic, OpenAI API and Codex destinations are fixed; Ollama is restricted to numeric loopback."
+          "description": "Non-secret, canonical and policy-validated API base. Official Anthropic, OpenAI API and Codex destinations are fixed. OpenAI-compatible endpoints are remote HTTPS or numeric-loopback HTTP/HTTPS bases without a trailing slash, userinfo, query, fragment, percent encoding, dot/empty path segment or redirect/proxy fallback. Ollama is restricted to numeric loopback."
         },
         "auth_method": {
           "$ref": "#/$defs/provider_auth_method"
+        },
+        "api_surface": {
+          "$ref": "#/$defs/provider_api_surface"
+        },
+        "chat_max_tokens_field": {
+          "$ref": "#/$defs/provider_chat_max_tokens_field"
         },
         "credential_present": {
           "type": "boolean",
@@ -268,8 +298,54 @@
           "then": {
             "properties": {
               "auth_method": { "const": "api_key" },
-              "endpoint": { "const": "https://api.openai.com" }
+              "endpoint": { "const": "https://api.openai.com" },
+              "api_surface": { "const": "responses" }
+            },
+            "not": {
+              "required": ["chat_max_tokens_field"]
             }
+          }
+        },
+        {
+          "if": {
+            "properties": { "provider_id": { "const": "openai-compatible-api" } },
+            "required": ["provider_id"]
+          },
+          "then": {
+            "required": ["endpoint", "api_surface"],
+            "properties": {
+              "endpoint": {
+                "$ref": "#/$defs/provider_compatible_endpoint"
+              },
+              "auth_method": { "enum": ["api_key", "none"] }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": { "api_surface": { "const": "chat_completions" } },
+                  "required": ["api_surface"]
+                },
+                "then": { "required": ["chat_max_tokens_field"] },
+                "else": { "not": { "required": ["chat_max_tokens_field"] } }
+              },
+              {
+                "if": {
+                  "properties": { "auth_method": { "const": "none" } },
+                  "required": ["auth_method"]
+                },
+                "then": {
+                  "properties": {
+                    "endpoint": {
+                      "$ref": "#/$defs/provider_compatible_loopback_endpoint"
+                    },
+                    "credential_present": { "const": false }
+                  }
+                },
+                "else": {
+                  "properties": { "auth_method": { "const": "api_key" } }
+                }
+              }
+            ]
           }
         },
         {
@@ -305,7 +381,31 @@
               }
             },
             "else": {
-              "properties": { "auth_method": { "const": "api_key" } }
+              "if": {
+                "properties": { "provider_id": { "const": "openai-compatible-api" } },
+                "required": ["provider_id"]
+              },
+              "else": {
+                "properties": { "auth_method": { "const": "api_key" } }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "provider_id": {
+                "enum": ["codex-app-server", "claude-agent-sdk", "anthropic-api", "ollama"]
+              }
+            },
+            "required": ["provider_id"]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["api_surface"] },
+                { "required": ["chat_max_tokens_field"] }
+              ]
             }
           }
         }

@@ -65,7 +65,7 @@ struct MinutesTabView: View {
             Spacer()
 
             if let minutes = model.minutes {
-                Text("\(NarumiFormat.jstDateTime(minutes.generatedAt)) · \(minutes.provider)")
+                Text("\(NarumiFormat.jstDateTime(minutes.generatedAt)) · \(providerName(minutes.provider))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -190,7 +190,7 @@ struct MinutesTabView: View {
                                     .monospacedDigit()
                                     .frame(width: 36, alignment: .leading)
                                 Text(NarumiFormat.jstDateTime(info.generatedAt))
-                                Text(info.provider)
+                                Text(providerName(info.provider))
                                     .foregroundStyle(.secondary)
                                 Spacer()
                                 Button("表示") {
@@ -232,5 +232,9 @@ struct MinutesTabView: View {
                 }
             }
         }
+    }
+
+    private func providerName(_ value: String) -> String {
+        ProviderID(rawValue: value).map(ProviderDisplay.name) ?? value
     }
 }

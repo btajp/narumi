@@ -33,6 +33,8 @@ _SECRET_FIELDS = {
     "secret",
 }
 _EPHEMERAL_FIELDS = {"authorization_url", "user_code"}
+REGISTRY_VERSION = 2
+_REQUEST_HMAC_GENERATION = "request_hmac_generation"
 
 
 @contextmanager
@@ -49,7 +51,11 @@ def public_errors() -> Iterator[None]:
 
 
 def _empty_document() -> dict[str, Any]:
-    return {"version": 1, **{section: {} for section in _SECTIONS}}
+    return {
+        "version": REGISTRY_VERSION,
+        _REQUEST_HMAC_GENERATION: None,
+        **{section: {} for section in _SECTIONS},
+    }
 
 
 def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -77,12 +83,31 @@ def _validate_value(value: Any) -> None:
 
 
 def _encode(document: dict[str, Any]) -> str:
-    if not isinstance(document, dict) or set(document) != {"version", *_SECTIONS}:
+    if not isinstance(document, dict) or set(document) != {
+        "version",
+        _REQUEST_HMAC_GENERATION,
+        *_SECTIONS,
+    }:
         raise ValueError("invalid provider registry fields")
-    if type(document["version"]) is not int or document["version"] != 1:
+    if type(document["version"]) is not int or document["version"] not in {
+        1,
+        REGISTRY_VERSION,
+    }:
         raise ValueError("unsupported provider registry version")
     if any(not isinstance(document[name], dict) for name in _SECTIONS):
         raise ValueError("invalid provider registry section")
+    generation = document[_REQUEST_HMAC_GENERATION]
+    legacy_generation = type(generation) is int and generation == 1
+    hashed_generation = (
+        isinstance(generation, dict)
+        and set(generation) == {"scheme", "digest"}
+        and generation.get("scheme") == "sha256"
+        and isinstance(generation.get("digest"), str)
+        and len(generation["digest"]) == 64
+        and all(character in "0123456789abcdef" for character in generation["digest"])
+    )
+    if generation is not None and not legacy_generation and not hashed_generation:
+        raise ValueError("invalid provider request HMAC generation")
     _validate_value(document)
     return (
         json.dumps(document, ensure_ascii=False, allow_nan=False, sort_keys=True, indent=2) + "\n"
@@ -103,6 +128,36 @@ def _redact_loaded_challenges(value: Any) -> bool:
         for child in value:
             changed = _redact_loaded_challenges(child) or changed
     return changed
+
+
+def _normalize_connections(document: dict[str, Any]) -> bool:
+    """Add non-secret v6 connection fields to older registry records in memory."""
+    changed = False
+    if not isinstance(document, dict):
+        return changed
+    connections = document.get("connections")
+    if not isinstance(connections, dict):
+        return changed
+    for record in connections.values():
+        if not isinstance(record, dict):
+            continue
+        defaults = {
+            "api_surface": "responses" if record.get("provider_id") == "openai-api" else None,
+            "chat_max_tokens_field": None,
+        }
+        for field, default in defaults.items():
+            if field not in record:
+                record[field] = default
+                changed = True
+    return changed
+
+
+def _normalize_request_hmac_generation(document: dict[str, Any]) -> bool:
+    """Add the non-secret HMAC-key generation marker to pre-marker registries."""
+    if not isinstance(document, dict) or _REQUEST_HMAC_GENERATION in document:
+        return False
+    document[_REQUEST_HMAC_GENERATION] = None
+    return True
 
 
 class ProviderStore:
@@ -142,8 +197,13 @@ class ProviderStore:
                 return _empty_document(), None
             document = json.loads(contents, object_pairs_hook=_object)
             redacted = _redact_loaded_challenges(document)
+            normalized_connections = _normalize_connections(document)
+            normalized_hmac = _normalize_request_hmac_generation(document)
             normalized = _encode(document)
-            return document, None if redacted else normalized
+            return (
+                document,
+                None if redacted or normalized_connections or normalized_hmac else normalized,
+            )
 
     def _require_inactive(self) -> None:
         if self._document is not None:

@@ -21,8 +21,10 @@ from narumi.errors import (
     NarumiError,
 )
 from narumi.providers import _io
+from narumi.providers import claude as claude_module
 from narumi.providers import runtime as runtime_module
 from narumi.providers import runtime_catalog as runtime_catalog_module
+from narumi.providers.metadata.openai_compatible import model_descriptor
 from narumi.providers.runtime import RuntimeInspector
 from narumi.providers.service import ProviderService
 
@@ -39,6 +41,20 @@ from .provider_fakes import (
     create_connection,
     prepared_codex_connection,
 )
+
+
+@pytest.fixture(autouse=True)
+def stable_claude_runtime_evidence(monkeypatch):
+    evidence = {
+        "resource_id": "claude-agent-sdk-0-2-144",
+        "sdk_version": "0.2.144",
+        "cli_version": "2.1.239",
+        "cli_sha256": "c" * 64,
+        "sdk_source_sha256": "d" * 64,
+        "isolation_profile_sha256": "e" * 64,
+    }
+    monkeypatch.setattr(claude_module, "runtime_evidence", lambda: dict(evidence))
+    return evidence
 
 
 @pytest.fixture
@@ -61,7 +77,8 @@ def runtime_setup(tmp_path):
 @pytest.fixture
 def openai_source_package(tmp_path, monkeypatch):
     package = tmp_path / "installed-source" / "narumi"
-    for relative_path in runtime_catalog_module._OPENAI_AUDIO_SOURCES:
+    source_paths = set().union(*runtime_catalog_module._PROVIDER_SOURCE_SETS.values())
+    for relative_path in sorted(source_paths):
         source = package / relative_path
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_text(f"fixture source: {relative_path}\n")
@@ -113,9 +130,35 @@ def test_prepare_receipt_is_durable_and_replays_without_running_again(runtime_se
     assert completed["runtime"]["state"] == "ready"
     assert completed["runtime"]["active_setup"] is None
     assert completed["runtime"]["last_setup"]["state"] == "succeeded"
-    assert completed["availability"] == "unverified"
-    assert completed["reason"] == "sdk_execution_isolation_unverified"
+    assert completed["availability"] == "available"
+    assert completed["reason"] is None
     load_contracts().validate_output("list_providers", service.list_providers())
+
+
+def test_claude_workspace_recovery_failure_is_not_advertised_ready(tmp_path):
+    runtime_root = tmp_path / "providers" / "runtime" / "claude-agent-sdk"
+    runtime_root.mkdir(parents=True, mode=0o700)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (runtime_root / "runs").symlink_to(outside, target_is_directory=True)
+    service = ProviderService(
+        tmp_path,
+        secret_store=MemorySecretStore(),
+        metadata_client=FakeMetadata(),
+        auth_executor=ManualExecutor(),
+        server_instance_id=INSTANCE_ONE,
+        submit_job=JobQueue(),
+        runtime_inspector=FakeRuntimeInspector(),
+        codex_backend=FakeCodexBackend(),
+    )
+    try:
+        current = provider(service)
+        assert current["availability"] == "not_prepared"
+        assert current["reason"] == "claude_sdk_workspace_unavailable"
+        assert current["runtime"]["state"] == "failed"
+        assert list(outside.iterdir()) == []
+    finally:
+        service.close()
 
 
 def test_prepare_is_exclusive_per_provider_and_stale_catalog_cannot_execute(runtime_setup):
@@ -303,16 +346,45 @@ def test_installed_inspection_creates_private_evidence_without_starting_sdk(tmp_
     )
     resource = provider(service)["runtime"]["resources"][0]
     assert resource["source"] == "installed"
-    assert resource["version"] == "1.2.3"
+    assert resource["version"] == "0.2.144"
     assert resource["license"] == "MIT"
     assert len(resource["sha256"]) == 64
     service.prepare_runtime(prepare_args(service))
     jobs.run()
     evidence = tmp_path / "providers/runtime/claude-agent-sdk/inspection.json"
     assert stat.S_IMODE(evidence.stat().st_mode) == 0o600
-    assert json.loads(evidence.read_text())["sdk_execution_verified"] is False
-    assert provider(service)["availability"] == "unverified"
+    inspection = json.loads(evidence.read_text())
+    assert inspection["sdk_execution_verified"] is True
+    assert inspection["runtime_evidence"] == service.runtime.inspector.expected_runtime(
+        "claude-agent-sdk", resource
+    )
+    assert provider(service)["availability"] == "available"
     service.close()
+
+
+def test_claude_resource_uses_the_closed_runtime_evidence_fingerprint(
+    openai_source_package,
+    stable_claude_runtime_evidence,
+):
+    inspector = RuntimeInspector()
+    resource = inspector.resource("claude-agent-sdk")
+    source_digest = hashlib.sha256()
+    for relative_path in runtime_catalog_module._CLAUDE_ADAPTER_SOURCES:
+        digest = hashlib.sha256((openai_source_package / relative_path).read_bytes()).digest()
+        source_digest.update(relative_path.encode("ascii") + b"\0" + digest)
+    expected = runtime_catalog_module.claude_resource_sha256(
+        claude_module.runtime_fingerprint(stable_claude_runtime_evidence),
+        source_digest.digest(),
+    )
+    assert resource["sha256"] == expected
+    assert inspector.expected_runtime("claude-agent-sdk", resource) == {
+        **stable_claude_runtime_evidence,
+        "resource_sha256": expected,
+    }
+
+    changed = {**resource, "sha256": "0" * 64}
+    with pytest.raises(EngineUnavailableError):
+        inspector.expected_runtime("claude-agent-sdk", changed)
 
 
 @pytest.mark.parametrize("provider_id", ["claude-agent-sdk", "openai-api"])
@@ -323,6 +395,12 @@ def test_missing_dependency_remains_not_prepared_without_installer(
         raise importlib.metadata.PackageNotFoundError()
 
     monkeypatch.setattr(importlib.metadata, "distribution", missing)
+    if provider_id == "claude-agent-sdk":
+        monkeypatch.setattr(
+            claude_module,
+            "runtime_evidence",
+            lambda: (_ for _ in ()).throw(RuntimeError("fixture runtime missing")),
+        )
     jobs = JobQueue()
     service = ProviderService(
         tmp_path,
@@ -340,6 +418,31 @@ def test_missing_dependency_remains_not_prepared_without_installer(
     assert result["runtime"]["state"] == "not_prepared"
     assert result["reason"] == "runtime_dependency_missing"
     assert result["runtime"]["resources"][0]["version"] is None
+    service.close()
+
+
+def test_missing_claude_sdk_evidence_does_not_break_provider_listing(tmp_path, monkeypatch):
+    def missing_runtime():
+        raise importlib.metadata.PackageNotFoundError("claude-agent-sdk")
+
+    monkeypatch.setattr(claude_module, "runtime_evidence", missing_runtime)
+    service = ProviderService(
+        tmp_path,
+        secret_store=MemorySecretStore(),
+        metadata_client=FakeMetadata(),
+        auth_executor=ManualExecutor(),
+        runtime_inspector=RuntimeInspector(),
+        codex_backend=FakeCodexBackend(),
+    )
+    listed = service.list_providers()
+    descriptor = next(
+        item for item in listed["providers"] if item["provider_id"] == "claude-agent-sdk"
+    )
+    assert descriptor["availability"] == "not_prepared"
+    assert descriptor["runtime"]["state"] == "not_prepared"
+    assert descriptor["runtime"]["resources"][0]["version"] is None
+    assert descriptor["runtime"]["resources"][0]["sha256"] is None
+    load_contracts().validate_output("list_providers", listed)
     service.close()
 
 
@@ -370,7 +473,9 @@ def test_http_adapters_prepare_from_narumi_metadata_without_external_sdks(tmp_pa
         submit_job=jobs,
         codex_backend=FakeCodexBackend(),
     )
-    for index, provider_id in enumerate(("openai-api", "anthropic-api", "ollama")):
+    for index, provider_id in enumerate(
+        ("openai-api", "openai-compatible-api", "anthropic-api", "ollama")
+    ):
         args = prepare_args(service, provider_id, f"prepare-http-adapter-{index}")
         service.prepare_runtime(args)
         jobs.run(index)
@@ -385,12 +490,19 @@ def test_http_adapters_prepare_from_narumi_metadata_without_external_sdks(tmp_pa
     )
     assert set(inspected) == {"narumi", "claude-agent-sdk"}
     assert service.metadata.calls == service.secrets.calls == []
-    assert provider(service)["runtime"]["resources"][0]["version"] is None
+    assert provider(service)["runtime"]["resources"][0]["version"] == "0.2.144"
     service.close()
 
 
 @pytest.mark.parametrize(
-    "provider_id", ["openai-api", "anthropic-api", "ollama", "claude-agent-sdk"]
+    "provider_id",
+    [
+        "openai-api",
+        "openai-compatible-api",
+        "anthropic-api",
+        "ollama",
+        "claude-agent-sdk",
+    ],
 )
 @pytest.mark.parametrize("missing_metadata", ["METADATA", "RECORD"])
 def test_distribution_fingerprint_is_required_only_for_http_runtime(
@@ -418,15 +530,15 @@ def test_distribution_fingerprint_is_required_only_for_http_runtime(
         codex_backend=FakeCodexBackend(),
     )
     resource = provider(service, provider_id)["runtime"]["resources"][0]
-    assert resource["version"] == "1.2.3"
-    assert resource["sha256"] is None
+    assert resource["version"] == ("0.2.144" if provider_id == "claude-agent-sdk" else "1.2.3")
+    assert (resource["sha256"] is not None) == (provider_id == "claude-agent-sdk")
     service.prepare_runtime(prepare_args(service, provider_id))
     if provider_id == "claude-agent-sdk":
         jobs.run()
         result = provider(service, provider_id)
         assert result["runtime"]["state"] == "ready"
-        assert result["availability"] == "unverified"
-        assert result["reason"] == "sdk_execution_isolation_unverified"
+        assert result["availability"] == "available"
+        assert result["reason"] is None
     else:
         with pytest.raises(EngineUnavailableError, match="Provider runtime preparation failed"):
             jobs.run()
@@ -440,8 +552,265 @@ def test_distribution_fingerprint_is_required_only_for_http_runtime(
     service.close()
 
 
-@pytest.mark.parametrize("relative_path", runtime_catalog_module._OPENAI_AUDIO_SOURCES)
-def test_each_audio_source_changes_only_openai_runtime_identity(
+def test_openai_api_runtime_uses_the_complete_v4_fingerprint_format(
+    openai_source_package,
+):
+    source_digest = hashlib.sha256()
+    for relative_path in runtime_catalog_module._OPENAI_API_SOURCES:
+        digest = hashlib.sha256((openai_source_package / relative_path).read_bytes()).digest()
+        source_digest.update(relative_path.encode("ascii") + b"\0" + digest)
+    payload = (
+        b"fixture metadata\nfixture record"
+        + b"\0narumi-openai-api-sources-v4\0"
+        + source_digest.digest()
+    )
+    assert (
+        RuntimeInspector().resource("openai-api")["sha256"] == hashlib.sha256(payload).hexdigest()
+    )
+
+
+def test_provider_runtime_source_sets_cover_dispatch_checkpoints_prompts_and_policy():
+    common = {
+        "brief/__init__.py",
+        "brief/builder.py",
+        "brief/gaia_context.py",
+        "brief/models.py",
+        "bundle/hashing.py",
+        "errors.py",
+        "generate/bounded.py",
+        "generate/checkpoints.py",
+        "generate/minutes.py",
+        "generate/prompts.py",
+        "generate/prompts/minutes_chunk.md",
+        "generate/prompts/minutes_final.md",
+        "generate/prompts/minutes_reduce.md",
+        "llm/base.py",
+        "llm/policy.py",
+        "llm/registry.py",
+        "model_selection.py",
+        "models.py",
+        "providers/_common.py",
+        "providers/auth.py",
+        "providers/catalog.py",
+        "providers/connections.py",
+        "providers/generation.py",
+        "providers/runtime.py",
+        "providers/runtime_catalog.py",
+        "providers/secrets.py",
+        "providers/service.py",
+        "providers/store.py",
+    }
+    for provider_id, sources in runtime_catalog_module._PROVIDER_SOURCE_SETS.items():
+        assert len(sources) == len(set(sources)), provider_id
+        assert common <= set(sources), provider_id
+        assert set(runtime_catalog_module._BRIEF_EXECUTION_SOURCES) <= set(sources), provider_id
+
+    assert {
+        "providers/codex/_generation.py",
+        "providers/codex/_models.py",
+        "providers/codex/_policy.py",
+        "providers/codex/_process_tree.py",
+        "providers/codex/_rpc.py",
+        "providers/codex/_runtime.py",
+        "providers/codex/_session.py",
+        "providers/codex/_supervisor.py",
+        "providers/codex/backend.py",
+    } <= set(runtime_catalog_module._CODEX_APP_SERVER_SOURCES)
+    assert {
+        "providers/audio_response.py",
+        "providers/audio_transcription.py",
+        "providers/metadata/audio_capabilities.py",
+        "providers/transcription.py",
+        "transcribe/_checkpoint_format.py",
+        "transcribe/_storage.py",
+        "transcribe/_wav.py",
+        "transcribe/api_stage.py",
+        "transcribe/api_transcript.py",
+        "transcribe/checkpoints.py",
+        "transcribe/chunks.py",
+        "transcribe/policy.py",
+        "transcribe/stage.py",
+        "transcription_selection.py",
+    } <= set(runtime_catalog_module._OPENAI_API_SOURCES)
+    assert {
+        "providers/metadata/openai_compatible.py",
+        "providers/metadata/openai_compatible_transport.py",
+        "providers/openai_compatible.py",
+        "providers/openai_compatible_response.py",
+    } <= set(runtime_catalog_module._OPENAI_COMPATIBLE_SOURCES)
+    assert {
+        "providers/http_generation.py",
+        "providers/http_generation_response.py",
+        "providers/metadata/anthropic.py",
+    } <= set(runtime_catalog_module._ANTHROPIC_API_SOURCES)
+    assert {
+        "providers/http_generation.py",
+        "providers/http_generation_response.py",
+        "providers/metadata/ollama.py",
+    } <= set(runtime_catalog_module._OLLAMA_SOURCES)
+    assert {
+        "providers/claude/backend.py",
+        "providers/claude/protocol.py",
+        "providers/claude/runtime.py",
+        "providers/claude/snapshot.py",
+        "providers/claude/transport.py",
+        "providers/claude/worker.py",
+        "providers/claude_sdk_backend.py",
+    } <= set(runtime_catalog_module._CLAUDE_ADAPTER_SOURCES)
+
+
+@pytest.mark.parametrize("relative_path", runtime_catalog_module._BRIEF_EXECUTION_SOURCES)
+def test_each_brief_source_changes_every_text_provider_runtime_identity(
+    openai_source_package, relative_path
+):
+    inspector = RuntimeInspector()
+    before = {
+        provider_id: inspector.resource(provider_id)
+        for provider_id in runtime_catalog_module.RESOURCES
+    }
+    codex_resource = {
+        "resource_id": "codex-runtime",
+        "sha256": "a" * 64,
+        "version": "fixture",
+    }
+    codex_before = inspector.catalog_revision(codex_resource)
+    source = openai_source_package / relative_path
+    original = source.read_bytes()
+    source.write_bytes(original + b"fixture changed meeting brief behavior\n")
+    try:
+        after = {
+            provider_id: inspector.resource(provider_id)
+            for provider_id in runtime_catalog_module.RESOURCES
+        }
+        for provider_id in runtime_catalog_module.RESOURCES:
+            assert after[provider_id]["sha256"] != before[provider_id]["sha256"]
+            assert inspector.catalog_revision(after[provider_id]) != inspector.catalog_revision(
+                before[provider_id]
+            )
+        assert inspector.catalog_revision(codex_resource) != codex_before
+    finally:
+        source.write_bytes(original)
+
+
+def test_openai_compatible_runtime_uses_the_complete_v4_fingerprint_format(
+    openai_source_package,
+):
+    source_digest = hashlib.sha256()
+    for relative_path in runtime_catalog_module._OPENAI_COMPATIBLE_SOURCES:
+        digest = hashlib.sha256((openai_source_package / relative_path).read_bytes()).digest()
+        source_digest.update(relative_path.encode("ascii") + b"\0" + digest)
+    payload = (
+        b"fixture metadata\nfixture record"
+        + b"\0narumi-openai-compatible-api-sources-v4\0"
+        + source_digest.digest()
+    )
+    assert (
+        RuntimeInspector().resource("openai-compatible-api")["sha256"]
+        == hashlib.sha256(payload).hexdigest()
+    )
+
+
+def test_codex_catalog_revision_binds_binary_resource_to_v4_adapter_sources(
+    openai_source_package,
+):
+    resource = {
+        "resource_id": "codex-runtime",
+        "sha256": "a" * 64,
+        "version": "fixture",
+    }
+    source_digest = hashlib.sha256()
+    for relative_path in runtime_catalog_module._CODEX_APP_SERVER_SOURCES:
+        digest = hashlib.sha256((openai_source_package / relative_path).read_bytes()).digest()
+        source_digest.update(relative_path.encode("ascii") + b"\0" + digest)
+    payload = (
+        json.dumps(resource, sort_keys=True).encode()
+        + b"\0narumi-codex-app-server-sources-v5\0"
+        + source_digest.digest()
+    )
+    assert RuntimeInspector.catalog_revision(resource) == hashlib.sha256(payload).hexdigest()
+
+
+def test_each_codex_source_changes_codex_catalog_revision(openai_source_package):
+    inspector = RuntimeInspector()
+    resource = {
+        "resource_id": "codex-runtime",
+        "sha256": "a" * 64,
+        "version": "fixture",
+    }
+    for relative_path in runtime_catalog_module._CODEX_APP_SERVER_SOURCES:
+        before = inspector.catalog_revision(resource)
+        source = openai_source_package / relative_path
+        original = source.read_bytes()
+        source.write_bytes(original + b"fixture changed Codex adapter behavior\n")
+        assert inspector.catalog_revision(resource) != before
+        source.write_bytes(original)
+
+
+def test_codex_process_tree_changes_source_fingerprint_and_catalog_revision(
+    openai_source_package,
+):
+    inspector = RuntimeInspector()
+    resource = {
+        "resource_id": "codex-runtime",
+        "sha256": "a" * 64,
+        "version": "fixture",
+    }
+    source = openai_source_package / "providers/codex/_process_tree.py"
+    original = source.read_bytes()
+    before_fingerprint = runtime_catalog_module._provider_source_digest(
+        runtime_catalog_module._CODEX_APP_SERVER_SOURCES
+    )
+    before_revision = inspector.catalog_revision(resource)
+    source.write_bytes(original + b"fixture changed Codex process-tree behavior\n")
+    try:
+        assert (
+            runtime_catalog_module._provider_source_digest(
+                runtime_catalog_module._CODEX_APP_SERVER_SOURCES
+            )
+            != before_fingerprint
+        )
+        assert inspector.catalog_revision(resource) != before_revision
+    finally:
+        source.write_bytes(original)
+
+
+def test_codex_supervisor_changes_only_the_codex_runtime_identity(openai_source_package):
+    inspector = RuntimeInspector()
+    provider_before = {
+        provider_id: inspector.resource(provider_id)
+        for provider_id in runtime_catalog_module.RESOURCES
+    }
+    codex_resource = {
+        "resource_id": "codex-runtime",
+        "sha256": "a" * 64,
+        "version": "fixture",
+    }
+    codex_before = inspector.catalog_revision(codex_resource)
+    source = openai_source_package / "providers/codex/_supervisor.py"
+    original = source.read_bytes()
+    source.write_bytes(original + b"fixture changed Codex supervision behavior\n")
+    try:
+        assert inspector.catalog_revision(codex_resource) != codex_before
+        assert {
+            provider_id: inspector.resource(provider_id)
+            for provider_id in runtime_catalog_module.RESOURCES
+        } == provider_before
+    finally:
+        source.write_bytes(original)
+
+
+def test_missing_codex_source_cannot_publish_an_executable_only_revision(
+    openai_source_package,
+):
+    resource = {"resource_id": "codex-runtime", "sha256": "a" * 64}
+    source = openai_source_package / runtime_catalog_module._CODEX_APP_SERVER_SOURCES[0]
+    source.unlink()
+    with pytest.raises(EngineUnavailableError, match="source inventory is unavailable"):
+        RuntimeInspector.catalog_revision(resource)
+
+
+@pytest.mark.parametrize("relative_path", runtime_catalog_module._OPENAI_API_SOURCES)
+def test_each_openai_api_source_changes_the_affected_runtime_identities(
     openai_source_package, relative_path
 ):
     inspector = RuntimeInspector()
@@ -450,7 +819,7 @@ def test_each_audio_source_changes_only_openai_runtime_identity(
         for provider_id in runtime_catalog_module.RESOURCES
     }
     source = openai_source_package / relative_path
-    source.write_bytes(source.read_bytes() + b"fixture changed audio behavior\n")
+    source.write_bytes(source.read_bytes() + b"fixture changed OpenAI API behavior\n")
     after = {
         provider_id: inspector.resource(provider_id)
         for provider_id in runtime_catalog_module.RESOURCES
@@ -460,17 +829,143 @@ def test_each_audio_source_changes_only_openai_runtime_identity(
     assert inspector.catalog_revision(after["openai-api"]) != inspector.catalog_revision(
         before["openai-api"]
     )
-    legacy_digest = hashlib.sha256(b"fixture metadata\nfixture record").hexdigest()
-    for provider_id in ("anthropic-api", "ollama", "claude-agent-sdk"):
-        assert after[provider_id] == before[provider_id]
-        assert after[provider_id]["sha256"] == legacy_digest
+    affected = {
+        provider_id
+        for provider_id, sources in runtime_catalog_module._PROVIDER_SOURCE_SETS.items()
+        if relative_path in sources
+    }
+    for provider_id in runtime_catalog_module.RESOURCES:
+        if provider_id in affected:
+            assert after[provider_id]["sha256"] != before[provider_id]["sha256"]
+        else:
+            assert after[provider_id] == before[provider_id]
 
 
-def test_openai_runtime_identity_ignores_unlisted_files_and_directory_bookkeeping(
+@pytest.mark.parametrize(
+    ("provider_id", "sources"),
+    [
+        ("anthropic-api", runtime_catalog_module._ANTHROPIC_API_SOURCES),
+        ("ollama", runtime_catalog_module._OLLAMA_SOURCES),
+    ],
+)
+def test_http_runtime_uses_the_complete_v4_fingerprint_format(
+    openai_source_package, provider_id, sources
+):
+    source_digest = hashlib.sha256()
+    for relative_path in sources:
+        digest = hashlib.sha256((openai_source_package / relative_path).read_bytes()).digest()
+        source_digest.update(relative_path.encode("ascii") + b"\0" + digest)
+    payload = (
+        b"fixture metadata\nfixture record"
+        + f"\0narumi-{provider_id}-sources-v4\0".encode("ascii")
+        + source_digest.digest()
+    )
+    assert RuntimeInspector().resource(provider_id)["sha256"] == hashlib.sha256(payload).hexdigest()
+
+
+@pytest.mark.parametrize("provider_id", ["anthropic-api", "ollama"])
+def test_each_http_provider_source_changes_every_affected_runtime_identity(
+    openai_source_package, provider_id
+):
+    inspector = RuntimeInspector()
+    for relative_path in runtime_catalog_module._PROVIDER_SOURCE_SETS[provider_id]:
+        before = {
+            candidate: inspector.resource(candidate)
+            for candidate in runtime_catalog_module.RESOURCES
+        }
+        source = openai_source_package / relative_path
+        original = source.read_bytes()
+        source.write_bytes(original + f"fixture changed {provider_id} behavior\n".encode())
+        after = {
+            candidate: inspector.resource(candidate)
+            for candidate in runtime_catalog_module.RESOURCES
+        }
+        affected = {
+            candidate
+            for candidate, sources in runtime_catalog_module._PROVIDER_SOURCE_SETS.items()
+            if relative_path in sources
+        }
+        for candidate in runtime_catalog_module.RESOURCES:
+            if candidate in affected:
+                assert after[candidate]["sha256"] != before[candidate]["sha256"]
+                assert inspector.catalog_revision(after[candidate]) != inspector.catalog_revision(
+                    before[candidate]
+                )
+            else:
+                assert after[candidate] == before[candidate]
+        source.write_bytes(original)
+
+
+@pytest.mark.parametrize("relative_path", runtime_catalog_module._OPENAI_COMPATIBLE_SOURCES)
+def test_each_compatible_source_changes_the_affected_runtime_identities(
+    openai_source_package, relative_path
+):
+    inspector = RuntimeInspector()
+    before = {
+        provider_id: inspector.resource(provider_id)
+        for provider_id in runtime_catalog_module.RESOURCES
+    }
+    source = openai_source_package / relative_path
+    source.write_bytes(source.read_bytes() + b"fixture changed compatible behavior\n")
+    after = {
+        provider_id: inspector.resource(provider_id)
+        for provider_id in runtime_catalog_module.RESOURCES
+    }
+    affected = {
+        provider_id
+        for provider_id, sources in runtime_catalog_module._PROVIDER_SOURCE_SETS.items()
+        if relative_path in sources
+    }
+    for provider_id in runtime_catalog_module.RESOURCES:
+        if provider_id in affected:
+            assert after[provider_id]["sha256"] != before[provider_id]["sha256"]
+            assert inspector.catalog_revision(after[provider_id]) != inspector.catalog_revision(
+                before[provider_id]
+            )
+        else:
+            assert after[provider_id] == before[provider_id]
+
+
+@pytest.mark.parametrize("relative_path", runtime_catalog_module._CLAUDE_ADAPTER_SOURCES)
+def test_each_claude_adapter_source_changes_the_affected_runtime_identities(
+    openai_source_package, relative_path
+):
+    inspector = RuntimeInspector()
+    before = {
+        provider_id: inspector.resource(provider_id)
+        for provider_id in runtime_catalog_module.RESOURCES
+    }
+    source = openai_source_package / relative_path
+    source.write_bytes(source.read_bytes() + b"fixture changed Claude adapter behavior\n")
+    after = {
+        provider_id: inspector.resource(provider_id)
+        for provider_id in runtime_catalog_module.RESOURCES
+    }
+    affected = {
+        provider_id
+        for provider_id, sources in runtime_catalog_module._PROVIDER_SOURCE_SETS.items()
+        if relative_path in sources
+    }
+    for provider_id in runtime_catalog_module.RESOURCES:
+        if provider_id in affected:
+            assert after[provider_id]["sha256"] != before[provider_id]["sha256"]
+            assert inspector.catalog_revision(after[provider_id]) != inspector.catalog_revision(
+                before[provider_id]
+            )
+        else:
+            assert after[provider_id] == before[provider_id]
+
+
+def test_provider_runtime_identities_ignore_unlisted_files_and_directory_bookkeeping(
     openai_source_package, monkeypatch
 ):
     inspector = RuntimeInspector()
-    before = inspector.resource("openai-api")
+    before = {
+        provider_id: inspector.resource(provider_id)
+        for provider_id in runtime_catalog_module.RESOURCES
+    }
+    codex_resource = {"resource_id": "codex-runtime", "sha256": "a" * 64}
+    codex_before = inspector.catalog_revision(codex_resource)
     (openai_source_package / runtime_catalog_module._OPENAI_AUDIO_SOURCES[0]).touch()
     unlisted = openai_source_package / "unlisted-runtime.py"
     unlisted.write_text("fixture not part of audio runtime\n")
@@ -483,7 +978,11 @@ def test_openai_runtime_identity_ignores_unlisted_files_and_directory_bookkeepin
         return original_digest(descriptor, directory, name)
 
     monkeypatch.setattr(runtime_catalog_module, "_source_digest", create_bytecode_cache)
-    assert inspector.resource("openai-api") == before
+    assert {
+        provider_id: inspector.resource(provider_id)
+        for provider_id in runtime_catalog_module.RESOURCES
+    } == before
+    assert inspector.catalog_revision(codex_resource) == codex_before
 
 
 def test_runtime_import_through_symlink_ancestor_uses_canonical_root(
@@ -511,12 +1010,19 @@ def test_runtime_import_through_symlink_ancestor_uses_canonical_root(
     "failure",
     ["missing", "unreadable", "symlink", "directory_symlink", "directory", "fifo", "oversized"],
 )
-def test_unsafe_audio_source_cannot_prepare_openai_runtime(
-    openai_source_package, tmp_path, monkeypatch, failure
+@pytest.mark.parametrize("provider_id", ["openai-api", "openai-compatible-api", "claude-agent-sdk"])
+def test_unsafe_provider_source_cannot_prepare_runtime(
+    openai_source_package, tmp_path, monkeypatch, failure, provider_id
 ):
-    source = openai_source_package / runtime_catalog_module._OPENAI_AUDIO_SOURCES[0]
+    relative_path = {
+        "openai-api": "providers/audio_transcription.py",
+        "openai-compatible-api": "providers/openai_compatible_response.py",
+        "claude-agent-sdk": "providers/claude/backend.py",
+    }[provider_id]
+    source = openai_source_package / relative_path
     inspector = RuntimeInspector()
-    other_provider = inspector.resource("anthropic-api")
+    unaffected_provider = "anthropic-api"
+    unaffected = inspector.resource(unaffected_provider)
     if failure == "missing":
         source.unlink()
     elif failure == "unreadable":
@@ -545,13 +1051,22 @@ def test_unsafe_audio_source_cannot_prepare_openai_runtime(
             source.mkdir()
         else:
             os.mkfifo(source, mode=0o600)
-    resource = inspector.resource("openai-api")
+    resource = inspector.resource(provider_id)
     assert resource["sha256"] is None
-    with pytest.raises(EngineUnavailableError, match="runtime distribution metadata is incomplete"):
+    message = (
+        "dependency is not installed"
+        if provider_id == "claude-agent-sdk"
+        else "runtime distribution metadata is incomplete"
+    )
+    with pytest.raises(EngineUnavailableError, match=message):
         inspector.prepare(
-            tmp_path / "runtime-state", "openai-api", resource, FakeProgress("fixture-job")
+            tmp_path / "runtime-state", provider_id, resource, FakeProgress("fixture-job")
         )
-    assert inspector.resource("anthropic-api") == other_provider
+    if failure == "directory_symlink" and source.parent == openai_source_package / "providers":
+        # Replacing the shared providers directory invalidates every inventory rooted there.
+        assert inspector.resource(unaffected_provider)["sha256"] is None
+    else:
+        assert inspector.resource(unaffected_provider) == unaffected
     assert not (tmp_path / "runtime-state").exists()
 
 
@@ -572,6 +1087,26 @@ def test_audio_source_mutation_during_read_rejects_identity(openai_source_packag
 
     monkeypatch.setattr(os, "read", changing_read)
     assert RuntimeInspector().resource("openai-api")["sha256"] is None
+    assert changed
+
+
+def test_claude_source_mutation_during_read_rejects_identity(openai_source_package, monkeypatch):
+    source = openai_source_package / runtime_catalog_module._CLAUDE_ADAPTER_SOURCES[0]
+    inode = source.stat().st_ino
+    original_read = os.read
+    changed = False
+
+    def changing_read(descriptor, size):
+        nonlocal changed
+        block = original_read(descriptor, size)
+        if not changed and os.fstat(descriptor).st_ino == inode:
+            changed = True
+            with source.open("ab") as stream:
+                stream.write(b"fixture concurrent Claude source edit\n")
+        return block
+
+    monkeypatch.setattr(os, "read", changing_read)
+    assert RuntimeInspector().resource("claude-agent-sdk")["sha256"] is None
     assert changed
 
 
@@ -653,6 +1188,152 @@ def test_audio_source_change_requires_repreparation_and_model_refresh(
         service.list_models({"connection_id": record["connection_id"]})["catalog_state"] == "ready"
     )
     assert provider(service, "codex-app-server") == before_codex
+    service.close()
+
+
+def test_claude_source_change_requires_repreparation_and_model_refresh(
+    openai_source_package, tmp_path
+):
+    jobs = JobQueue()
+    service = ProviderService(
+        tmp_path / "runtime-state",
+        secret_store=MemorySecretStore(),
+        metadata_client=FakeMetadata(),
+        auth_executor=ManualExecutor(),
+        submit_job=jobs,
+        runtime_inspector=RuntimeInspector(),
+        codex_backend=FakeCodexBackend(),
+    )
+    service.prepare_runtime(prepare_args(service, "claude-agent-sdk"))
+    jobs.run()
+    record = create_connection(service, provider_id="claude-agent-sdk")
+    args = {"connection_id": record["connection_id"], "expected_revision": record["revision"]}
+    assert service.test_connection(args)["connected"] is True
+    before = provider(service, "claude-agent-sdk")["runtime"]
+    source = openai_source_package / "providers/claude/backend.py"
+    source.write_bytes(source.read_bytes() + b"fixture upgraded Claude adapter behavior\n")
+    changed = provider(service, "claude-agent-sdk")["runtime"]
+    assert changed["catalog_revision"] != before["catalog_revision"]
+    assert changed["state"] == "not_prepared"
+    assert (
+        service.list_models({"connection_id": record["connection_id"]})["catalog_state"] == "stale"
+    )
+    with pytest.raises(EngineUnavailableError):
+        service.runtime.inspector.expected_runtime("claude-agent-sdk", before["resources"][0])
+    service.prepare_runtime(
+        prepare_args(service, "claude-agent-sdk", "prepare-upgraded-claude-runtime")
+    )
+    jobs.run(1)
+    assert (
+        service.list_models({"connection_id": record["connection_id"]})["catalog_state"] == "stale"
+    )
+    assert service.test_connection(args)["connected"] is True
+    assert (
+        service.list_models({"connection_id": record["connection_id"]})["catalog_state"] == "ready"
+    )
+    service.close()
+
+
+def test_compatible_source_change_invalidates_runtime_and_model_verification(
+    openai_source_package, tmp_path
+):
+    model_id = "compatible-fixture-model"
+
+    class CompatibleMetadata:
+        def fetch_openai_compatible(self, endpoint, api_key, *, auth_method, api_surface):
+            assert endpoint == "https://127.0.0.1:9443/v1"
+            assert api_key == "fixture-compatible-key"
+            assert auth_method == "api_key"
+            assert api_surface == "responses"
+            return [
+                model_descriptor(
+                    model_id,
+                    fetched_at="2026-09-02T00:00:00Z",
+                    verified=False,
+                )
+            ]
+
+    class CompatibleBackend:
+        def __init__(self):
+            self.calls = 0
+
+        def verify_model(self, endpoint, api_key, selected_model, **options):
+            assert endpoint == "https://127.0.0.1:9443/v1"
+            assert api_key == "fixture-compatible-key"
+            assert selected_model == model_id
+            assert options["auth_method"] == "api_key"
+            assert options["api_surface"] == "responses"
+            self.calls += 1
+            return model_descriptor(
+                model_id,
+                fetched_at="2026-09-02T00:00:01Z",
+                verified=True,
+            )
+
+        def close(self):
+            pass
+
+    jobs = JobQueue()
+    backend = CompatibleBackend()
+    service = ProviderService(
+        tmp_path / "runtime-state",
+        secret_store=MemorySecretStore(),
+        metadata_client=CompatibleMetadata(),
+        submit_job=jobs,
+        runtime_inspector=RuntimeInspector(),
+        codex_backend=FakeCodexBackend(),
+        openai_compatible_backend=backend,
+    )
+    record = service.set_connection(
+        {
+            "provider_id": "openai-compatible-api",
+            "display_name": "Compatible fixture",
+            "endpoint": "https://127.0.0.1:9443/v1",
+            "auth_method": "api_key",
+            "api_surface": "responses",
+            "api_key": "fixture-compatible-key",
+            "request_id": "create-compatible-runtime-fixture",
+        }
+    )["connection"]
+    with service.store.transaction() as document:
+        runtime = service.runtime._current("openai-compatible-api", document)
+        runtime["state"] = "ready"
+        document["runtimes"]["openai-compatible-api"] = runtime
+    checked = service.test_connection(
+        {"connection_id": record["connection_id"], "expected_revision": record["revision"]}
+    )["connection"]
+    verify = {
+        "connection_id": record["connection_id"],
+        "expected_revision": record["revision"],
+        "model_id": model_id,
+        "confirmation": "send_test_prompt_and_may_charge",
+        "request_id": "verify-compatible-runtime-fixture",
+    }
+    assert checked["catalog_state"] == "ready"
+    assert service.verify_model(verify)["model"]["availability"] == "available"
+    before = provider(service, "openai-compatible-api")["runtime"]
+    source = openai_source_package / runtime_catalog_module._OPENAI_COMPATIBLE_SOURCES[0]
+    source.write_bytes(source.read_bytes() + b"fixture upgraded compatible behavior\n")
+    changed = provider(service, "openai-compatible-api")["runtime"]
+    assert changed["catalog_revision"] != before["catalog_revision"]
+    assert changed["state"] == "not_prepared"
+    assert service.list_models({"connection_id": record["connection_id"]})["catalog_state"] == (
+        "stale"
+    )
+    service.prepare_runtime(
+        prepare_args(service, "openai-compatible-api", "prepare-upgraded-compatible-runtime")
+    )
+    jobs.run()
+    assert (
+        service.test_connection(
+            {"connection_id": record["connection_id"], "expected_revision": record["revision"]}
+        )["connected"]
+        is True
+    )
+    refreshed = service.list_models({"connection_id": record["connection_id"]})
+    assert refreshed["models"][0]["availability"] == "unverified"
+    assert service.store.read()["catalogs"][record["connection_id"]]["verified_models"] == {}
+    assert backend.calls == 1
     service.close()
 
 
@@ -767,7 +1448,10 @@ def test_http_runtime_preparation_invalidates_only_changed_model_observations(
         service.list_models({"connection_id": codex_record["connection_id"]})["catalog_state"]
         == "ready"
     )
-    assert secrets.calls == secret_calls
+    expected_secret_reads = 0 if provider_id == "ollama" else 1
+    assert secrets.calls[: len(secret_calls)] == secret_calls
+    assert len(secrets.calls) == len(secret_calls) + expected_secret_reads
+    assert all(call[0] == "get" for call in secrets.calls[len(secret_calls) :])
     assert service.metadata.calls == metadata_calls
 
 

@@ -6,13 +6,14 @@
     "provider_id": {
       "type": "string",
       "enum": [
-        "anthropic-api",
-        "claude-agent-sdk",
         "codex-app-server",
+        "claude-agent-sdk",
         "openai-api",
+        "openai-compatible-api",
+        "anthropic-api",
         "ollama"
       ],
-      "description": "Supported connection adapters. Explicit text minutes generation supports Codex App Server, Anthropic API, OpenAI API and verified local Ollama; Claude Agent SDK generation is not available. OpenAI API also supports the explicit transcription_model override for verified timestamp-capable audio models."
+      "description": "Supported connection adapters in the canonical UI order: Codex App Server, Claude Agent SDK, OpenAI API, OpenAI-compatible API, Anthropic API and Ollama. All six support explicit text minutes generation when their connection, runtime, model verification and external-send policy requirements are satisfied. OpenAI API also supports the explicit transcription_model override for verified timestamp-capable audio models."
     },
     "provider_role": {
       "type": "string",
@@ -348,7 +349,7 @@
           "if": {
             "properties": {
               "provider_id": {
-                "const": "ollama"
+                "const": "openai-compatible-api"
               }
             },
             "required": [
@@ -358,45 +359,49 @@
           "then": {
             "properties": {
               "auth_methods": {
-                "const": [
-                  "none"
-                ]
+                "const": ["api_key", "none"]
+              },
+              "roles": {
+                "const": ["llm"]
               }
             }
+          }
+        },
+        {
+          "if": {
+            "properties": { "provider_id": { "const": "ollama" } },
+            "required": ["provider_id"]
           },
-          "else": {
-            "if": {
-              "properties": {
-                "provider_id": {
-                  "const": "codex-app-server"
-                }
-              },
-              "required": [
-                "provider_id"
-              ]
+          "then": {
+            "properties": {
+              "auth_methods": { "const": ["none"] },
+              "roles": { "const": ["llm"] }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "provider_id": { "const": "codex-app-server" } },
+            "required": ["provider_id"]
+          },
+          "then": {
+            "properties": {
+              "auth_methods": { "const": ["chatgpt"] },
+              "roles": { "const": ["llm"] }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "provider_id": { "enum": ["claude-agent-sdk", "anthropic-api"] }
             },
-            "then": {
-              "properties": {
-                "auth_methods": {
-                  "const": [
-                    "chatgpt"
-                  ]
-                },
-                "roles": {
-                  "const": [
-                    "llm"
-                  ]
-                }
-              }
-            },
-            "else": {
-              "properties": {
-                "auth_methods": {
-                  "const": [
-                    "api_key"
-                  ]
-                }
-              }
+            "required": ["provider_id"]
+          },
+          "then": {
+            "properties": {
+              "auth_methods": { "const": ["api_key"] },
+              "roles": { "const": ["llm"] }
             }
           }
         }
@@ -407,6 +412,7 @@
       "required": [
         "provider_connections",
         "provider_models",
+        "provider_model_verification",
         "stage_model_selection",
         "ensemble_generation"
       ],
@@ -418,6 +424,10 @@
         "provider_models": {
           "type": "boolean",
           "description": "Model discovery and capability metadata are implemented, independently of stage selection."
+        },
+        "provider_model_verification": {
+          "type": "boolean",
+          "description": "Explicit one-request, potentially billable model verification is implemented for OpenAI-compatible API and Claude Agent SDK candidates."
         },
         "stage_model_selection": {
           "type": "boolean",

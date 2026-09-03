@@ -1,6 +1,6 @@
 [project]
 name = "narumi"
-version = "0.5.2"
+version = "0.6.0"
 description = "narumi pipeline: recording bundle, transcription, alignment, minutes generation, export"
 requires-python = ">=3.12"
 dependencies = [
@@ -13,7 +13,7 @@ dependencies = [
 whisper-mlx = ["mlx-whisper>=0.4"]
 whisper-faster = ["faster-whisper>=1.1"]
 pyannote = ["pyannote.audio>=3.3", "torch>=2.4", "torchaudio>=2.4"]
-claude = ["claude-agent-sdk>=0.1"]
+claude = ["claude-agent-sdk==0.2.144"]
 anthropic = ["anthropic>=0.40"]
 html = ["markdown>=3.7"]
 slides = ["pillow>=10"]

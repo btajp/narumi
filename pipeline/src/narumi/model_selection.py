@@ -9,11 +9,20 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 ReasoningEffort = Annotated[
     str, Field(min_length=1, max_length=32, pattern=r"^[a-z][a-z0-9_-]{0,31}$")
 ]
-MinutesProvider = Literal["codex-app-server", "openai-api", "anthropic-api", "ollama"]
+MinutesProvider = Literal[
+    "codex-app-server",
+    "claude-agent-sdk",
+    "openai-api",
+    "openai-compatible-api",
+    "anthropic-api",
+    "ollama",
+]
 MinutesMaxTokens = Annotated[int, Field(ge=1, le=32768)]
 MINUTES_PARAMETER_NAMES = {
     "codex-app-server": frozenset({"reasoning_effort"}),
+    "claude-agent-sdk": frozenset(),
     "openai-api": frozenset({"reasoning_effort", "max_tokens"}),
+    "openai-compatible-api": frozenset({"max_tokens"}),
     "anthropic-api": frozenset({"max_tokens"}),
     "ollama": frozenset({"max_tokens"}),
 }

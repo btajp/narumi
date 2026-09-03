@@ -333,7 +333,7 @@ def test_local_metadata_does_not_accept_an_api_key():
     assert not opener.calls
 
 
-@pytest.mark.parametrize("status", [400, 401, 402, 403, 404, 409, 422, 429])
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 405, 413, 415, 422])
 @pytest.mark.parametrize("raised", [True, False])
 def test_generation_http_refusal_is_known_and_never_reads_error_body(status, raised):
     class ForbiddenBody(Response):
@@ -357,7 +357,10 @@ def test_generation_http_refusal_is_known_and_never_reads_error_body(status, rai
     assert failure.value.__suppress_context__
 
 
-@pytest.mark.parametrize("status", [301, 302, 307, 308, 500, 502, 503])
+@pytest.mark.parametrize(
+    "status",
+    [301, 302, 307, 308, 402, 408, 409, 410, 425, 429, 451, 460, 499, 500, 502, 503],
+)
 @pytest.mark.parametrize("raised", [True, False])
 def test_generation_http_uncertain_outcome_never_retries(status, raised):
     response = (

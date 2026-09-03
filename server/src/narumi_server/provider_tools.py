@@ -11,5 +11,6 @@ PROVIDER_TOOLS = frozenset(
         "get_provider_auth_status",
         "test_provider_connection",
         "list_provider_models",
+        "verify_provider_model",
     }
 )

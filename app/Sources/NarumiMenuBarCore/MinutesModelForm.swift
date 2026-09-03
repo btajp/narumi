@@ -81,7 +81,9 @@ public struct MinutesModelForm: Equatable, Sendable {
     }
 
     public var allowsReasoningEffort: Bool { ["codex-app-server", "openai-api"].contains(provider) }
-    public var allowsMaxTokens: Bool { ["openai-api", "anthropic-api", "ollama"].contains(provider) }
+    public var allowsMaxTokens: Bool {
+        ["openai-api", "openai-compatible-api", "anthropic-api", "ollama"].contains(provider)
+    }
 
     /// A different saved model may require another cached catalog page, even on the same connection.
     public var catalogReadIdentity: String {
@@ -93,10 +95,46 @@ public struct MinutesModelForm: Equatable, Sendable {
     }
 
     public static func modelUnavailableReason(_ model: ProviderModelDescriptor, provider: String) -> String? {
-        guard MinutesModelSelection.providers.contains(provider) else { return "このプロバイダの議事録生成には未対応です。" }
+        guard MinutesModelSelection.providers.contains(provider) else {
+            return "このプロバイダの議事録生成能力はサーバーから公開されていません。"
+        }
         guard model.availability == .available else {
             return ProviderDisplay.reason(model.reason) ?? ProviderDisplay.availability(model.availability)
         }
+        return textMinutesCapabilityUnavailableReason(model, provider: provider)
+    }
+
+    /// A verification probe is offered only when success could make this descriptor selectable.
+    /// This prevents a paid text probe for transcription, non-text, non-API, or unsupported forms.
+    public static func isModelVerificationCandidate(_ model: ProviderModelDescriptor, provider: String) -> Bool {
+        guard ["claude-agent-sdk", "openai-compatible-api"].contains(provider),
+            model.availability == .unverified else { return false }
+        if provider == "openai-compatible-api", isUnknownCompatibleCandidate(model) {
+            return true
+        }
+        return textMinutesCapabilityUnavailableReason(model, provider: provider) == nil
+    }
+
+    /// Generic OpenAI-compatible `/models` metadata proves only model identity.
+    /// The fixed paid probe is what establishes text-generation capabilities.
+    private static func isUnknownCompatibleCandidate(_ model: ProviderModelDescriptor) -> Bool {
+        !model.availabilityExpired
+            && model.reason == "adapter_capability_verification_required"
+            && model.source == .providerAPI
+            && model.billing.kind == .api
+            && model.roles.isEmpty
+            && model.inputModalities.isEmpty
+            && model.outputModalities.isEmpty
+            && model.timestampSupport == .none
+            && model.contextWindow == nil
+            && model.maxOutputTokens == nil
+            && model.parameterSchema.properties.isEmpty
+            && model.parameterSchema.required.isEmpty
+    }
+
+    private static func textMinutesCapabilityUnavailableReason(
+        _ model: ProviderModelDescriptor, provider: String
+    ) -> String? {
         guard !model.availabilityExpired else { return "このモデルは確認済みの提供期限を過ぎています。" }
         guard model.roles.contains(.llm), model.inputModalities.contains(.text), model.outputModalities.contains(.text) else {
             return "テキスト議事録への対応を確認できません。"
@@ -104,11 +142,13 @@ public struct MinutesModelForm: Equatable, Sendable {
         let billing: ProviderBillingKind = provider == "codex-app-server" ? .subscription : (provider == "ollama" ? .local : .api)
         guard model.billing.kind == billing else { return "この接続で使用する課金区分を確認できません。" }
         let allowed = provider == "codex-app-server" ? ["reasoning_effort"]
-            : (provider == "openai-api" ? ["reasoning_effort", "max_tokens"] : ["max_tokens"])
+            : (provider == "openai-api" ? ["reasoning_effort", "max_tokens"]
+                : (provider == "claude-agent-sdk" ? [] : ["max_tokens"]))
         guard model.parameterSchema.required.allSatisfy({ allowed.contains($0) }) else {
-            return "このモデルには未対応の必須パラメータがあります。"
+            return "このモデルにはアプリが安全に設定できない必須パラメータがあります。"
         }
-        if provider != "codex-app-server", model.parameterSchema.properties["max_tokens"]?.type != .integer {
+        if !["codex-app-server", "claude-agent-sdk"].contains(provider),
+            model.parameterSchema.properties["max_tokens"]?.type != .integer {
             return "このモデルの出力上限設定への対応を確認できません。"
         }
         return nil
@@ -157,14 +197,14 @@ public struct MinutesModelForm: Equatable, Sendable {
         _ connection: ProviderConnection, providers: [ProviderDescriptor]? = nil
     ) -> String? {
         guard MinutesModelSelection.providers.contains(connection.providerID.rawValue) else {
-            return "このプロバイダの議事録生成には未対応です。"
+            return "このプロバイダの議事録生成能力はサーバーから公開されていません。"
         }
         guard connection.enabled else { return "接続が無効です。AI 接続で有効にしてください。" }
         let settings = ProviderConnectionSettings(connection: connection)
         guard let endpoint = connection.endpoint, settings.isEndpointValid, endpoint == settings.normalizedEndpoint else {
             return "接続の送信先を確認できません。AI 接続で公式 API またはローカル接続先を選び直してください。"
         }
-        guard connection.authMethod == connection.providerID.supportedAuthMethod,
+        guard connection.providerID.supportedAuthMethods.contains(connection.authMethod),
             connection.authState == .authenticated, connection.activeAuth == nil else {
             return connection.providerID == .codexAppServer
                 ? "AI 接続で、この Codex 接続への ChatGPT ログインを完了してください。"
@@ -187,12 +227,12 @@ public struct MinutesModelForm: Equatable, Sendable {
         case "codex-app-server":
             return ["subscription_ok", "api_ok"].contains(policy) ? nil
                 : "Codex は OpenAI にテキストを送信します。外部送信ポリシーで subscription_ok または api_ok を明示的に選んでください。"
-        case "openai-api", "anthropic-api":
+        case "claude-agent-sdk", "openai-api", "openai-compatible-api", "anthropic-api":
             return policy == "api_ok" ? nil
                 : "API へのテキスト送信と従量課金を許可するには、外部送信ポリシーで api_ok を明示的に選んでください。"
         case "ollama":
             return ["local_only", "subscription_ok", "api_ok"].contains(policy) ? nil : "外部送信ポリシーを確認してください。"
-        default: return "このプロバイダの議事録生成には未対応です。"
+        default: return "このプロバイダの外部送信ポリシーを確認できません。"
         }
     }
 }

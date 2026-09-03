@@ -13,7 +13,12 @@ from narumi.errors import (
     EngineUnavailableError,
     InvalidArgumentError,
 )
-from narumi.providers._common import AUTH_METHODS, PROVIDERS, check_provider_idle, public_runtime
+from narumi.providers._common import (
+    PROVIDERS,
+    SUPPORTED_AUTH_METHODS,
+    check_provider_idle,
+    public_runtime,
+)
 from narumi.providers._runtime_lease import RuntimeLease
 from narumi.providers.runtime_catalog import RuntimeInspector
 
@@ -50,9 +55,17 @@ class RuntimePreparation:
         state = saved.get("state", "not_prepared")
         if saved.get("catalog_revision") != revision and state == "ready":
             state = "not_prepared"
+        workspace_reason = None
+        if provider_id == "claude-agent-sdk":
+            try:
+                self.service.claude_backend.ensure_workspace_ready()
+            except EngineUnavailableError:
+                state = "failed"
+                workspace_reason = "claude_sdk_workspace_unavailable"
         return {
             **copy.deepcopy(saved),
             "state": state,
+            "reason": workspace_reason or saved.get("reason"),
             "version": resource["version"],
             "catalog_revision": revision,
             "resources": [resource],
@@ -76,8 +89,6 @@ class RuntimePreparation:
                     reason = "bundled_runtime_unavailable"
                 else:
                     reason = runtime.get("reason") or "runtime_preparation_required"
-            elif provider_id == "claude-agent-sdk":
-                availability, reason = "unverified", "sdk_execution_isolation_unverified"
             elif provider_id == "ollama":
                 availability, reason = "unverified", "local_server_verification_required"
             else:
@@ -87,7 +98,7 @@ class RuntimePreparation:
                     "provider_id": provider_id,
                     "display_name": display_name,
                     "roles": ["llm", "transcription"] if provider_id == "openai-api" else ["llm"],
-                    "auth_methods": [AUTH_METHODS[provider_id]],
+                    "auth_methods": list(SUPPORTED_AUTH_METHODS[provider_id]),
                     "availability": availability,
                     "reason": reason,
                     "runtime": public_runtime(runtime),
@@ -103,7 +114,9 @@ class RuntimePreparation:
         job_id: str | None = None
         try:
             with service.store.transaction() as document:
-                fingerprint = service.requests.fingerprint("prepare_provider_runtime", args)
+                fingerprint = service.requests.fingerprint(
+                    "prepare_provider_runtime", args, document=document
+                )
                 replay = service.requests.replay(document, args, fingerprint)
                 if replay is not None:
                     return replay

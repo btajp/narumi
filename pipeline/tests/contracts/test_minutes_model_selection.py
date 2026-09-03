@@ -22,16 +22,19 @@ MINUTES_MODEL = {
 }
 PROVIDER_POLICIES = {
     "codex-app-server": "subscription_ok",
+    "claude-agent-sdk": "api_ok",
     "openai-api": "api_ok",
+    "openai-compatible-api": "api_ok",
     "anthropic-api": "api_ok",
     "ollama": "local_only",
 }
-TOKEN_PROVIDERS = ["openai-api", "anthropic-api", "ollama"]
+TOKEN_PROVIDERS = ["openai-api", "openai-compatible-api", "anthropic-api", "ollama"]
 SELECTIONS = [
     None,
     MINUTES_MODEL,
     {**MINUTES_MODEL, "parameters": {"reasoning_effort": "high"}},
     *[{**MINUTES_MODEL, "provider": provider} for provider in TOKEN_PROVIDERS],
+    {**MINUTES_MODEL, "provider": "claude-agent-sdk"},
     *[
         {**MINUTES_MODEL, "provider": provider, "parameters": {"max_tokens": 4096}}
         for provider in TOKEN_PROVIDERS
@@ -108,7 +111,6 @@ def test_minutes_model_defaults_preserve_legacy_provider_and_roundtrip(
 @pytest.mark.parametrize(
     "changes",
     [
-        {"provider": "claude-agent-sdk"},
         {"provider": "unknown-provider"},
         {"provider": "none"},
         {"connection_id": "../other"},
@@ -206,6 +208,9 @@ def test_token_limited_minutes_reject_invalid_application_request_bounds(
     ("provider", "parameters"),
     [
         ("codex-app-server", {"max_tokens": 4096}),
+        ("claude-agent-sdk", {"max_tokens": 4096}),
+        ("claude-agent-sdk", {"reasoning_effort": "high"}),
+        ("openai-compatible-api", {"reasoning_effort": "high"}),
         ("anthropic-api", {"reasoning_effort": "high"}),
         ("ollama", {"reasoning_effort": "high"}),
         ("openai-api", {"reasoning_effort": None}),

@@ -40,11 +40,14 @@ final class MCPClientSecureSessionTests: XCTestCase {
         XCTAssertEqual(fixture.terminationStatus, 0, result)
         let checks = try JSONDecoder().decode([String: Bool].self, from: Data(result.utf8))
         var expectedChecks: Set<String> = [
-            "bootstrap_before_http", "discovery_before_tools", "v1_rejected", "future_contract_rejected", "missing_tls_rejected",
+            "bootstrap_before_http", "discovery_before_tools", "v6_authenticated_success",
+            "v1_rejected", "future_contract_rejected", "missing_tls_rejected",
             "false_client_auth_rejected", "wrong_instance_rejected", "secret_not_replayed",
             "setup_reconciled_without_replay", "readonly_reconnect", "rpc_error_redacted",
             "malformed_response_redacted", "invalid_config_rejected",
             "generation_unknown_localized_without_details",
+            "provider_verification_known_failure_typed", "provider_verification_unknown_outcome_typed",
+            "provider_verification_malformed_evidence_blocked", "provider_verification_evidence_scoped_to_probe_tool",
             "legacy_generation_omits_new_config_field", "legacy_meeting_config_omits_new_field",
             "legacy_profile_omits_new_field", "legacy_save_does_not_regenerate",
             "v4_meeting_omits_transcription", "v4_profile_omits_transcription",

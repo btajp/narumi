@@ -10,12 +10,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from narumi.errors import InvalidArgumentError
+from narumi.errors import ConfigurationConflictError, InvalidArgumentError
 from narumi.export import list_exporters
 from narumi.models import MeetingConfig
 from narumi.profiles import UNSET, Profile
 
-from narumi_server.handlers.common import config_from_mapping, validated_config
+from narumi_server.handlers.common import (
+    check_cache_epoch_monotonic,
+    config_from_mapping,
+    validated_config,
+)
 
 if TYPE_CHECKING:
     from narumi_server.context import ServerContext
@@ -40,17 +44,8 @@ def get_profile(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
 
 def set_profile(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
     name = args["name"]
-    expected = (
-        MeetingConfig.model_validate(args["expected_config"]) if "expected_config" in args else None
-    )
-    if expected is not None:
-        # Merge from the exact confirmed snapshot, not a transient read that could
-        # differ even if the save-time comparison subsequently succeeds.
-        base = expected
-    else:
-        current = ctx.profiles.peek(name)
-        base = current.config if current is not None else MeetingConfig()
-    config = config_from_mapping(base, args.get("config"))
+    expected_supplied = "expected_config" in args
+    expected = MeetingConfig.model_validate(args["expected_config"]) if expected_supplied else None
     destinations = args.get("export_destinations")
     if destinations is not None:
         registered = sorted(str(item["name"]) for item in list_exporters())
@@ -62,16 +57,35 @@ def set_profile(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
                 details={"unknown": unknown, "registered": registered},
             )
     make_default = bool(args.get("make_default", False))
-    with validated_config(ctx, config):
-        profile = ctx.profiles.set(
-            name,
-            config=config,
-            expected_config=expected,
-            scope=args.get("scope", UNSET),
-            engagement=args.get("engagement", UNSET),
-            export_destinations=destinations,
-            make_default=make_default,
-        )
+    # Even legacy calls without expected_config use an internal compare-and-set. If a
+    # concurrent writer wins, rebuild from that snapshot before checking the epoch again.
+    # This preserves merge-on-latest behavior without allowing a stale epoch to be published.
+    for attempt in range(3):
+        if expected_supplied:
+            base = expected
+        else:
+            current = ctx.profiles.peek(name)
+            base = current.config if current is not None else MeetingConfig()
+        assert base is not None
+        config = config_from_mapping(base, args.get("config"))
+        check_cache_epoch_monotonic(base, config)
+        with validated_config(ctx, config):
+            try:
+                profile = ctx.profiles.set(
+                    name,
+                    config=config,
+                    expected_config=base,
+                    scope=args.get("scope", UNSET),
+                    engagement=args.get("engagement", UNSET),
+                    export_destinations=destinations,
+                    make_default=make_default,
+                )
+            except ConfigurationConflictError as exc:
+                save_outcome_unknown = exc.details.get("reason") == "profile_save_outcome_unknown"
+                if expected_supplied or save_outcome_unknown or attempt == 2:
+                    raise
+                continue
+        break
     ctx.catalog.audit(
         ctx.actor,
         "set_profile",

@@ -53,7 +53,7 @@ public struct ConfigureRecordingPermissionResponse: Codable, Equatable, Sendable
     }
 }
 
-/// Authenticated contracts v2 through v4 keep permission setup but refuse v1 downgrade.
+/// Authenticated contracts v2 through v6 keep permission setup but refuse v1 downgrade.
 public enum RecordingPermissionContract {
     public static func isValidServerInstanceID(_ serverInstanceID: String?) -> Bool {
         guard let serverInstanceID else { return false }
@@ -77,7 +77,7 @@ public enum RecordingPermissionContract {
         let components = core.split(separator: ".", omittingEmptySubsequences: false)
         guard components.count == 3,
             components.allSatisfy(isVersionNumber),
-            let major = Int(components[0]), (2...5).contains(major),
+            let major = Int(components[0]), (2...6).contains(major),
             let minor = Int(components[1]),
             let patch = Int(components[2])
         else { return false }
@@ -92,6 +92,18 @@ public enum RecordingPermissionContract {
 
     public static func supportsSetup(_ contractVersion: String?, serverInstanceID: String?) -> Bool {
         supportsSetup(contractVersion) && isValidServerInstanceID(serverInstanceID)
+    }
+
+    public static func supportsMinutesModelSelection(_ contractVersion: String?) -> Bool {
+        guard supportsSetup(contractVersion), let contractVersion,
+            let major = Int(contractVersion.split(separator: ".").first ?? "") else { return false }
+        return (3...6).contains(major)
+    }
+
+    public static func supportsTranscriptionModelSelection(_ contractVersion: String?) -> Bool {
+        guard supportsSetup(contractVersion), let contractVersion,
+            let major = Int(contractVersion.split(separator: ".").first ?? "") else { return false }
+        return (5...6).contains(major)
     }
 
     /// The initial/legacy probe stays empty until the current server identity is known.

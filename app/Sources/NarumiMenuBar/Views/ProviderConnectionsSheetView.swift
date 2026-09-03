@@ -99,7 +99,7 @@ struct ProviderConnectionsSheetView: View {
                     }
                 }
             }
-            Text("Codex App Server は ChatGPT ログイン、OpenAI API は API キーで利用します。")
+            Text("Codex は ChatGPT ログイン、Claude SDK・OpenAI・Anthropic は API キー、互換 API は接続ごとの認証方式、Ollama はローカル認証なしで利用します。")
                 .font(.caption).foregroundStyle(.secondary)
             Button("一覧を再読み込み") { navigate(.reload) }
                 .disabled(store.isBusy)

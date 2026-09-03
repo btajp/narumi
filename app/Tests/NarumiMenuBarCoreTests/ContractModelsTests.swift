@@ -336,12 +336,13 @@ final class ContractModelsTests: XCTestCase {
         XCTAssertFalse(String(decoding: try JSONEncoder().encode(error), as: UTF8.self).contains("untrusted"))
     }
 
-    func testASRCapabilityIsExplicitAndRestrictedToContractFiveHTTP() throws {
+    func testASRCapabilityIsExplicitAndRestrictedToContractsFiveAndSixHTTP() throws {
         var info = try XCTUnwrap(try decodeAll(ServerInfo.self, tool: "get_server_info").first)
-        for version in ["2.0.0", "3.0.0", "4.0.0", "5.0.0-rc.1", "6.0.0"] {
+        for version in ["2.0.0", "3.0.0", "4.0.0", "5.0.0-rc.1", "6.0.0-rc.1", "7.0.0"] {
             XCTAssertTrue(info.capabilities.supportedTranscriptionModelProviders(contractVersion: version).isEmpty, version)
         }
         XCTAssertEqual(info.capabilities.supportedTranscriptionModelProviders(contractVersion: "5.0.0"), ["openai-api"])
+        XCTAssertEqual(info.capabilities.supportedTranscriptionModelProviders(contractVersion: "6.0.0"), ["openai-api"])
         info.capabilities.transcriptionModelProviders = ["openai-api", "codex-app-server", "unknown"]
         XCTAssertEqual(info.capabilities.supportedTranscriptionModelProviders(contractVersion: "5.0.0"), ["openai-api"])
         info.capabilities.transports = ["stdio"]
@@ -367,6 +368,7 @@ final class ContractModelsTests: XCTestCase {
         XCTAssertFalse(http.capabilities.permissionSetupInProgress)
         XCTAssertEqual(http.capabilities.workflow?.providerConnections, true)
         XCTAssertEqual(http.capabilities.workflow?.providerModels, true)
+        XCTAssertEqual(http.capabilities.workflow?.providerModelVerification, true)
         XCTAssertEqual(http.capabilities.workflow?.stageModelSelection, true)
         XCTAssertEqual(Set(http.capabilities.minutesModelProviders ?? []), Set(MinutesModelSelection.providers))
         XCTAssertEqual(http.capabilities.transcriptionModelProviders, ["openai-api"])
@@ -384,6 +386,7 @@ final class ContractModelsTests: XCTestCase {
         XCTAssertFalse(stdio.capabilities.permissionSetupInProgress)
         XCTAssertEqual(stdio.capabilities.workflow?.providerConnections, false)
         XCTAssertEqual(stdio.capabilities.workflow?.providerModels, false)
+        XCTAssertEqual(stdio.capabilities.workflow?.providerModelVerification, false)
         XCTAssertEqual(stdio.capabilities.workflow?.stageModelSelection, false)
         XCTAssertEqual(stdio.capabilities.minutesModelProviders ?? [], [])
         XCTAssertEqual(stdio.secureTransport?.mode, "stdio")
@@ -392,6 +395,27 @@ final class ContractModelsTests: XCTestCase {
         XCTAssertNil(stdio.capabilities.permissions)
         XCTAssertNil(stdio.diagnostics.ffmpeg)  // JSON null
         XCTAssertNil(stdio.diagnostics.recorderPath)
+    }
+
+    func testMissingModelVerificationCapabilityDefaultsToFalseAndNullIsRejected() throws {
+        let info = try XCTUnwrap(try decodeAll(ServerInfo.self, tool: "get_server_info").first)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(info)) as? [String: Any])
+        var capabilities = try XCTUnwrap(object["capabilities"] as? [String: Any])
+        var workflow = try XCTUnwrap(capabilities["workflow"] as? [String: Any])
+        workflow.removeValue(forKey: "provider_model_verification")
+        capabilities["workflow"] = workflow
+        object["capabilities"] = capabilities
+
+        let missing = try JSONDecoder().decode(
+            ServerInfo.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertEqual(missing.capabilities.workflow?.providerModelVerification, false)
+
+        workflow["provider_model_verification"] = NSNull()
+        capabilities["workflow"] = workflow
+        object["capabilities"] = capabilities
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            ServerInfo.self, from: JSONSerialization.data(withJSONObject: object)))
     }
 
     func testServerInfoKeepsMissingInstanceIDCompatibleWithOlderServersAndInitializers() throws {

@@ -5,6 +5,7 @@ public enum ProviderDisplay {
         switch provider {
         case .anthropicAPI: return "Anthropic API"
         case .openaiAPI: return "OpenAI API"
+        case .openAICompatibleAPI: return "OpenAI互換API"
         case .claudeAgentSDK: return "Claude Agent SDK"
         case .ollama: return "Ollama"
         case .codexAppServer: return "Codex App Server"
@@ -17,7 +18,7 @@ public enum ProviderDisplay {
         case .notPrepared: return "実行環境が未準備"
         case .unverified: return "対応は未確認"
         case .authenticationRequired: return "認証が必要"
-        case .unsupported: return "未対応"
+        case .unsupported: return "サーバーから利用能力が公開されていません"
         case .retired: return "提供終了"
         }
     }
@@ -78,6 +79,9 @@ public enum ProviderDisplay {
         if provider == .openaiAPI {
             return "保存した API キーで https://api.openai.com/v1/models のモデル一覧を照会します。残高や生成権限は確認できず、会議データの送信・議事録生成は行いません。"
         }
+        if provider == .openAICompatibleAPI {
+            return "保存した接続先の /models を照会します。モデル一覧だけでは生成 API への対応を確認できません。会議データの送信・議事録生成は行いません。"
+        }
         return "ログイン・認証確認とメタデータの照会だけを行います。会議データの送信・議事録生成は行いません。"
     }
 
@@ -85,7 +89,7 @@ public enum ProviderDisplay {
         guard result.connected else {
             return "接続を確認できませんでした。認証・実行環境の状態を確認してください。"
         }
-        if result.connection.providerID == .openaiAPI {
+        if result.connection.providerID == .openaiAPI || result.connection.providerID == .openAICompatibleAPI {
             return "モデル一覧を取得できました。残高・生成権限・議事録生成の成功は未確認です。"
         }
         return "接続とメタデータを確認しました。議事録生成は未検証です。"
@@ -134,7 +138,10 @@ public enum ProviderDisplay {
             return "同梱の Codex 実行環境を検証できません。公式配布版を更新または再インストールしてください。外部の実行環境へは切り替えません。"
         case "runtime_preparation_failed": return "実行環境の準備に失敗しました。準備状態を確認してください。"
         case "local_server_verification_required": return "ローカルサーバーの接続確認が必要です。"
-        case "adapter_capability_verification_required": return "このモデルを実行するアダプタの対応を確認できていません。"
+        case "adapter_capability_verification_required":
+            return "モデル一覧から候補を取得しましたが、文章生成能力は未確認です。"
+        case "model_generation_verification_required":
+            return "固定の非機密テスト文を送信して文章生成能力を検証すると選択できます。送信先で課金される場合があります。"
         case "authentication_operation_interrupted": return "サーバーの再起動などにより、認証操作の継続を確認できません。"
         case "authentication_verification_unavailable": return "認証の完了を確認できません。実行環境とログイン状態を確認してください。"
         case "device_code_login_unavailable":

@@ -69,6 +69,7 @@ PROVIDER_TOOLS = frozenset(
         "get_provider_auth_status",
         "test_provider_connection",
         "list_provider_models",
+        "verify_provider_model",
         "prepare_provider_runtime",
     }
 )
@@ -104,7 +105,7 @@ class CliState:
     data_root: Path | None
     pretty: bool
     confidential: bool = False
-    contract_version: str = "5.0.0"
+    contract_version: str = "6.0.0"
 
 
 def _redacted_error_payload(
@@ -346,7 +347,7 @@ class McpHttpClient:
         self._notify("notifications/initialized")
         return result
 
-    def probe(self, expected_contract_version: str = "5.0.0") -> None:
+    def probe(self, expected_contract_version: str = "6.0.0") -> None:
         """``initialize`` + ``get_server_info`` with short timeouts.
 
         No user operation is sent until the resident server proves contract compatibility.

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -265,6 +267,435 @@ def test_unknown_outcome_is_not_retried_without_new_epoch(tmp_path, generation):
     assert len(completions(backend)) == 3
 
 
+def test_unknown_checkpoint_survives_provenance_changes_until_epoch_increases(tmp_path, generation):
+    service, backend, config = generation
+    bundle = generation_bundle(tmp_path, config)
+    provider = MinutesResolver(service).resolve(config)
+    limits = checkpoints.MinutesLimits.for_provider(provider)
+    inputs = {"merged/merged": "a" * 64}
+    params = {
+        "provider": provider.name,
+        "prompt_version": "minutes-v2",
+        "language": "ja",
+        **copy.deepcopy(provider.generation_params),
+        "generation_limits": limits.params(),
+    }
+    params["minutes_model"]["cache_epoch"] = 10
+    backend.complete_error = EngineUnavailableError(
+        "fixture-key", details={"reason": OUTCOME_UNKNOWN}
+    )
+    first = checkpoints.MinutesCheckpoints(
+        bundle, provider, inputs=inputs, params=params, limits=limits
+    )
+    with pytest.raises(NarumiError):
+        first.complete("same prompt", system="same system")
+    assert len(completions(backend)) == 1
+
+    changed = copy.deepcopy(params)
+    changed.update(
+        {
+            "prompt_version": "minutes-v3",
+            "language": "en",
+            "runtime_sha256": "b" * 64,
+            "runtime_catalog_revision": "c" * 64,
+            "model_verification_sha256": "d" * 64,
+            "model_verified_at": "2026-09-02T12:00:00Z",
+            "effective_parameters": {"reasoning_effort": "medium"},
+            "max_output_tokens": 8192,
+            "generation_limits": {**params["generation_limits"], "output_tokens": 8192},
+        }
+    )
+    changed["minutes_model"]["connection_revision"] += 1
+    changed_inputs = {
+        "merged/merged": "e" * 64,
+        "preprocess/slides": "f" * 64,
+        "context/brief": "0" * 64,
+    }
+    backend.complete_error = None
+    for epoch, prompt in (
+        (10, "same prompt"),
+        (10, "prompt after artifact drift"),
+        (9, "prompt after artifact drift"),
+    ):
+        changed["minutes_model"]["cache_epoch"] = epoch
+        retried = checkpoints.MinutesCheckpoints(
+            Bundle.open(bundle.path),
+            provider,
+            inputs=changed_inputs,
+            params=changed,
+            limits=limits,
+        )
+        assert retried.path != first.path
+        assert retried.guard_path == first.guard_path
+        assert retried.attempt_identity == first.attempt_identity
+        with pytest.raises(EngineUnavailableError) as blocked:
+            retried.complete(prompt, system="same system")
+        assert blocked.value.details["reason"] == OUTCOME_UNKNOWN
+        assert len(completions(backend)) == 1
+
+    changed["minutes_model"]["cache_epoch"] = 11
+    new_attempt = checkpoints.MinutesCheckpoints(
+        Bundle.open(bundle.path),
+        provider,
+        inputs=changed_inputs,
+        params=changed,
+        limits=limits,
+    )
+    assert new_attempt.guard_path == first.guard_path
+    assert new_attempt.attempt_identity == first.attempt_identity
+    assert (
+        new_attempt.complete("prompt after artifact drift", system="same system")
+        == backend.response
+    )
+    assert len(completions(backend)) == 2
+    ledger = bundle.read_json(first.guard_path)
+    assert ledger["version"] == 4
+    assert sorted(
+        (entry["state"], entry["attempt_epoch"]) for entry in ledger["entries"].values()
+    ) == [
+        ("succeeded", 11),
+        ("unknown", 10),
+    ]
+
+
+def test_unknown_checkpoint_survives_clear_alternate_selection_and_reopen(tmp_path, generation):
+    service, backend, config = generation
+    config.minutes_model.cache_epoch = 10
+    bundle = generation_bundle(tmp_path, config)
+    backend.complete_error = EngineUnavailableError(
+        "fixture-key", details={"reason": OUTCOME_UNKNOWN}
+    )
+    resolver = MinutesResolver(service)
+    with pytest.raises(NarumiError):
+        run_generate(bundle, minutes_resolver=resolver)
+    assert len(completions(backend)) == 1
+
+    original = bundle.manifest.config.minutes_model.model_copy(deep=True)
+    bundle.manifest.config.minutes_model = None
+    bundle.save()
+    reopened = Bundle.open(bundle.path)
+    alternate = original.model_copy(deep=True)
+    alternate.model_id = "alternate-model"
+    alternate.cache_epoch = 0
+    reopened.manifest.config.minutes_model = alternate
+    reopened.save()
+    reopened = Bundle.open(bundle.path)
+    original.cache_epoch = 9
+    reopened.manifest.config.minutes_model = original
+    reopened.save()
+
+    backend.complete_error = None
+    with pytest.raises(EngineUnavailableError) as blocked:
+        run_generate(Bundle.open(bundle.path), minutes_resolver=resolver)
+    assert blocked.value.details["reason"] == OUTCOME_UNKNOWN
+    assert len(completions(backend)) == 1
+
+    reopened = Bundle.open(bundle.path)
+    reopened.manifest.config.minutes_model.cache_epoch = 11
+    reopened.save()
+    run_generate(Bundle.open(bundle.path), minutes_resolver=resolver)
+    assert len(completions(backend)) == 3
+
+
+def test_legacy_retry_guard_without_attempt_epoch_fails_closed(tmp_path, generation):
+    service, _, config = generation
+    bundle = generation_bundle(tmp_path, config)
+    provider = MinutesResolver(service).resolve(config)
+    limits = checkpoints.MinutesLimits.for_provider(provider)
+    params = {
+        "provider": provider.name,
+        "prompt_version": "minutes-v2",
+        "language": "ja",
+        **copy.deepcopy(provider.generation_params),
+        "generation_limits": limits.params(),
+    }
+    probe = checkpoints.MinutesCheckpoints(
+        bundle, provider, inputs={"merged/merged": "a" * 64}, params=params, limits=limits
+    )
+    bundle.write_json(probe.guard_path, {"version": 1, "entries": {}})
+
+    with pytest.raises(EngineUnavailableError, match="retry guard could not be verified"):
+        checkpoints.MinutesCheckpoints(
+            Bundle.open(bundle.path),
+            provider,
+            inputs={"merged/merged": "a" * 64},
+            params=params,
+            limits=limits,
+        )
+
+
+def test_input_bound_retry_guard_format_fails_closed(tmp_path, generation):
+    service, _, config = generation
+    bundle = generation_bundle(tmp_path, config)
+    provider = MinutesResolver(service).resolve(config)
+    limits = checkpoints.MinutesLimits.for_provider(provider)
+    params = {
+        "provider": provider.name,
+        "prompt_version": "minutes-v2",
+        "language": "ja",
+        **copy.deepcopy(provider.generation_params),
+        "generation_limits": limits.params(),
+    }
+    probe = checkpoints.MinutesCheckpoints(
+        bundle, provider, inputs={"merged/merged": "a" * 64}, params=params, limits=limits
+    )
+    bundle.write_json(probe.guard_path, {"version": 2, "entries": {}})
+
+    with pytest.raises(EngineUnavailableError, match="retry guard could not be verified"):
+        checkpoints.MinutesCheckpoints(
+            Bundle.open(bundle.path),
+            provider,
+            inputs={"merged/merged": "b" * 64},
+            params=params,
+            limits=limits,
+        )
+
+
+def test_previous_resolved_guard_format_fails_closed(tmp_path, generation):
+    service, _, config = generation
+    bundle = generation_bundle(tmp_path, config)
+    provider = MinutesResolver(service).resolve(config)
+    limits = checkpoints.MinutesLimits.for_provider(provider)
+    params = {
+        "provider": provider.name,
+        "prompt_version": "minutes-v2",
+        "language": "ja",
+        **copy.deepcopy(provider.generation_params),
+        "generation_limits": limits.params(),
+    }
+    probe = checkpoints.MinutesCheckpoints(
+        bundle, provider, inputs={"merged/merged": "a" * 64}, params=params, limits=limits
+    )
+    bundle.write_json(probe.guard_path, {"version": 3, "entries": {}})
+
+    with pytest.raises(EngineUnavailableError, match="retry guard could not be verified"):
+        checkpoints.MinutesCheckpoints(
+            Bundle.open(bundle.path),
+            provider,
+            inputs={"merged/merged": "b" * 64},
+            params=params,
+            limits=limits,
+        )
+
+
+def test_legacy_unknown_checkpoint_without_retry_ledger_fails_closed(tmp_path, generation):
+    service, _, config = generation
+    bundle = generation_bundle(tmp_path, config)
+    provider = MinutesResolver(service).resolve(config)
+    limits = checkpoints.MinutesLimits.for_provider(provider)
+    params = {
+        "provider": provider.name,
+        "prompt_version": "minutes-v2",
+        "language": "ja",
+        **copy.deepcopy(provider.generation_params),
+        "generation_limits": limits.params(),
+    }
+    bundle.write_json(
+        f"minutes/checkpoints/{'f' * 64}.json",
+        {
+            "version": 1,
+            "attempts": 1,
+            "entries": {"e" * 64: {"state": "unknown"}},
+        },
+    )
+
+    with pytest.raises(EngineUnavailableError, match="retry guard could not be verified"):
+        checkpoints.MinutesCheckpoints(
+            Bundle.open(bundle.path), provider, inputs={}, params=params, limits=limits
+        )
+
+
+@pytest.mark.parametrize("mutation", ["inputs", "runtime", "catalog", "defaults"])
+def test_each_provenance_drift_is_blocked_at_the_same_epoch(tmp_path, generation, mutation):
+    service, backend, config = generation
+    bundle = generation_bundle(tmp_path, config)
+    provider = MinutesResolver(service).resolve(config)
+    limits = checkpoints.MinutesLimits.for_provider(provider)
+    inputs = {"merged/merged": "a" * 64}
+    params = {
+        "provider": provider.name,
+        "prompt_version": "minutes-v2",
+        "language": "ja",
+        **copy.deepcopy(provider.generation_params),
+        "generation_limits": limits.params(),
+    }
+    first = checkpoints.MinutesCheckpoints(
+        bundle, provider, inputs=inputs, params=params, limits=limits
+    )
+    backend.complete_error = EngineUnavailableError(
+        "fixture-key", details={"reason": OUTCOME_UNKNOWN}
+    )
+    with pytest.raises(NarumiError):
+        first.complete("same prompt", system="same system")
+    assert len(completions(backend)) == 1
+
+    changed_inputs, changed_params = dict(inputs), copy.deepcopy(params)
+    if mutation == "inputs":
+        changed_inputs["preprocess/slides"] = "b" * 64
+    elif mutation == "runtime":
+        changed_params["runtime_sha256"] = "b" * 64
+    elif mutation == "catalog":
+        changed_params["runtime_catalog_revision"] = "b" * 64
+    else:
+        changed_params["effective_parameters"] = {"reasoning_effort": "medium"}
+    backend.complete_error = None
+    retried = checkpoints.MinutesCheckpoints(
+        Bundle.open(bundle.path),
+        provider,
+        inputs=changed_inputs,
+        params=changed_params,
+        limits=limits,
+    )
+    assert retried.path != first.path
+    assert retried.attempt_identity == first.attempt_identity
+    with pytest.raises(EngineUnavailableError) as blocked:
+        retried.complete("same prompt", system="same system")
+    assert blocked.value.details["reason"] == OUTCOME_UNKNOWN
+    assert len(completions(backend)) == 1
+
+
+def test_successful_checkpoint_keeps_full_provenance_versioning(tmp_path, generation):
+    service, backend, config = generation
+    bundle = generation_bundle(tmp_path, config)
+    provider = MinutesResolver(service).resolve(config)
+    limits = checkpoints.MinutesLimits.for_provider(provider)
+    inputs = {"merged/merged": "a" * 64}
+    params = {
+        "provider": provider.name,
+        "prompt_version": "minutes-v2",
+        "language": "ja",
+        **copy.deepcopy(provider.generation_params),
+        "generation_limits": limits.params(),
+    }
+    first = checkpoints.MinutesCheckpoints(
+        bundle, provider, inputs=inputs, params=params, limits=limits
+    )
+    assert first.complete("same prompt", system="same system") == backend.response
+
+    changed = copy.deepcopy(params)
+    changed.update(
+        {
+            "runtime_sha256": "b" * 64,
+            "runtime_catalog_revision": "c" * 64,
+            "effective_parameters": {"reasoning_effort": "medium"},
+        }
+    )
+    changed_inputs = {
+        "merged/merged": "d" * 64,
+        "preprocess/slides": "e" * 64,
+        "context/brief": "f" * 64,
+    }
+    regenerated = checkpoints.MinutesCheckpoints(
+        bundle, provider, inputs=changed_inputs, params=changed, limits=limits
+    )
+    assert regenerated.path != first.path and regenerated.guard_path == first.guard_path
+    assert regenerated.complete("same prompt", system="same system") == backend.response
+    assert len(completions(backend)) == 2
+
+    uncertain = copy.deepcopy(changed)
+    uncertain["runtime_sha256"] = "c" * 64
+    uncertain["minutes_model"]["cache_epoch"] = 1
+    backend.complete_error = EngineUnavailableError(
+        "fixture-key", details={"reason": OUTCOME_UNKNOWN}
+    )
+    with pytest.raises(NarumiError):
+        checkpoints.MinutesCheckpoints(
+            Bundle.open(bundle.path),
+            provider,
+            inputs=changed_inputs,
+            params=uncertain,
+            limits=limits,
+        ).complete("same prompt", system="same system")
+    assert len(completions(backend)) == 3
+
+    # Reusing an older successful full-provenance cache is safe, but must not erase the newer
+    # uncertain attempt or permit another send at that epoch.
+    cached = checkpoints.MinutesCheckpoints(
+        Bundle.open(bundle.path), provider, inputs=inputs, params=params, limits=limits
+    )
+    assert cached.complete("same prompt", system="same system") == backend.response
+    backend.complete_error = None
+    retry = checkpoints.MinutesCheckpoints(
+        Bundle.open(bundle.path),
+        provider,
+        inputs=changed_inputs,
+        params=uncertain,
+        limits=limits,
+    )
+    with pytest.raises(EngineUnavailableError) as blocked:
+        retry.complete("same prompt", system="same system")
+    assert blocked.value.details["reason"] == OUTCOME_UNKNOWN
+    assert len(completions(backend)) == 3
+
+    uncertain["minutes_model"]["cache_epoch"] = 2
+    assert (
+        checkpoints.MinutesCheckpoints(
+            Bundle.open(bundle.path),
+            provider,
+            inputs=changed_inputs,
+            params=uncertain,
+            limits=limits,
+        ).complete("same prompt", system="same system")
+        == backend.response
+    )
+    assert len(completions(backend)) == 4
+
+
+def test_cached_success_does_not_clear_foreign_provenance_pending_guard(tmp_path, generation):
+    service, backend, config = generation
+    bundle = generation_bundle(tmp_path, config)
+    provider = MinutesResolver(service).resolve(config)
+    limits = checkpoints.MinutesLimits.for_provider(provider)
+    inputs = {"merged/merged": "a" * 64}
+    params = {
+        "provider": provider.name,
+        "prompt_version": "minutes-v2",
+        "language": "ja",
+        **copy.deepcopy(provider.generation_params),
+        "generation_limits": limits.params(),
+    }
+    prompt, system = "same prompt", "same system"
+    successful = checkpoints.MinutesCheckpoints(
+        bundle, provider, inputs=inputs, params=params, limits=limits
+    )
+    assert successful.complete(prompt, system=system) == backend.response
+
+    changed = copy.deepcopy(params)
+    changed["runtime_sha256"] = "b" * 64
+    pending = checkpoints.MinutesCheckpoints(
+        Bundle.open(bundle.path), provider, inputs=inputs, params=changed, limits=limits
+    )
+    prompt_key = checkpoints.sha256_params({"prompt": prompt, "system": system, "max_tokens": None})
+    pending.document["attempts"] = 1
+    pending.document["entries"][prompt_key] = {"state": "pending"}
+    pending._save()
+    guard_key = pending._guard_key(prompt_key)
+    pending_sha = pending.path.rsplit("/", 1)[-1].removesuffix(".json")
+    pending.guard_document["entries"][guard_key] = {
+        "state": "pending",
+        "attempt_identity": pending.attempt_identity,
+        "attempt_epoch": pending.attempt_epoch,
+        "checkpoint_sha256": pending_sha,
+        "prompt_sha256": prompt_key,
+    }
+    pending._save_guard()
+
+    cached = checkpoints.MinutesCheckpoints(
+        Bundle.open(bundle.path), provider, inputs=inputs, params=params, limits=limits
+    )
+    assert cached.complete(prompt, system=system) == backend.response
+    ledger = bundle.read_json(cached.guard_path)
+    assert ledger["entries"][guard_key]["checkpoint_sha256"] == pending_sha
+
+    changed["runtime_sha256"] = "c" * 64
+    with pytest.raises(EngineUnavailableError) as blocked:
+        checkpoints.MinutesCheckpoints(
+            Bundle.open(bundle.path), provider, inputs=inputs, params=changed, limits=limits
+        ).complete(prompt, system=system)
+    assert blocked.value.details["reason"] == OUTCOME_UNKNOWN
+    assert len(completions(backend)) == 1
+
+
 @pytest.mark.parametrize(
     "operation", [run_generate, process_meeting, regenerate_meeting, refresh_meeting]
 )
@@ -418,6 +849,92 @@ def test_reply_persistence_failure_does_not_resend(
     assert len(completions(backend)) == 1
 
 
+def test_failed_generation_lease_release_is_recovered_without_resending(generation, monkeypatch):
+    service, backend, config = generation
+    provider = MinutesResolver(service).resolve(config)
+    original_commit = service.store.commit
+    release_writes_fail = [True]
+
+    def commit(document):
+        check = document["checks"].get("codex-app-server")
+        if completions(backend) and check is None and release_writes_fail[0]:
+            raise NarumiError("fixture release persistence failure")
+        return original_commit(document)
+
+    monkeypatch.setattr(service.store, "commit", commit)
+    with pytest.raises(NarumiError) as initial:
+        provider.complete("fixture prompt")
+    assert initial.value.details["reason"] == OUTCOME_UNKNOWN
+    assert provider.last_completion_metadata is None
+    assert len(completions(backend)) == 1
+    assert service.store.read()["checks"]["codex-app-server"]["kind"] == "generation"
+
+    release_writes_fail[0] = False
+    deadline = time.monotonic() + 2
+    while service.store.read()["checks"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(completions(backend)) == 1
+    saved = service.store.read()
+    assert saved["checks"] == {}
+    assert (
+        saved["connections"][config.minutes_model.connection_id]["last_generation_state"]
+        == "unknown"
+    )
+
+    # The stale lease no longer blocks unrelated provider operations in this process.
+    tested = service.test_connection(
+        {
+            "connection_id": config.minutes_model.connection_id,
+            "expected_revision": config.minutes_model.connection_revision,
+        }
+    )
+    assert tested["connected"] is True
+
+
+def test_guard_resolution_sync_failure_keeps_verifiable_receipt(tmp_path, generation, monkeypatch):
+    service, backend, config = generation
+    bundle = generation_bundle(tmp_path, config)
+    provider = MinutesResolver(service).resolve(config)
+    limits = checkpoints.MinutesLimits.for_provider(provider)
+    params = {
+        "provider": provider.name,
+        "prompt_version": "minutes-v2",
+        "language": "ja",
+        **copy.deepcopy(provider.generation_params),
+        "generation_limits": limits.params(),
+    }
+    inputs = {"merged/merged": bundle.artifact_hash("merged/merged")}
+    original_sync = checkpoints._sync_checkpoint
+    guard_path = bundle.abspath("minutes/checkpoints/attempts/ledger.json")
+    guard_syncs = 0
+
+    def fail_resolution_sync(path):
+        nonlocal guard_syncs
+        if path == guard_path:
+            guard_syncs += 1
+            if guard_syncs == 2:
+                raise OSError("fixture guard resolution sync failure")
+        original_sync(path)
+
+    monkeypatch.setattr(checkpoints, "_sync_checkpoint", fail_resolution_sync)
+    first = checkpoints.MinutesCheckpoints(
+        bundle, provider, inputs=inputs, params=params, limits=limits
+    )
+    with pytest.raises(EngineUnavailableError) as failure:
+        first.complete("same prompt", system="same system")
+    assert failure.value.details["reason"] == OUTCOME_UNKNOWN
+    assert len(completions(backend)) == 1
+    assert {entry["state"] for entry in bundle.read_json(first.guard_path)["entries"].values()} == {
+        "succeeded"
+    }
+
+    recovered = checkpoints.MinutesCheckpoints(
+        Bundle.open(bundle.path), provider, inputs=inputs, params=params, limits=limits
+    )
+    assert recovered.complete("same prompt", system="same system") == backend.response
+    assert len(completions(backend)) == 1
+
+
 def test_checkpoint_is_flushed_before_each_outgoing_request(tmp_path, generation, monkeypatch):
     service, backend, config = generation
     bundle = generation_bundle(tmp_path, config)
@@ -437,7 +954,9 @@ def test_checkpoint_is_flushed_before_each_outgoing_request(tmp_path, generation
     monkeypatch.setattr(checkpoints, "_sync_checkpoint", sync)
     backend.complete = complete
     run_generate(bundle, minutes_resolver=MinutesResolver(service))
-    assert len(synced) == 4 and len(completions(backend)) == 2
+    # Each request durably saves both its full-provenance checkpoint and stable retry guard,
+    # then durably records the known result in both documents.
+    assert len(synced) == 8 and len(completions(backend)) == 2
 
 
 def test_failed_pending_checkpoint_flush_never_dispatches(tmp_path, generation, monkeypatch):
@@ -479,7 +998,7 @@ def test_model_observation_change_between_chunks_is_rejected(generation):
         ("openai-api", {"max_tokens": 0}),
         ("openai-api", {"max_tokens": 32769}),
         ("openai-api", {"endpoint": "fixture"}),
-        ("claude-agent-sdk", {}),
+        ("claude-agent-sdk", {"max_tokens": 1}),
     ],
 )
 def test_model_selection_closes_parameters_by_provider(provider, parameters):

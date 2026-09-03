@@ -134,7 +134,7 @@ final class MinutesModelCatalogStoreTests: XCTestCase {
         XCTAssertTrue(beforeAdvertising.isEmpty)
         XCTAssertTrue(store.connections(for: "openai-api").isEmpty)
         store.setSupportedProviders(["openai-api", "claude-agent-sdk"])
-        XCTAssertEqual(store.supportedProviders, ["openai-api"])
+        XCTAssertEqual(store.supportedProviders, ["claude-agent-sdk", "openai-api"])
         await store.loadCachedCatalog(connectionID: connection.connectionID)
         let afterAdvertising = await client.requests
         XCTAssertEqual(afterAdvertising.count, 1)
@@ -145,7 +145,7 @@ final class MinutesModelCatalogStoreTests: XCTestCase {
         XCTAssertEqual(afterRemoval.count, 1)
     }
 
-    func testAllFourProvidersUseExactConnectionAndOnlyExplicitCatalogRefresh() async {
+    func testAllSixProvidersUseExactConnectionAndOnlyExplicitCatalogRefresh() async {
         for name in MinutesModelSelection.providers {
             let providerID = ProviderID(rawValue: name)!
             let connection = MinutesModelFixtures.connection(providerID: providerID)
@@ -166,6 +166,458 @@ final class MinutesModelCatalogStoreTests: XCTestCase {
         }
     }
 
+    func testMissingOrRevokedVerificationCapabilityNeverSendsThePaidProbe() async {
+        let connection = MinutesModelFixtures.connection(providerID: .openAICompatibleAPI)
+        let candidate = MinutesModelFixtures.model(
+            id: "compatible-candidate", availability: .unverified, inputs: [], outputs: [], roles: [],
+            provider: "openai-compatible-api", parameterSchema: ProviderParameterSchema(),
+            maxOutputTokens: nil, contextWindow: nil,
+            reason: "adapter_capability_verification_required", source: .providerAPI)
+        let client = FakeMinutesCatalogClient(
+            connections: [connection], pages: ["first": MinutesModelFixtures.catalog(models: [candidate])])
+        let store = MinutesModelCatalogStore(client: client, supportedProviders: ["openai-compatible-api"])
+        await store.loadCachedCatalog(connectionID: connection.connectionID)
+
+        XCTAssertFalse(store.isVerificationCandidate(
+            connectionID: connection.connectionID, expectedRevision: connection.revision, model: candidate))
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            expectedModel: candidate, confirmation: .sendTestPromptAndMayCharge)
+        let requestsBeforeEnable = await client.verificationRequests
+        XCTAssertTrue(requestsBeforeEnable.isEmpty)
+
+        store.setSupportedProviders(["openai-compatible-api"], modelVerificationSupported: true)
+        XCTAssertTrue(store.isVerificationCandidate(
+            connectionID: connection.connectionID, expectedRevision: connection.revision, model: candidate))
+        store.setSupportedProviders(["openai-compatible-api"], modelVerificationSupported: false)
+        XCTAssertFalse(store.isVerificationCandidate(
+            connectionID: connection.connectionID, expectedRevision: connection.revision, model: candidate))
+        let requestsAfterRevoke = await client.verificationRequests
+        XCTAssertTrue(requestsAfterRevoke.isEmpty)
+    }
+
+    func testCompatibleModelVerificationIsExplicitSingleSendAndReloadsCachedCatalog() async {
+        let connection = MinutesModelFixtures.connection(providerID: .openAICompatibleAPI)
+        let candidate = MinutesModelFixtures.model(
+            id: "compatible-candidate", availability: .unverified, inputs: [], outputs: [], roles: [],
+            provider: "openai-compatible-api", parameterSchema: ProviderParameterSchema(),
+            maxOutputTokens: nil, contextWindow: nil,
+            reason: "adapter_capability_verification_required", source: .providerAPI)
+        let client = FakeMinutesCatalogClient(
+            connections: [connection], pages: ["first": MinutesModelFixtures.catalog(models: [candidate])])
+        let store = MinutesModelCatalogStore(
+            client: client, supportedProviders: ["openai-compatible-api"], modelVerificationSupported: true)
+        await store.loadCachedCatalog(connectionID: connection.connectionID)
+        XCTAssertEqual(store.catalogs[connection.connectionID]?.models.first?.availability, .unverified)
+
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision, expectedModel: candidate,
+            confirmation: .sendTestPromptAndMayCharge)
+
+        let verificationRequests = await client.verificationRequests
+        XCTAssertEqual(verificationRequests.count, 1)
+        XCTAssertEqual(verificationRequests.first?.connectionID, connection.connectionID)
+        XCTAssertEqual(verificationRequests.first?.expectedRevision, connection.revision)
+        XCTAssertEqual(verificationRequests.first?.modelID, candidate.modelID)
+        XCTAssertEqual(verificationRequests.first?.confirmation, .sendTestPromptAndMayCharge)
+        XCTAssertEqual(store.catalogs[connection.connectionID]?.models.first {
+            $0.modelID == candidate.modelID
+        }?.availability, .available)
+        XCTAssertNil(store.verificationNotice)
+        let modelRequests = await client.requests
+        XCTAssertEqual(modelRequests.map(\.refresh), [false, false])
+    }
+
+    func testFailedVerificationDoesNotRetryAutomatically() async {
+        let connection = MinutesModelFixtures.connection(providerID: .claudeAgentSDK)
+        let candidate = MinutesModelFixtures.model(
+            id: "claude-candidate", availability: .unverified, provider: "claude-agent-sdk")
+        let client = FakeMinutesCatalogClient(
+            connections: [connection], pages: ["first": MinutesModelFixtures.catalog(models: [candidate])],
+            verificationFails: true)
+        let store = MinutesModelCatalogStore(
+            client: client, supportedProviders: ["claude-agent-sdk"], modelVerificationSupported: true)
+        await store.loadCachedCatalog(connectionID: connection.connectionID)
+
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision, expectedModel: candidate,
+            confirmation: .sendTestPromptAndMayCharge)
+
+        let verificationRequests = await client.verificationRequests
+        XCTAssertEqual(verificationRequests.count, 1)
+        XCTAssertNotNil(store.errorMessage)
+        XCTAssertEqual(store.catalogs[connection.connectionID]?.models.first, candidate)
+        XCTAssertTrue(store.verificationNotice?.contains("同じ要求 ID") == true)
+    }
+
+    func testKnownVerificationFailureAllowsANewExplicitRequestForBothPaidProbeProviders() async {
+        for providerID: ProviderID in [.claudeAgentSDK, .openAICompatibleAPI] {
+            let candidate = MinutesModelFixtures.model(
+                id: "\(providerID.rawValue)-candidate", availability: .unverified,
+                provider: providerID.rawValue)
+            let connection = MinutesModelFixtures.connection(providerID: providerID)
+            let client = FakeMinutesCatalogClient(
+                connections: [connection], pages: ["first": MinutesModelFixtures.catalog(models: [candidate])],
+                detailedVerificationFailures: [ProviderSettingsFailure(
+                    .engineUnavailable, modelVerification: .knownFailure)])
+            let store = MinutesModelCatalogStore(
+                client: client, supportedProviders: [providerID.rawValue], modelVerificationSupported: true)
+            await store.loadCachedCatalog(connectionID: connection.connectionID)
+
+            await store.verifyModel(
+                connectionID: connection.connectionID, expectedRevision: connection.revision,
+                expectedModel: candidate, confirmation: .sendTestPromptAndMayCharge)
+            XCTAssertTrue(store.verificationNotice?.contains("確定的に失敗") == true)
+            XCTAssertTrue(store.isVerificationCandidate(
+                connectionID: connection.connectionID, expectedRevision: connection.revision, model: candidate))
+
+            await store.verifyModel(
+                connectionID: connection.connectionID, expectedRevision: connection.revision,
+                expectedModel: candidate, confirmation: .sendTestPromptAndMayCharge)
+            let requests = await client.verificationRequests
+            XCTAssertEqual(requests.count, 2)
+            XCTAssertNotEqual(requests[0].requestID, requests[1].requestID)
+        }
+    }
+
+    func testExplicitUnknownVerificationEvidenceRetainsTheExactRequest() async {
+        let connection = MinutesModelFixtures.connection(providerID: .openAICompatibleAPI)
+        let candidate = MinutesModelFixtures.model(
+            id: "compatible-candidate", availability: .unverified, provider: "openai-compatible-api")
+        let client = FakeMinutesCatalogClient(
+            connections: [connection], pages: ["first": MinutesModelFixtures.catalog(models: [candidate])],
+            detailedVerificationFailures: [ProviderSettingsFailure(
+                .engineUnavailable, modelVerification: .unknownOutcome)])
+        let store = MinutesModelCatalogStore(
+            client: client, supportedProviders: ["openai-compatible-api"], modelVerificationSupported: true)
+        await store.loadCachedCatalog(connectionID: connection.connectionID)
+
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            expectedModel: candidate, confirmation: .sendTestPromptAndMayCharge)
+        let original = await client.verificationRequests.first
+        XCTAssertTrue(store.verificationNotice?.contains(original?.requestID ?? "missing") == true)
+
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            expectedModel: candidate, confirmation: .sendTestPromptAndMayCharge)
+        let requests = await client.verificationRequests
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(requests[0].requestID, requests[1].requestID)
+    }
+
+    func testUnknownVerificationReusesTheExactRequestAfterReconnect() async {
+        let connection = MinutesModelFixtures.connection(providerID: .openAICompatibleAPI)
+        let candidate = MinutesModelFixtures.model(
+            id: "compatible-candidate", availability: .unverified, provider: "openai-compatible-api")
+        let client = FakeMinutesCatalogClient(
+            connections: [connection], pages: ["first": MinutesModelFixtures.catalog(models: [candidate])],
+            verificationFailures: [.transport])
+        let store = MinutesModelCatalogStore(
+            client: client, supportedProviders: ["openai-compatible-api"], modelVerificationSupported: true)
+        await store.loadCachedCatalog(connectionID: connection.connectionID)
+
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            expectedModel: candidate, confirmation: .sendTestPromptAndMayCharge)
+        let original = await client.verificationRequests.first
+        XCTAssertNotNil(original)
+
+        store.invalidate()
+        XCTAssertTrue(store.verificationNotice?.contains(original?.requestID ?? "missing") == true)
+        store.setSupportedProviders(["openai-compatible-api"], modelVerificationSupported: true)
+        await store.loadCachedCatalog(connectionID: connection.connectionID)
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            expectedModel: candidate, confirmation: .sendTestPromptAndMayCharge)
+
+        let requests = await client.verificationRequests
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(requests[0], requests[1])
+        XCTAssertEqual(requests[0].requestID, original?.requestID)
+        XCTAssertEqual(store.catalogs[connection.connectionID]?.models.first?.availability, .available)
+    }
+
+    func testUnknownVerificationBlocksChangedSnapshotInsteadOfCreatingAnotherRequest() async {
+        let connection = MinutesModelFixtures.connection(providerID: .openAICompatibleAPI)
+        let candidate = MinutesModelFixtures.model(
+            id: "compatible-candidate", availability: .unverified, provider: "openai-compatible-api")
+        let changed = MinutesModelFixtures.model(
+            id: candidate.modelID, availability: .unverified, provider: "openai-compatible-api",
+            maxOutputTokens: 2048)
+        let client = FakeMinutesCatalogClient(
+            connections: [connection], pages: ["first": MinutesModelFixtures.catalog(models: [candidate])],
+            verificationFailures: [.transport])
+        let store = MinutesModelCatalogStore(
+            client: client, supportedProviders: ["openai-compatible-api"], modelVerificationSupported: true)
+        await store.loadCachedCatalog(connectionID: connection.connectionID)
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            expectedModel: candidate, confirmation: .sendTestPromptAndMayCharge)
+
+        await client.replace(
+            connections: [connection], pages: ["first": MinutesModelFixtures.catalog(models: [changed])])
+        await store.loadCachedCatalog(connectionID: connection.connectionID)
+        XCTAssertFalse(store.isVerificationCandidate(
+            connectionID: connection.connectionID, expectedRevision: connection.revision, model: changed))
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            expectedModel: changed, confirmation: .sendTestPromptAndMayCharge)
+
+        let requests = await client.verificationRequests
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertTrue(store.verificationNotice?.contains("未確定") == true)
+    }
+
+    func testCachedVerifiedModelReconcilesUnknownRequestBeforeAnotherProbe() async {
+        let connection = MinutesModelFixtures.connection(providerID: .openAICompatibleAPI)
+        let first = MinutesModelFixtures.model(
+            id: "first-candidate", availability: .unverified, provider: "openai-compatible-api")
+        let second = MinutesModelFixtures.model(
+            id: "second-candidate", availability: .unverified, provider: "openai-compatible-api")
+        let client = FakeMinutesCatalogClient(
+            connections: [connection],
+            pages: ["first": MinutesModelFixtures.catalog(models: [first, second])],
+            verificationFailures: [.transport])
+        let store = MinutesModelCatalogStore(
+            client: client, supportedProviders: ["openai-compatible-api"], modelVerificationSupported: true)
+        await store.loadCachedCatalog(connectionID: connection.connectionID)
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            expectedModel: first, confirmation: .sendTestPromptAndMayCharge)
+
+        let verifiedFirst = MinutesModelFixtures.model(
+            id: first.modelID, availability: .available, provider: "openai-compatible-api")
+        await client.replace(
+            connections: [connection],
+            pages: ["first": MinutesModelFixtures.catalog(models: [verifiedFirst, second])])
+        await store.loadCachedCatalog(connectionID: connection.connectionID)
+        XCTAssertTrue(store.verificationNotice?.contains("完了") == true)
+        XCTAssertTrue(store.isVerificationCandidate(
+            connectionID: connection.connectionID, expectedRevision: connection.revision, model: second))
+
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            expectedModel: second, confirmation: .sendTestPromptAndMayCharge)
+        let requests = await client.verificationRequests
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertNotEqual(requests[0].requestID, requests[1].requestID)
+        XCTAssertFalse(store.verificationNotice?.contains("未確定") == true)
+    }
+
+    func testPostProbeConfigurationConflictKeepsTheSameRequestID() async {
+        let connection = MinutesModelFixtures.connection(providerID: .openAICompatibleAPI)
+        let candidate = MinutesModelFixtures.model(
+            id: "compatible-candidate", availability: .unverified, provider: "openai-compatible-api")
+        let client = FakeMinutesCatalogClient(
+            connections: [connection], pages: ["first": MinutesModelFixtures.catalog(models: [candidate])],
+            verificationFailures: [.configurationConflict, .transport])
+        let store = MinutesModelCatalogStore(
+            client: client, supportedProviders: ["openai-compatible-api"], modelVerificationSupported: true)
+        await store.loadCachedCatalog(connectionID: connection.connectionID)
+
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            expectedModel: candidate, confirmation: .sendTestPromptAndMayCharge)
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            expectedModel: candidate, confirmation: .sendTestPromptAndMayCharge)
+
+        let requests = await client.verificationRequests
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(requests[0].requestID, requests[1].requestID)
+    }
+
+    func testPreAcceptanceVerificationRejectionAllowsANewRequestID() async {
+        let connection = MinutesModelFixtures.connection(providerID: .openAICompatibleAPI)
+        let candidate = MinutesModelFixtures.model(
+            id: "compatible-candidate", availability: .unverified, provider: "openai-compatible-api")
+        let client = FakeMinutesCatalogClient(
+            connections: [connection], pages: ["first": MinutesModelFixtures.catalog(models: [candidate])],
+            verificationFailures: [.invalidArgument])
+        let store = MinutesModelCatalogStore(
+            client: client, supportedProviders: ["openai-compatible-api"], modelVerificationSupported: true)
+        await store.loadCachedCatalog(connectionID: connection.connectionID)
+
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            expectedModel: candidate, confirmation: .sendTestPromptAndMayCharge)
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            expectedModel: candidate, confirmation: .sendTestPromptAndMayCharge)
+
+        let requests = await client.verificationRequests
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertNotEqual(requests[0].requestID, requests[1].requestID)
+    }
+
+    func testSuccessfulVerificationSurvivesCachedCatalogReloadFailureWithoutASecondCharge() async {
+        let connection = MinutesModelFixtures.connection(providerID: .openAICompatibleAPI)
+        let candidate = MinutesModelFixtures.model(
+            id: "compatible-candidate", availability: .unverified, provider: "openai-compatible-api")
+        let client = FakeMinutesCatalogClient(
+            connections: [connection], pages: ["first": MinutesModelFixtures.catalog(models: [candidate])])
+        let store = MinutesModelCatalogStore(
+            client: client, supportedProviders: ["openai-compatible-api"], modelVerificationSupported: true)
+        await store.loadCachedCatalog(connectionID: connection.connectionID)
+        await client.failNextRequest()
+
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision, expectedModel: candidate,
+            confirmation: .sendTestPromptAndMayCharge)
+
+        XCTAssertNil(store.errorMessage)
+        XCTAssertTrue(store.verificationNotice?.contains("検証は完了") == true)
+        XCTAssertEqual(store.catalogs[connection.connectionID]?.models.first {
+            $0.modelID == candidate.modelID
+        }?.availability, .available)
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision, expectedModel: candidate,
+            confirmation: .sendTestPromptAndMayCharge)
+        let requests = await client.verificationRequests
+        XCTAssertEqual(requests.count, 1)
+    }
+
+    func testVerificationNeverUsesAChangedConnectionRevision() async {
+        let connection = MinutesModelFixtures.connection(providerID: .claudeAgentSDK)
+        let candidate = MinutesModelFixtures.model(
+            id: "claude-candidate", availability: .unverified, provider: "claude-agent-sdk")
+        let client = FakeMinutesCatalogClient(
+            connections: [connection], pages: ["first": MinutesModelFixtures.catalog(models: [candidate])])
+        let store = MinutesModelCatalogStore(
+            client: client, supportedProviders: ["claude-agent-sdk"], modelVerificationSupported: true)
+        await store.loadCachedCatalog(connectionID: connection.connectionID)
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision + 1, expectedModel: candidate,
+            confirmation: .sendTestPromptAndMayCharge)
+        let requests = await client.verificationRequests
+        XCTAssertTrue(requests.isEmpty)
+    }
+
+    func testVerificationConfirmationRejectsAChangedModelDescriptor() async {
+        let connection = MinutesModelFixtures.connection(providerID: .openAICompatibleAPI)
+        let confirmed = MinutesModelFixtures.model(
+            id: "compatible-candidate", availability: .unverified,
+            provider: "openai-compatible-api", maxOutputTokens: nil)
+        let changed = MinutesModelFixtures.model(
+            id: confirmed.modelID, availability: .unverified,
+            provider: "openai-compatible-api", maxOutputTokens: 2048)
+        let client = FakeMinutesCatalogClient(
+            connections: [connection], pages: ["first": MinutesModelFixtures.catalog(models: [confirmed])])
+        let store = MinutesModelCatalogStore(
+            client: client, supportedProviders: ["openai-compatible-api"], modelVerificationSupported: true)
+        await store.loadCachedCatalog(connectionID: connection.connectionID)
+        await client.replace(
+            connections: [connection], pages: ["first": MinutesModelFixtures.catalog(models: [changed])])
+        await store.loadCachedCatalog(connectionID: connection.connectionID)
+
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            expectedModel: confirmed, confirmation: .sendTestPromptAndMayCharge)
+
+        let requests = await client.verificationRequests
+        XCTAssertTrue(requests.isEmpty)
+        XCTAssertTrue(store.verificationNotice?.contains("送信しませんでした") == true)
+    }
+
+    func testVerificationMergePreservesExistingPageOrder() async {
+        let connection = MinutesModelFixtures.connection(providerID: .openAICompatibleAPI)
+        let before = MinutesModelFixtures.model(id: "before", provider: "openai-compatible-api")
+        let candidate = MinutesModelFixtures.model(
+            id: "compatible-candidate", availability: .unverified, provider: "openai-compatible-api")
+        let after = MinutesModelFixtures.model(id: "after", provider: "openai-compatible-api")
+        let page = MinutesModelFixtures.catalog(models: [before, candidate, after], cursor: "next-page")
+        let client = FakeMinutesCatalogClient(
+            connections: [connection], pages: ["first": page], postVerificationPage: page)
+        let store = MinutesModelCatalogStore(
+            client: client, supportedProviders: ["openai-compatible-api"], modelVerificationSupported: true)
+        await store.loadCachedCatalog(connectionID: connection.connectionID)
+
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            expectedModel: candidate, confirmation: .sendTestPromptAndMayCharge)
+
+        XCTAssertEqual(
+            store.catalogs[connection.connectionID]?.models.map(\.modelID),
+            [before.modelID, candidate.modelID, after.modelID])
+        XCTAssertEqual(store.catalogs[connection.connectionID]?.models[1].availability, .available)
+        XCTAssertEqual(store.catalogs[connection.connectionID]?.nextCursor, "next-page")
+    }
+
+    func testLaterRetiredCatalogNeverGetsRevivedByVerificationReceipt() async {
+        let connection = MinutesModelFixtures.connection(providerID: .claudeAgentSDK)
+        let candidate = MinutesModelFixtures.model(
+            id: "claude-candidate", availability: .unverified, provider: "claude-agent-sdk")
+        let retired = MinutesModelFixtures.model(
+            id: candidate.modelID, availability: .retired, provider: "claude-agent-sdk")
+        let client = FakeMinutesCatalogClient(
+            connections: [connection], pages: ["first": MinutesModelFixtures.catalog(models: [candidate])],
+            postVerificationPage: MinutesModelFixtures.catalog(models: [retired]))
+        let store = MinutesModelCatalogStore(
+            client: client, supportedProviders: ["claude-agent-sdk"], modelVerificationSupported: true)
+        await store.loadCachedCatalog(connectionID: connection.connectionID)
+
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            expectedModel: candidate, confirmation: .sendTestPromptAndMayCharge)
+
+        XCTAssertEqual(store.catalogs[connection.connectionID]?.models.first?.availability, .retired)
+        XCTAssertTrue(store.verificationNotice?.contains("利用不可") == true)
+        let requests = await client.verificationRequests
+        XCTAssertEqual(requests.count, 1)
+    }
+
+    func testLaterStaleCatalogIsNotPromotedOrReprobed() async {
+        let connection = MinutesModelFixtures.connection(providerID: .openAICompatibleAPI)
+        let candidate = MinutesModelFixtures.model(
+            id: "compatible-candidate", availability: .unverified, provider: "openai-compatible-api")
+        let client = FakeMinutesCatalogClient(
+            connections: [connection], pages: ["first": MinutesModelFixtures.catalog(models: [candidate])],
+            postVerificationPage: MinutesModelFixtures.catalog(models: [candidate], state: .stale))
+        let store = MinutesModelCatalogStore(
+            client: client, supportedProviders: ["openai-compatible-api"], modelVerificationSupported: true)
+        await store.loadCachedCatalog(connectionID: connection.connectionID)
+
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            expectedModel: candidate, confirmation: .sendTestPromptAndMayCharge)
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            expectedModel: candidate, confirmation: .sendTestPromptAndMayCharge)
+
+        XCTAssertEqual(store.catalogs[connection.connectionID]?.catalogState, .stale)
+        XCTAssertEqual(store.catalogs[connection.connectionID]?.models.first?.availability, .unverified)
+        let requests = await client.verificationRequests
+        XCTAssertEqual(requests.count, 1)
+    }
+
+    func testLaterReadyDemotionCanBeExplicitlyReverified() async {
+        let connection = MinutesModelFixtures.connection(providerID: .openAICompatibleAPI)
+        let candidate = MinutesModelFixtures.model(
+            id: "compatible-candidate", availability: .unverified, provider: "openai-compatible-api")
+        let client = FakeMinutesCatalogClient(
+            connections: [connection], pages: ["first": MinutesModelFixtures.catalog(models: [candidate])])
+        let store = MinutesModelCatalogStore(
+            client: client, supportedProviders: ["openai-compatible-api"], modelVerificationSupported: true)
+        await store.loadCachedCatalog(connectionID: connection.connectionID)
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            expectedModel: candidate, confirmation: .sendTestPromptAndMayCharge)
+
+        // A later server/runtime decision may revoke the previous proof while keeping
+        // the refreshed catalog ready. The UI must allow a new explicit confirmation.
+        await store.loadCachedCatalog(connectionID: connection.connectionID)
+        XCTAssertTrue(store.isVerificationCandidate(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            model: candidate))
+        await store.verifyModel(
+            connectionID: connection.connectionID, expectedRevision: connection.revision,
+            expectedModel: candidate, confirmation: .sendTestPromptAndMayCharge)
+
+        let requests = await client.verificationRequests
+        XCTAssertEqual(requests.count, 2)
+    }
+
     func testCapabilityRevocationDiscardsLateCatalogAndBlocksSaving() async {
         let client = FakeMinutesCatalogClient(holdModels: true)
         let store = MinutesModelCatalogStore(client: client, supportedProviders: ["codex-app-server"])
@@ -182,20 +634,33 @@ final class MinutesModelCatalogStoreTests: XCTestCase {
 
 private actor FakeMinutesCatalogClient: MinutesModelCatalogClient {
     private(set) var requests: [ListProviderModelsRequest] = []
+    private(set) var verificationRequests: [VerifyProviderModelRequest] = []
     private var connections: [ProviderConnection]
     private var pages: [String: ListProviderModelsResponse]
     private let holdModels: Bool
+    private let verificationFails: Bool
+    private var verificationFailures: [ProviderSettingsErrorCode]
+    private var detailedVerificationFailures: [ProviderSettingsFailure]
+    private let postVerificationPage: ListProviderModelsResponse?
     private var shouldFail = false
     private var started: CheckedContinuation<Void, Never>?
     private var release: CheckedContinuation<Void, Never>?
 
     init(
         connections: [ProviderConnection] = [MinutesModelFixtures.connection()],
-        pages: [String: ListProviderModelsResponse] = ["first": MinutesModelFixtures.catalog()], holdModels: Bool = false
+        pages: [String: ListProviderModelsResponse] = ["first": MinutesModelFixtures.catalog()],
+        holdModels: Bool = false, verificationFails: Bool = false,
+        verificationFailures: [ProviderSettingsErrorCode] = [],
+        detailedVerificationFailures: [ProviderSettingsFailure] = [],
+        postVerificationPage: ListProviderModelsResponse? = nil
     ) {
         self.connections = connections
         self.pages = pages
         self.holdModels = holdModels
+        self.verificationFails = verificationFails
+        self.verificationFailures = verificationFailures
+        self.detailedVerificationFailures = detailedVerificationFailures
+        self.postVerificationPage = postVerificationPage
     }
 
     func listProviderConnections() async throws -> ListProviderConnectionsResponse {
@@ -213,6 +678,26 @@ private actor FakeMinutesCatalogClient: MinutesModelCatalogClient {
         if holdModels { await withCheckedContinuation { release = $0 } }
         if shouldFail { throw FixtureUpstreamFailure() }
         guard let response = pages[request.cursor ?? "first"] else { throw ProviderSettingsFailure(.notFound) }
+        return response
+    }
+
+    func verifyProviderModel(_ request: VerifyProviderModelRequest) async throws -> VerifyProviderModelResponse {
+        verificationRequests.append(request)
+        if !detailedVerificationFailures.isEmpty {
+            throw detailedVerificationFailures.removeFirst()
+        }
+        if !verificationFailures.isEmpty {
+            throw ProviderSettingsFailure(verificationFailures.removeFirst())
+        }
+        if verificationFails { throw ProviderSettingsFailure(.transport) }
+        guard let connection = connections.first(where: { $0.connectionID == request.connectionID }) else {
+            throw ProviderSettingsFailure(.notFound)
+        }
+        let response = VerifyProviderModelResponse(
+            connectionID: request.connectionID, connectionRevision: request.expectedRevision,
+            model: MinutesModelFixtures.model(id: request.modelID, provider: connection.providerID.rawValue),
+            catalogState: .ready, verifiedAt: ProviderSettingsFixtures.timestamp)
+        if let postVerificationPage { pages["first"] = postVerificationPage }
         return response
     }
 

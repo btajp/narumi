@@ -75,7 +75,7 @@ def test_real_contracts_get_clear_flags_only_for_nullable_top_level_properties()
         "set_gaia_connection": {"url", "api_key"},
         "set_profile": {"scope", "engagement"},
         "set_meeting_config": {"self_name", "new_scope", "minutes_model", "transcription_model"},
-        "set_provider_connection": {"api_key"},
+        "set_provider_connection": {"api_key", "chat_max_tokens_field"},
         "list_provider_models": {"cursor"},
     }
     for contract in load_contracts():

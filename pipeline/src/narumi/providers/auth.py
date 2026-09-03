@@ -36,6 +36,13 @@ class Authentication:
     def status(self, args: dict[str, Any]) -> dict[str, Any]:
         document = self.service.store.read()
         operation = self._lookup(document, args)
+        self.service.requests.reject_secret_identifiers(
+            document,
+            {
+                "connection_id": args["connection_id"],
+                "start_request_id": operation["start_request_id"],
+            },
+        )
         return {"operation": self.codex.public_operation(document, operation)}
 
     def _start(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -51,9 +58,17 @@ class Authentication:
             check_provider_idle(document, record["provider_id"])
             if record["provider_id"] == "codex-app-server":
                 self.codex.require_ready(document)
-                record["credential_present"] = False
                 invalidate_checks(document, record)
             operation = self._operation(record, args)
+            if record["provider_id"] == "codex-app-server" and not (
+                service.codex_backend.register_auth_generation(
+                    record["connection_id"],
+                    operation_id=operation["operation_id"],
+                    replace=True,
+                    cleanup_required=False,
+                )
+            ):
+                raise NarumiError("Codex authentication generation could not be registered")
             document["auth_operations"][operation["operation_id"]] = operation
             record["active_auth"] = self._active(operation)
             record["auth_state"] = "authenticating"
@@ -114,10 +129,33 @@ class Authentication:
     def _submission_failed(self, operation_id: str, snapshot: dict[str, Any]) -> None:
         try:
             with self.service.store.transaction() as document:
-                self.service.catalog.release_check(document, snapshot["provider_id"], operation_id)
                 operation = document["auth_operations"].get(operation_id)
                 if operation is None or operation["state"] != "pending":
                     return
+                record = document["connections"].get(snapshot["connection_id"])
+                if (
+                    snapshot["provider_id"] == "codex-app-server"
+                    and operation["action"] == "logout"
+                ):
+                    operation.update(
+                        state="unknown",
+                        authorization_url=None,
+                        user_code=None,
+                        reason="authentication_operation_interrupted",
+                        updated_at=timestamp(),
+                    )
+                    if (
+                        record is not None
+                        and record["active_auth"] is not None
+                        and record["active_auth"]["operation_id"] == operation_id
+                    ):
+                        record.update(
+                            active_auth=self._active(operation),
+                            auth_state="unknown",
+                            checked_at=None,
+                        )
+                    return
+                self.service.catalog.release_check(document, snapshot["provider_id"], operation_id)
                 operation.update(
                     state="failed",
                     authorization_url=None,
@@ -125,7 +163,6 @@ class Authentication:
                     reason="authentication_verification_unavailable",
                     updated_at=timestamp(),
                 )
-                record = document["connections"].get(snapshot["connection_id"])
                 if (
                     record is not None
                     and record["active_auth"] is not None
@@ -139,7 +176,9 @@ class Authentication:
 
     def _cancel(self, args: dict[str, Any]) -> dict[str, Any]:
         service = self.service
-        cancel_codex = False
+        codex_cleanup_action = None
+        cleanup_required = False
+        cancellation_token = None
         with service.store.transaction() as document:
             fingerprint, replay = self._replay(document, args)
             if replay is not None:
@@ -149,37 +188,160 @@ class Authentication:
             operation = self._lookup(document, args)
             if operation["state"] in ("pending", "unknown"):
                 active = record["active_auth"]
-                cancel_codex = (
+                if (
                     record["provider_id"] == "codex-app-server"
                     and active is not None
                     and active["operation_id"] == operation["operation_id"]
-                    and operation["action"] == "start"
-                )
-                operation.update(
-                    state="cancelled",
-                    authorization_url=None,
-                    user_code=None,
-                    reason="authentication_cancelled",
-                    updated_at=timestamp(),
-                )
-                if active is not None and active["operation_id"] == operation["operation_id"]:
-                    record["active_auth"] = None
-                    record["auth_state"] = (
-                        "unverified"
-                        if record["credential_present"] or record["auth_method"] == "none"
-                        else "unconfigured"
+                    and operation["action"] in ("start", "logout")
+                ):
+                    codex_cleanup_action = operation["action"]
+                    cleanup_required = (
+                        codex_cleanup_action == "start" and not record["credential_present"]
+                    )
+                    check = document["checks"].get(record["provider_id"])
+                    if check is not None and (
+                        check["connection_id"] != record["connection_id"]
+                        or check.get("kind")
+                        != ("authentication" if codex_cleanup_action == "start" else "logout")
+                        or check["token"] != operation["operation_id"]
+                    ):
+                        raise BusyError("Provider authentication cancellation is active")
+                    cancellation_token = uuid.uuid4().hex
+                    self._mark_codex_cancellation_unknown(
+                        document,
+                        record,
+                        operation["operation_id"],
+                        reason="authentication_cancellation_unresolved",
+                    )
+                    document["checks"][record["provider_id"]] = {
+                        "token": cancellation_token,
+                        "server_instance_id": service.server_instance_id,
+                        "connection_id": record["connection_id"],
+                        "kind": "authentication_cancel",
+                    }
+                else:
+                    self._finish_codex_cancellation(
+                        document,
+                        record,
+                        operation["operation_id"],
+                        reason="authentication_cancelled",
                     )
             self.codex.forget(operation["operation_id"])
             receipt = service.requests.accept(document, args, fingerprint)
-            response = service.requests.complete(receipt, {"operation": operation})
-        if cancel_codex:
+            if codex_cleanup_action is None:
+                response = service.requests.complete(receipt, {"operation": operation})
+        if codex_cleanup_action is not None:
             try:
-                service.codex_backend.cancel_auth(
-                    args["connection_id"], operation_id=operation["operation_id"]
-                )
+                if codex_cleanup_action == "logout":
+                    service.codex_backend.logout(args["connection_id"])
+                else:
+                    registered = service.codex_backend.register_auth_generation(
+                        args["connection_id"],
+                        operation_id=operation["operation_id"],
+                        replace=False,
+                        cleanup_required=cleanup_required,
+                    )
+                    cleaned = registered and service.codex_backend.cancel_auth(
+                        args["connection_id"], operation_id=operation["operation_id"]
+                    )
+                    if not cleaned:
+                        raise NarumiError("Codex authentication generation is no longer current")
             except Exception:
+                self._codex_cancellation_failed(
+                    args["request_id"], record["provider_id"], cancellation_token
+                )
                 raise NarumiError("Provider authentication cancellation is unresolved") from None
+            try:
+                with service.store.transaction() as document:
+                    service.catalog.release_check(
+                        document, record["provider_id"], cancellation_token
+                    )
+                    current = connection(document, args["connection_id"])
+                    check_revision(current, args["expected_revision"])
+                    current_operation = self._finish_codex_cancellation(
+                        document,
+                        current,
+                        operation["operation_id"],
+                        reason="authentication_cancelled",
+                    )
+                    return service.requests.complete(
+                        document["requests"][args["request_id"]],
+                        {"operation": current_operation},
+                    )
+            except Exception:
+                self._codex_cancellation_failed(
+                    args["request_id"], record["provider_id"], cancellation_token
+                )
+                raise NarumiError(
+                    "Provider authentication cancellation could not be confirmed"
+                ) from None
         return response
+
+    def _mark_codex_cancellation_unknown(
+        self,
+        document: dict[str, Any],
+        record: dict[str, Any],
+        operation_id: str,
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        operation = document["auth_operations"].get(operation_id)
+        if operation is None:
+            raise NarumiError("Provider authentication cancellation state is unavailable")
+        operation.update(
+            state="unknown",
+            authorization_url=None,
+            user_code=None,
+            reason=reason,
+            updated_at=timestamp(),
+        )
+        record["active_auth"] = self._active(operation)
+        record["auth_state"] = "unknown"
+        return operation
+
+    def _finish_codex_cancellation(
+        self,
+        document: dict[str, Any],
+        record: dict[str, Any],
+        operation_id: str,
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        operation = document["auth_operations"].get(operation_id)
+        if operation is None:
+            raise NarumiError("Provider authentication cancellation state is unavailable")
+        operation.update(
+            state="cancelled",
+            authorization_url=None,
+            user_code=None,
+            reason=reason,
+            updated_at=timestamp(),
+        )
+        active = record.get("active_auth")
+        if active is not None and active["operation_id"] == operation_id:
+            record["active_auth"] = None
+            record["auth_state"] = (
+                "unverified"
+                if record["credential_present"] or record["auth_method"] == "none"
+                else "unconfigured"
+            )
+        return operation
+
+    def _codex_cancellation_failed(
+        self,
+        request_id: str,
+        provider_id: str,
+        token: str | None,
+    ) -> None:
+        try:
+            with self.service.store.transaction() as document:
+                if token is not None:
+                    self.service.catalog.release_check(document, provider_id, token)
+                receipt = document["requests"].get(request_id)
+                if receipt is not None and receipt.get("response") is None:
+                    receipt["state"] = "unknown"
+        except Exception:
+            pass
 
     def _logout(self, args: dict[str, Any]) -> dict[str, Any]:
         service = self.service
@@ -226,7 +388,9 @@ class Authentication:
         document: dict[str, Any],
         args: dict[str, Any],
     ) -> tuple[dict[str, str], dict[str, Any] | None]:
-        fingerprint = self.service.requests.fingerprint("authenticate_provider_connection", args)
+        fingerprint = self.service.requests.fingerprint(
+            "authenticate_provider_connection", args, document=document
+        )
         replay = self.service.requests.replay(document, args, fingerprint)
         if replay is not None:
             operation = document["auth_operations"].get(replay["operation"]["operation_id"])

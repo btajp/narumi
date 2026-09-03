@@ -31,6 +31,7 @@ HANDLERS: dict[str, Handler] = {
     "get_provider_auth_status": providers.get_provider_auth_status,
     "test_provider_connection": providers.test_provider_connection,
     "list_provider_models": providers.list_provider_models,
+    "verify_provider_model": providers.verify_provider_model,
     "start_recording": recording.start_recording,
     "stop_recording": recording.stop_recording,
     "get_recording_status": recording.get_recording_status,

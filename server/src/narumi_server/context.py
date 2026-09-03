@@ -51,7 +51,9 @@ class ServerContext:
     provider_secret_store: SecretStore | None = field(default=None, repr=False)
     provider_metadata_client: MetadataClient | None = field(default=None, repr=False)
     provider_codex_backend: Any | None = field(default=None, repr=False)
+    provider_claude_backend: Any | None = field(default=None, repr=False)
     provider_http_backend: Any | None = field(default=None, repr=False)
+    provider_openai_compatible_backend: Any | None = field(default=None, repr=False)
     provider_audio_backend: Any | None = field(default=None, repr=False)
     transports: list[str] = field(default_factory=list)
     validate_output: bool = False
@@ -74,7 +76,9 @@ class ServerContext:
                 secret_store=self.provider_secret_store,
                 metadata_client=self.provider_metadata_client,
                 codex_backend=self.provider_codex_backend,
+                claude_backend=self.provider_claude_backend,
                 http_backend=self.provider_http_backend,
+                openai_compatible_backend=self.provider_openai_compatible_backend,
                 audio_backend=self.provider_audio_backend,
                 recover="streamable-http" in self.transports,
                 contracts=self.contracts,
@@ -179,7 +183,9 @@ def build_context(
     provider_secret_store: SecretStore | None = None,
     provider_metadata_client: MetadataClient | None = None,
     provider_codex_backend: Any | None = None,
+    provider_claude_backend: Any | None = None,
     provider_http_backend: Any | None = None,
+    provider_openai_compatible_backend: Any | None = None,
     provider_audio_backend: Any | None = None,
     server_instance_id: str | None = None,
 ) -> ServerContext:
@@ -210,7 +216,9 @@ def build_context(
         provider_secret_store=provider_secret_store,
         provider_metadata_client=provider_metadata_client,
         provider_codex_backend=provider_codex_backend,
+        provider_claude_backend=provider_claude_backend,
         provider_http_backend=provider_http_backend,
+        provider_openai_compatible_backend=provider_openai_compatible_backend,
         provider_audio_backend=provider_audio_backend,
         server_instance_id=server_instance_id if server_instance_id is not None else str(uuid4()),
         transports=list(transports),

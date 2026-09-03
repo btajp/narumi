@@ -1,7 +1,7 @@
 {
   "name": "get_server_info",
   "title": "Get server info",
-  "description": "Return the narumi server identity, version, capabilities and diagnostics. `capabilities` reports whether recording can be attempted on this machine (narumi-recorder binary present and microphone permission not known to be denied; `permissions` gives the state from `narumi-recorder check`), permission_setup_in_progress, the active transports, and registry names of installed engines, providers and exporters. `recording` and `permissions` use the same permission snapshot. Set refresh_permissions=true to bypass the short permission cache after returning from macOS settings; while a permission action is in progress, the current cached report may be returned instead and permission_setup_in_progress remains true. This read-only tool never triggers a permission prompt. `diagnostics` reports resolved ffmpeg / ffprobe binaries, data and meetings roots, catalog path, recorder path and loaded contracts directory. Call with empty arguments first to detect the contract version. Contract major 5 adds explicit API transcription selection. Provider connection, model discovery, text-minutes stage selection and API transcription selection require their workflow capability flags and the resident streamable-http transport. The minutes_model_providers and transcription_model_providers capability arrays report implemented generation paths separately from connection readiness. transcription_model_providers is [openai-api] only for the resident streamable-http server and [] for other transports. Ensemble generation remains unavailable in this version. secure_transport describes required protection, never trusted bootstrap pins or tokens. On failure returns an error_envelope (isError=true) with code: internal.",
+  "description": "Return the narumi server identity, version, capabilities and diagnostics. `capabilities` reports whether recording can be attempted on this machine (narumi-recorder binary present and microphone permission not known to be denied; `permissions` gives the state from `narumi-recorder check`), permission_setup_in_progress, the active transports, and registry names of installed engines, providers and exporters. `recording` and `permissions` use the same permission snapshot. Set refresh_permissions=true to bypass the short permission cache after returning from macOS settings; while a permission action is in progress, the current cached report may be returned instead and permission_setup_in_progress remains true. This read-only tool never triggers a permission prompt. `diagnostics` reports resolved ffmpeg / ffprobe binaries, data and meetings roots, catalog path, recorder path and loaded contracts directory. Call with empty arguments first to detect the contract version. Contract major 6 adds the OpenAI-compatible provider, Claude Agent SDK explicit minutes generation and explicit per-model verification. Provider connection, model discovery, model verification, text-minutes stage selection and API transcription selection require their workflow capability flags and the resident streamable-http transport. The minutes_model_providers and transcription_model_providers capability arrays report implemented generation paths separately from connection readiness. Resident servers return all six minutes providers in canonical UI order. OpenAI-compatible and Claude Agent SDK candidates remain unverified until verify_provider_model succeeds. transcription_model_providers is [openai-api] only for the resident streamable-http server and [] for other transports. Ensemble generation remains unavailable in this version. secure_transport describes required protection, never trusted bootstrap pins or tokens. On failure returns an error_envelope (isError=true) with code: internal.",
   "annotations": {
     "readOnlyHint": true,
     "destructiveHint": false,
@@ -122,7 +122,7 @@
               "$ref": "../defs/provider_models.json#/$defs/minutes_model_provider"
             },
             "uniqueItems": true,
-            "description": "Adapters implemented for explicit text-only minutes_model selection, independent of whether a connection is authenticated, prepared or has available models. An empty array means this server cannot execute explicit minutes models. Claude Agent SDK generation is excluded. UI and CLI must also validate connection, catalog and policy before selection or generation."
+            "description": "Adapters implemented for explicit text-only minutes_model selection in canonical UI order, independent of whether a connection is authenticated, prepared or has available models. The resident server advertises all six. An empty array means this server cannot execute explicit minutes models. UI and CLI must also validate connection, catalog, explicit model verification and policy before selection or generation."
           },
           "export_destinations": {
             "type": "array",
@@ -274,6 +274,7 @@
                   "const": {
                     "provider_connections": true,
                     "provider_models": true,
+                    "provider_model_verification": true,
                     "stage_model_selection": true,
                     "ensemble_generation": false
                   }
@@ -281,9 +282,11 @@
                 "minutes_model_providers": {
                   "const": [
                     "codex-app-server",
+                    "claude-agent-sdk",
+                    "openai-api",
+                    "openai-compatible-api",
                     "anthropic-api",
-                    "ollama",
-                    "openai-api"
+                    "ollama"
                   ]
                 },
                 "transcription_model_providers": {
@@ -303,6 +306,7 @@
                   "const": {
                     "provider_connections": false,
                     "provider_models": false,
+                    "provider_model_verification": false,
                     "stage_model_selection": false,
                     "ensemble_generation": false
                   }
@@ -404,7 +408,7 @@
         "name": "narumi",
         "server_version": "0.1.4",
         "server_instance_id": "00000000-0000-4000-8000-000000000001",
-        "contract_version": "5.0.0",
+        "contract_version": "6.0.0",
         "secure_transport": {
           "mode": "pinned_tls",
           "tls_required": true,
@@ -414,6 +418,7 @@
           "workflow": {
             "provider_connections": true,
             "provider_models": true,
+            "provider_model_verification": true,
             "stage_model_selection": true,
             "ensemble_generation": false
           },
@@ -447,9 +452,11 @@
           ],
           "minutes_model_providers": [
             "codex-app-server",
+            "claude-agent-sdk",
+            "openai-api",
+            "openai-compatible-api",
             "anthropic-api",
-            "ollama",
-            "openai-api"
+            "ollama"
           ],
           "transcription_model_providers": [
             "openai-api"
@@ -475,7 +482,7 @@
         "name": "narumi",
         "server_version": "0.1.4",
         "server_instance_id": "00000000-0000-4000-8000-000000000002",
-        "contract_version": "5.0.0",
+        "contract_version": "6.0.0",
         "secure_transport": {
           "mode": "stdio",
           "tls_required": false,
@@ -485,6 +492,7 @@
           "workflow": {
             "provider_connections": false,
             "provider_models": false,
+            "provider_model_verification": false,
             "stage_model_selection": false,
             "ensemble_generation": false
           },

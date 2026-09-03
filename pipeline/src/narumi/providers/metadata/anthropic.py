@@ -68,8 +68,6 @@ def _model(raw: dict[str, Any], *, provider_id: str, fetched_at: str) -> dict[st
     is_sdk = provider_id == "claude-agent-sdk"
     if is_sdk:
         availability, reason = "unverified", "sdk_authentication_and_history_isolation_unverified"
-    elif image_input is None:
-        availability, reason = "unverified", "model_capabilities_unavailable"
     else:
         availability, reason = "available", None
     return {

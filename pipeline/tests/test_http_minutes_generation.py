@@ -434,18 +434,37 @@ class Opener:
         return self.response
 
 
-@pytest.mark.parametrize("status", [400, 401, 403, 404, 429, 500, 502, 503])
-def test_real_http_error_classification_never_exposes_body_or_retries(status, caplog):
+@pytest.mark.parametrize("provider", ["openai-api", "anthropic-api"])
+@pytest.mark.parametrize(
+    "status", [400, 401, 403, 404, 405, 413, 415, 422, 408, 409, 425, 429, 460, 500, 503]
+)
+def test_real_http_error_classification_never_exposes_body_or_retries(provider, status, caplog):
     error = urllib.error.HTTPError(
         ENDPOINTS["openai-api"] + KEY, status, KEY, {}, io.BytesIO(KEY.encode())
     )
     opener = Opener(error)
     expected = AuthenticationRequiredError if status in {401, 403} else EngineUnavailableError
     with pytest.raises(expected) as failure:
-        generate(http=JSONHTTPClient(opener=opener))
-    assert bool(failure.value.details.get("outcome_unknown")) == (status >= 500)
+        generate(provider, http=JSONHTTPClient(opener=opener))
+    assert bool(failure.value.details.get("outcome_unknown")) == (
+        status not in {400, 401, 403, 404, 405, 413, 415, 422}
+    )
     assert error.fp.closed and len(opener.calls) == 1
     assert_private(failure.value, caplog)
+
+
+@pytest.mark.parametrize("provider", ["openai-api", "anthropic-api"])
+@pytest.mark.parametrize("status", [408, 409, 425, 429, 460, 500, 503])
+def test_backend_never_downgrades_ambiguous_http_status_to_known_failure(provider, status):
+    http = FakeHTTP(
+        error=EngineUnavailableError(
+            KEY, details={"reason": "metadata_http_error", "status": status}
+        )
+    )
+    with pytest.raises(EngineUnavailableError) as failure:
+        generate(provider, http=http)
+    assert failure.value.details == {"reason": OUTCOME_UNKNOWN, "outcome_unknown": True}
+    assert len(http.calls) == 1
 
 
 @pytest.mark.parametrize("provider", ["openai-api", "anthropic-api", "ollama"])

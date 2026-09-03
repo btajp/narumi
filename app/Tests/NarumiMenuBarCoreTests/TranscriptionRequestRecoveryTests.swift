@@ -65,8 +65,14 @@ final class TranscriptionRequestRecoveryTests: XCTestCase {
                 config["transcription_model"] = selection
                 var minutes = try RecoveryRecordFixture.minutes()
                 minutes["provider"] = provider
-                let parameters: [String: Any] = provider == "codex-app-server"
-                    ? ["reasoning_effort": "high"] : ["max_tokens": 4096]
+                let parameters: [String: Any]
+                if provider == "codex-app-server" {
+                    parameters = ["reasoning_effort": "high"]
+                } else if provider == "claude-agent-sdk" {
+                    parameters = [:]
+                } else {
+                    parameters = ["max_tokens": 4096]
+                }
                 minutes["parameters"] = parameters
                 config["minutes_model"] = minutes
                 config["language"] = "auto"

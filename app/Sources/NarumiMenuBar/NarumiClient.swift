@@ -9,18 +9,24 @@ struct ToolFailure: Error, Equatable, CustomStringConvertible {
     var code: String
     var message: String
     var transcriptionOutcome: TranscriptionOutcomeUnknownDetails?
+    var providerModelVerification: ProviderModelVerificationFailureEvidence?
 
     var isBusy: Bool { code == "busy" }
     var description: String { "\(code): \(message)" }
 
-    init(code: String, message: String, transcriptionOutcome: TranscriptionOutcomeUnknownDetails? = nil) {
+    init(
+        code: String, message: String, transcriptionOutcome: TranscriptionOutcomeUnknownDetails? = nil,
+        providerModelVerification: ProviderModelVerificationFailureEvidence? = nil
+    ) {
         self.code = code
         self.message = message
         self.transcriptionOutcome = transcriptionOutcome
+        self.providerModelVerification = providerModelVerification
     }
 
     init(from error: MCPClientError) {
         transcriptionOutcome = nil
+        providerModelVerification = nil
         switch error {
         case .tool(let message, let payload):
             if let inner = payload?["error"], let code = inner["code"]?.stringValue {
@@ -33,6 +39,11 @@ struct ToolFailure: Error, Equatable, CustomStringConvertible {
                 if let data = try? inner.serialized(),
                     let decoded = try? JSONDecoder().decode(ToolErrorInfo.self, from: data) {
                     self.transcriptionOutcome = decoded.transcriptionOutcome
+                }
+                if code == ProviderSettingsErrorCode.engineUnavailable.rawValue,
+                    let details = inner["details"], let outcomeUnknown = details["outcome_unknown"]?.boolValue {
+                    self.providerModelVerification = ProviderModelVerificationFailureEvidence(
+                        reason: details["reason"]?.stringValue, outcomeUnknown: outcomeUnknown)
                 }
             } else {
                 self.code = "error"

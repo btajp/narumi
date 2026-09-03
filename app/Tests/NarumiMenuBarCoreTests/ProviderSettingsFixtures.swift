@@ -14,14 +14,20 @@ enum ProviderSettingsFixtures {
         revision: Int = 1, providerID: ProviderID = .anthropicAPI, name: String = "Test connection",
         enabled: Bool = true, credential: Bool = true, authState: ProviderAuthState = .unverified,
         catalogState: ProviderCatalogState = .unfetched, activeAuth: ProviderActiveAuth? = nil,
-        generation: ProviderGenerationState = .never
+        generation: ProviderGenerationState = .never, endpoint: String? = nil,
+        authMethod: ProviderAuthMethod? = nil, apiSurface: ProviderAPISurface? = nil,
+        chatMaxTokensField: ProviderChatMaxTokensField? = nil
     ) -> ProviderConnection {
-        ProviderConnection(
+        let method = authMethod ?? providerID.defaultAuthMethod
+        let destination = endpoint ?? (providerID == .openAICompatibleAPI
+            ? "https://compatible.example.invalid/v1"
+            : ProviderConnectionSettings(providerID: providerID).normalizedEndpoint)
+        return ProviderConnection(
             connectionID: connectionID, revision: revision, providerID: providerID, displayName: name,
-            enabled: enabled,
-            endpoint: ProviderConnectionSettings(providerID: providerID).normalizedEndpoint,
-            authMethod: providerID.supportedAuthMethod,
-            credentialPresent: providerID == .ollama ? false : credential,
+            enabled: enabled, endpoint: destination, authMethod: method,
+            apiSurface: apiSurface ?? (providerID == .openAICompatibleAPI ? .responses : nil),
+            chatMaxTokensField: chatMaxTokensField,
+            credentialPresent: method == .none ? false : credential,
             authState: authState, catalogState: catalogState, checkedAt: nil,
             activeAuth: activeAuth, lastGenerationState: generation)
     }
@@ -35,6 +41,7 @@ enum ProviderSettingsFixtures {
             connectionID: connection.connectionID, revision: revision ?? connection.revision,
             providerID: connection.providerID, displayName: name ?? connection.displayName,
             enabled: enabled ?? connection.enabled, endpoint: connection.endpoint, authMethod: connection.authMethod,
+            apiSurface: connection.apiSurface, chatMaxTokensField: connection.chatMaxTokensField,
             credentialPresent: credential ?? connection.credentialPresent,
             authState: authState ?? connection.authState, catalogState: catalogState ?? connection.catalogState,
             checkedAt: timestamp, activeAuth: activeAuth, lastGenerationState: connection.lastGenerationState)
@@ -57,7 +64,7 @@ enum ProviderSettingsFixtures {
     ) -> ProviderDescriptor {
         ProviderDescriptor(
             providerID: providerID, displayName: ProviderDisplay.name(providerID), roles: [.llm],
-            authMethods: [providerID.supportedAuthMethod], availability: .unverified,
+            authMethods: providerID.supportedAuthMethods, availability: .unverified,
             reason: "adapter_capability_verification_required",
             runtime: ProviderRuntime(
                 state: state, version: nil, catalogRevision: "fixture-v1", resources: [resource],

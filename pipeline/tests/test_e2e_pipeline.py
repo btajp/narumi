@@ -19,7 +19,6 @@ from narumi.errors import (
     EngineUnavailableError,
     InvalidArgumentError,
     NotFoundError,
-    PolicyViolationError,
 )
 from narumi.generate import PLAIN_PLACEHOLDER
 from narumi.models import ExternalSendPolicy, MinutesMeta, Transcript
@@ -227,7 +226,7 @@ def test_full_pipeline_end_to_end(home: Path, tmp_path: Path) -> None:
         assert [h["meeting_id"] for h in hits] == [bundle.meeting_id]
         assert hits[0]["speaker"] == "SPEAKER_00"
 
-    # ---------------------------------------------------------------- policy violation → failed
+    # Legacy Anthropic selection → fixed migration error.
     run_cli(
         home,
         "config",
@@ -235,12 +234,15 @@ def test_full_pipeline_end_to_end(home: Path, tmp_path: Path) -> None:
         "--llm-provider",
         "anthropic-api",
         "--external-send-policy",
-        "local_only",
+        "api_ok",
     )
     bundle = reopen(bundle)
-    with pytest.raises(PolicyViolationError) as excinfo:
+    with pytest.raises(EngineUnavailableError) as excinfo:
         process_meeting(bundle)
-    assert excinfo.value.details["provider"] == "anthropic-api"
+    assert excinfo.value.details == {
+        "provider": "anthropic-api",
+        "reason": "legacy_provider_requires_connection_model_selection",
+    }
     bundle = reopen(bundle)
     assert bundle.manifest.status == "failed"
     assert bundle.manifest.latest_minutes_version == 3  # nothing was generated
@@ -307,10 +309,21 @@ def test_refresh_runs_missing_and_changed_deterministic_stages(home: Path, tmp_p
     assert len(reopen(bundle).manifest.regenerations) == 5
 
     # a failed run leaves status failed and the exception propagates unchanged
-    run_cli(home, "config", bundle.meeting_id, "--llm-provider", "anthropic-api")
+    run_cli(
+        home,
+        "config",
+        bundle.meeting_id,
+        "--llm-provider",
+        "anthropic-api",
+        "--external-send-policy",
+        "api_ok",
+    )
     bundle = reopen(bundle)
-    with pytest.raises(PolicyViolationError):
+    with pytest.raises(EngineUnavailableError) as legacy_failure:
         refresh_meeting(bundle, reason="policy")
+    assert legacy_failure.value.details["reason"] == (
+        "legacy_provider_requires_connection_model_selection"
+    )
     assert reopen(bundle).manifest.status == "failed"
     # … and refresh is also how a failed process job is retried
     run_cli(home, "config", bundle.meeting_id, "--llm-provider", "none")

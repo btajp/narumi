@@ -110,16 +110,26 @@ def test_nonresident_context_does_not_reconcile_an_owner_provider_lease(
     with owner.providers.store.transaction() as document:
         if lease == "authentication":
             operation_id = "auth-" + uuid.uuid4().hex
-            document["auth_operations"][operation_id] = {
+            now = "2026-09-03T00:00:00Z"
+            operation = {
                 "operation_id": operation_id,
                 "connection_id": connection_id,
+                "connection_revision": connection["revision"],
                 "server_instance_id": owner.server_instance_id,
+                "start_request_id": "fixture-owner-authentication",
+                "action": "start",
                 "state": "pending",
                 "authorization_url": None,
                 "user_code": None,
+                "reason": None,
+                "created_at": now,
+                "updated_at": now,
             }
+            document["auth_operations"][operation_id] = operation
             document["connections"][connection_id]["active_auth"] = {
                 "operation_id": operation_id,
+                "start_request_id": operation["start_request_id"],
+                "server_instance_id": owner.server_instance_id,
                 "state": "pending",
             }
         else:
