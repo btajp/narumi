@@ -1,14 +1,23 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "name": "narumi",
-  "contract_version": "6.0.0",
-  "description": "narumi MCP tool contracts v6. Adds six-provider text minutes generation in canonical UI order, an independently configured OpenAI-compatible API, Claude Agent SDK explicit generation, and one-request model verification for compatible and SDK candidates. OpenAI API transcription remains independently selectable. Ensemble generation, speaker reference audio and implicit request fallback or retry are excluded. Shared types live in defs/*.json.",
-  "defs": ["defs/common.json", "defs/providers.json", "defs/provider_connections.json", "defs/provider_models.json", "defs/transcription_models.json"],
+  "contract_version": "6.1.0",
+  "description": "narumi MCP tool contracts v6. Adds six-provider text minutes generation in canonical UI order, an independently configured OpenAI-compatible API, Claude Agent SDK explicit generation, and one-request model verification for compatible and SDK candidates. OpenAI API transcription remains independently selectable. Ensemble generation, speaker reference audio and implicit request fallback or retry are excluded. Shared types live in defs/*.json. Adds explicit recording display selection, local playback MP4 preparation, and visible recording interruption warnings.",
+  "defs": [
+    "defs/common.json",
+    "defs/providers.json",
+    "defs/provider_connections.json",
+    "defs/provider_models.json",
+    "defs/transcription_models.json",
+    "defs/recording.json"
+  ],
   "tools": [
     "get_server_info",
     "configure_recording_permission",
+    "list_recording_displays",
     "start_recording",
     "stop_recording",
+    "prepare_recording",
     "get_recording_status",
     "import_recording",
     "list_meetings",

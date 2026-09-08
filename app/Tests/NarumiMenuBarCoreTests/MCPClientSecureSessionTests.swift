@@ -40,6 +40,11 @@ final class MCPClientSecureSessionTests: XCTestCase {
         XCTAssertEqual(fixture.terminationStatus, 0, result)
         let checks = try JSONDecoder().decode([String: Bool].self, from: Data(result.utf8))
         var expectedChecks: Set<String> = [
+            "failed_capture_stop_unlocks_client",
+            "recording_metadata_omits_minutes_body",
+            "playback_prepare_same_request_recovery",
+            "stale_display_session_rejected", "finalized_stop_without_job_confirmed",
+            "malformed_stop_without_job_uncertain",
             "bootstrap_before_http", "discovery_before_tools", "v6_authenticated_success",
             "v1_rejected", "future_contract_rejected", "missing_tls_rejected",
             "false_client_auth_rejected", "wrong_instance_rejected", "secret_not_replayed",

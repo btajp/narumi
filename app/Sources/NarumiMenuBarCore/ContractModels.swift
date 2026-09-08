@@ -121,31 +121,38 @@ public struct SearchTranscriptsResponse: Codable, Equatable, Sendable {
 
 public struct RecordingStatus: Codable, Equatable, Sendable {
     public var active: Bool
+    public var recorderAlive: Bool?
     public var meetingID: String?
     public var meetingName: String?
     public var startedAt: String?
     public var elapsedSec: Double?
     public var tracks: [String: String]?
+    public var display: RecordingDisplay?
 
     enum CodingKeys: String, CodingKey {
         case active
+        case recorderAlive = "recorder_alive"
         case meetingID = "meeting_id"
         case meetingName = "meeting_name"
         case startedAt = "started_at"
         case elapsedSec = "elapsed_sec"
         case tracks
+        case display
     }
 
     public init(
         active: Bool, meetingID: String? = nil, meetingName: String? = nil,
-        startedAt: String? = nil, elapsedSec: Double? = nil, tracks: [String: String]? = nil
+        startedAt: String? = nil, elapsedSec: Double? = nil, tracks: [String: String]? = nil,
+        display: RecordingDisplay? = nil, recorderAlive: Bool? = nil
     ) {
         self.active = active
+        self.recorderAlive = recorderAlive
         self.meetingID = meetingID
         self.meetingName = meetingName
         self.startedAt = startedAt
         self.elapsedSec = elapsedSec
         self.tracks = tracks
+        self.display = display
     }
 }
 
@@ -224,12 +231,16 @@ public struct MeetingRecordingInfo: Codable, Equatable, Sendable {
     public var stoppedAt: String?
     public var durationSec: Double?
     public var tracks: [String: TrackStatus]
+    public var display: RecordingDisplay?
+    public var recorderError: ToolErrorInfo?
 
     enum CodingKeys: String, CodingKey {
         case startedAt = "started_at"
         case stoppedAt = "stopped_at"
         case durationSec = "duration_sec"
         case tracks
+        case display
+        case recorderError = "recorder_error"
     }
 }
 
@@ -297,6 +308,7 @@ public struct MeetingDetail: Codable, Equatable, Sendable {
     public var latestMinutes: LatestMinutes?
     public var exports: [ExportRecord]
     public var artifacts: [String]
+    public var playback: RecordingPlayback?
 
     enum CodingKeys: String, CodingKey {
         case meeting
@@ -308,6 +320,7 @@ public struct MeetingDetail: Codable, Equatable, Sendable {
         case latestMinutes = "latest_minutes"
         case exports
         case artifacts
+        case playback
     }
 }
 

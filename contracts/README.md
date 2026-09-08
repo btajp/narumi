@@ -19,9 +19,16 @@ contracts/
 - `manifest.json` の `tools` はツール名の配列。`tools/<name>.json` と **過不足なく一致** させる（一致しなければローダーが起動時に `contract_mismatch` を投げる）
 - `manifest.json` の `defs` は共通定義ファイルの相対パス配列。定義名は全ファイルを通して一意
 
-## v6 ツール一覧（38）
+## v6.1 ツール一覧（40）
 
-契約 6.0.0 は、議事録モデル選択を次の 6 系統へ統一する。
+契約 6.1.0 は、録画対象の列挙・指定と、ローカル再生用 MP4 の生成を追加する。
+`list_recording_displays` はメイン画面を含む一覧を返し、`start_recording.display_id` 省略時はメイン画面を使用する。
+`prepare_recording` は過去の録画から統合 MP4 を生成するジョブを受け付け、`get_meeting.playback` が生成済みファイルを返す。
+`stop_recording` は画面保持時に同じ生成を実施し、`auto_process: false` では文字起こし・議事録生成を行わない。
+アプリ終了時は `auto_process: false` と `prepare_playback: false` で変換を保留して元トラックを確定する。
+`get_recording_status.recorder_alive: false` は保存待ちを表し、アプリは公開 `stop_recording` を呼んで保存を完了する。
+
+契約 6.0.0 から、議事録モデル選択を次の 6 系統へ統一する。
 表示順は Codex App Server / Claude Agent SDK / OpenAI API / OpenAI互換API / Anthropic API / Ollama。
 OpenAI互換APIの接続設定と、OpenAI互換API・Claude Agent SDKに対する明示的なモデル検証を追加する。
 既存の `llm_provider` は維持し、文字起こし・発話統合・画像処理へ選択を暗黙に適用しない。
@@ -34,7 +41,7 @@ OpenAI互換APIの接続設定と、OpenAI互換API・Claude Agent SDKに対す�
 |---|---|
 | サーバー | `get_server_info`（capabilities + diagnostics） |
 | 録画権限 | `configure_recording_permission`（許可要求 / 設定を開く。録画しない） |
-| 録画 | `start_recording` / `stop_recording` / `get_recording_status` / `import_recording` |
+| 録画 | `list_recording_displays` / `start_recording` / `stop_recording` / `get_recording_status` / `prepare_recording` / `import_recording` |
 | 会議の閲覧 | `list_meetings`（`active_job` 付き）/ `search_transcripts` / `get_meeting` / `get_transcript` / `get_minutes` |
 | 会議の変更 | `register_context` / `regenerate` / `set_meeting_config` / `discard_tracks` / `delete_meeting` |
 | エクスポート | `export_minutes` / `list_export_destinations` |

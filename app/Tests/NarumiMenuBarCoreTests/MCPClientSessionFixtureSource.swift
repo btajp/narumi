@@ -40,6 +40,7 @@ enum MCPClientSessionFixtureSource {
             case "v1": return "1.1.0"
             case "future_contract": return "7.0.0"
             case "v6_success": return "6.0.0"
+            case "recording_prepare_lost", "recording_stop_finalized": return "6.1.0"
             case "codex_minutes_requests": return "3.0.0"
             case "minutes_requests", "minutes_retry_response_lost": return "4.0.0"
             default: return scenario.hasPrefix("transcription_") ? "5.0.0" : "2.0.0"
@@ -72,6 +73,30 @@ enum MCPClientSessionFixtureSource {
                 ]
                 if scenario == "missing_tls" { info.removeValue(forKey: "secure_transport") }
                 return try structured(request, id: id, value: .object(info))
+            }
+            if name == ToolCatalog.prepareRecording, scenario == "recording_prepare_lost" {
+                if count(name) == 1 { return response(request, status: 404, body: Data()) }
+                return try structured(request, id: id, value: .object([
+                    "meeting_id": .string("20260908T000000Z-a1b2c3d4"),
+                    "job_id": .string("job-0123456789ab"),
+                ]))
+            }
+            if name == ToolCatalog.stopRecording, scenario == "recording_stop_failed" {
+                return try result(request, id: id, value: .object([
+                    "isError": .bool(true), "content": .array([]),
+                    "structuredContent": .object(["error": .object([
+                        "code": .string("recorder_unavailable"), "message": .string("capture process exited"),
+                    ])]),
+                ]))
+            }
+            if name == ToolCatalog.stopRecording, scenario == "recording_stop_finalized" {
+                return try structured(request, id: id, value: .object([
+                    "meeting_id": .string("20260908T000000Z-a1b2c3d4"),
+                    "stopped_at": .string("2026-09-08T00:01:00Z"), "duration_sec": .number(60),
+                    "tracks": .object(["mic": .object([
+                        "path": .string("tracks/mic.m4a"), "discarded": .bool(false),
+                    ])]),
+                ]))
             }
             if name == ToolCatalog.setProviderConnection, scenario == "secret404" {
                 return response(request, status: 404, body: Data(fixtureSecret.utf8))
@@ -393,6 +418,50 @@ enum MCPClientSessionFixtureSource {
                     client: NarumiClient(mcp: manualMCP), wire: manualWire, notifications: notifications, outcome: outcome) {
                     checks["asr_manual_" + outcome + "_" + name] = passed
                 }
+            }
+            let (prepareClient, prepareWire) = client("recording_prepare_lost")
+            let prepareArguments: [String: JSONNode] = [
+                "meeting_id": .string("20260908T000000Z-a1b2c3d4"),
+                "request_id": .string("prepare-recording-recovery"), "scope": .string("cloudnative"),
+            ]
+            _ = try? await prepareClient.callTool(ToolCatalog.prepareRecording, arguments: prepareArguments)
+            let preparePending = await prepareClient.jobRequests.pendingCount
+            await prepareClient.recoverPendingJobCalls()
+            let prepareRecovered = await prepareClient.jobRequests.pendingCount
+            checks["playback_prepare_same_request_recovery"] = preparePending == 1 && prepareRecovered == 0
+                && prepareWire.arguments(ToolCatalog.prepareRecording) == [prepareArguments, prepareArguments]
+            let (failedStop, failedStopWire) = client("recording_stop_failed")
+            _ = try? await failedStop.callTool(ToolCatalog.stopRecording, arguments: [
+                "request_id": .string("failed-recording-stop"),
+            ])
+            await failedStop.recoverPendingJobCalls()
+            let failedStopPending = await failedStop.jobRequests.pendingCount
+            checks["failed_capture_stop_unlocks_client"] = failedStopPending == 0 && failedStopWire.count(ToolCatalog.stopRecording) == 1
+            let (metadataClient, metadataWire) = client("v6_success")
+            _ = try? await NarumiClient(mcp: metadataClient).meeting(
+                id: "20260908T000000Z-a1b2c3d4", scope: "cloudnative")
+            checks["recording_metadata_omits_minutes_body"] = metadataWire.arguments(ToolCatalog.getMeeting).last?["include_minutes"] == .bool(false)
+                && metadataWire.arguments(ToolCatalog.getMeeting).last?["scope"] == .string("cloudnative")
+            let (recordingStart, recordingWire) = client("v6_success")
+            _ = try await recordingStart.callTool(ToolCatalog.listRecordingDisplays, arguments: [:])
+            let selectedGeneration = await recordingStart.operationSessionGeneration
+            await recordingStart.reset()
+            var staleDisplayRejected = false
+            do {
+                _ = try await recordingStart.callTool(ToolCatalog.startRecording, arguments: [
+                    "request_id": .string("display-generation-test"), "display_id": .number(1),
+                ], expectedSessionGeneration: selectedGeneration)
+            } catch { staleDisplayRejected = true }
+            checks["stale_display_session_rejected"] = staleDisplayRejected && recordingWire.count(ToolCatalog.startRecording) == 0
+            for (scenario, key) in [("recording_stop_finalized", "finalized_stop_without_job_confirmed"),
+                ("v6_success", "malformed_stop_without_job_uncertain")] {
+                let (stopping, stopWire) = client(scenario)
+                _ = try? await stopping.callTool(ToolCatalog.stopRecording, arguments: [
+                    "request_id": .string("recording-stop-test"), "auto_process": .bool(false),
+                ])
+                let ledger = await stopping.jobRequests
+                checks[key] = stopWire.count(ToolCatalog.stopRecording) == 1
+                    && ledger.pendingCount == (scenario == "recording_stop_finalized" ? 0 : 1)
             }
             print(String(decoding: try JSONEncoder().encode(checks), as: UTF8.self))
         }

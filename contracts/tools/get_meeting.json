@@ -11,7 +11,9 @@
   "inputSchema": {
     "type": "object",
     "properties": {
-      "meeting_id": { "$ref": "../defs/common.json#/$defs/meeting_id" },
+      "meeting_id": {
+        "$ref": "../defs/common.json#/$defs/meeting_id"
+      },
       "scope": {
         "$ref": "../defs/common.json#/$defs/scope",
         "description": "Omitted = unscoped meetings only. One name = that scope + unscoped. Array of 2+ names = cross-scope lookup (audit-logged)."
@@ -22,7 +24,9 @@
         "default": true
       }
     },
-    "required": ["meeting_id"],
+    "required": [
+      "meeting_id"
+    ],
     "additionalProperties": false
   },
   "outputSchema": {
@@ -39,7 +43,9 @@
       "artifacts"
     ],
     "properties": {
-      "meeting": { "$ref": "../defs/common.json#/$defs/meeting_summary" },
+      "meeting": {
+        "$ref": "../defs/common.json#/$defs/meeting_summary"
+      },
       "bundle_path": {
         "type": "string",
         "description": "Absolute path of the session bundle directory.",
@@ -51,24 +57,54 @@
       },
       "recording": {
         "type": "object",
-        "required": ["started_at", "stopped_at", "duration_sec", "tracks"],
+        "required": [
+          "started_at",
+          "stopped_at",
+          "duration_sec",
+          "tracks"
+        ],
         "properties": {
           "started_at": {
-            "oneOf": [{ "$ref": "../defs/common.json#/$defs/timestamp" }, { "type": "null" }]
+            "oneOf": [
+              {
+                "$ref": "../defs/common.json#/$defs/timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "stopped_at": {
-            "oneOf": [{ "$ref": "../defs/common.json#/$defs/timestamp" }, { "type": "null" }],
+            "oneOf": [
+              {
+                "$ref": "../defs/common.json#/$defs/timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "description": "null while still recording."
           },
           "duration_sec": {
-            "type": ["number", "null"],
+            "type": [
+              "number",
+              "null"
+            ],
             "description": "Recording length in seconds; null while still recording.",
             "minimum": 0
           },
           "tracks": {
             "type": "object",
             "description": "Track name (screen / mic / system) → file status.",
-            "additionalProperties": { "$ref": "../defs/common.json#/$defs/track_status" }
+            "additionalProperties": {
+              "$ref": "../defs/common.json#/$defs/track_status"
+            }
+          },
+          "display": {
+            "$ref": "../defs/recording.json#/$defs/recording_display"
+          },
+          "recorder_error": {
+            "$ref": "../defs/common.json#/$defs/error"
           }
         },
         "additionalProperties": false
@@ -78,17 +114,33 @@
         "description": "External context sources registered with register_context, in registration order.",
         "items": {
           "type": "object",
-          "required": ["context_id", "source_type", "status", "registered_at"],
+          "required": [
+            "context_id",
+            "source_type",
+            "status",
+            "registered_at"
+          ],
           "properties": {
-            "context_id": { "$ref": "../defs/common.json#/$defs/context_id" },
-            "source_type": { "$ref": "../defs/common.json#/$defs/context_source_type" },
+            "context_id": {
+              "$ref": "../defs/common.json#/$defs/context_id"
+            },
+            "source_type": {
+              "$ref": "../defs/common.json#/$defs/context_source_type"
+            },
             "status": {
               "type": "string",
               "description": "stored (raw only) | parsed (available as transcript source ext-<context_id>) | failed.",
               "minLength": 1
             },
-            "registered_at": { "$ref": "../defs/common.json#/$defs/timestamp" },
-            "label": { "type": ["string", "null"] }
+            "registered_at": {
+              "$ref": "../defs/common.json#/$defs/timestamp"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           },
           "additionalProperties": false
         }
@@ -98,10 +150,20 @@
         "description": "All generated minutes versions, ascending. Versions are append-only and never overwritten.",
         "items": {
           "type": "object",
-          "required": ["version", "generated_at", "provider", "path"],
+          "required": [
+            "version",
+            "generated_at",
+            "provider",
+            "path"
+          ],
           "properties": {
-            "version": { "type": "integer", "minimum": 1 },
-            "generated_at": { "$ref": "../defs/common.json#/$defs/timestamp" },
+            "version": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "generated_at": {
+              "$ref": "../defs/common.json#/$defs/timestamp"
+            },
             "provider": {
               "type": "string",
               "description": "LLM provider registry name used for generation (none = plain minutes).",
@@ -121,14 +183,24 @@
         "oneOf": [
           {
             "type": "object",
-            "required": ["version", "markdown"],
+            "required": [
+              "version",
+              "markdown"
+            ],
             "properties": {
-              "version": { "type": "integer", "minimum": 1 },
-              "markdown": { "type": "string" }
+              "version": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "markdown": {
+                "type": "string"
+              }
             },
             "additionalProperties": false
           },
-          { "type": "null" }
+          {
+            "type": "null"
+          }
         ]
       },
       "exports": {
@@ -136,16 +208,28 @@
         "description": "Export history (manifest.exports), in chronological order.",
         "items": {
           "type": "object",
-          "required": ["destination", "ref", "minutes_version", "at"],
+          "required": [
+            "destination",
+            "ref",
+            "minutes_version",
+            "at"
+          ],
           "properties": {
-            "destination": { "$ref": "../defs/common.json#/$defs/export_destination" },
+            "destination": {
+              "$ref": "../defs/common.json#/$defs/export_destination"
+            },
             "ref": {
               "type": "string",
               "description": "Destination-specific reference to the exported document (file path, URL, page id).",
               "minLength": 1
             },
-            "minutes_version": { "type": "integer", "minimum": 1 },
-            "at": { "$ref": "../defs/common.json#/$defs/timestamp" }
+            "minutes_version": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "at": {
+              "$ref": "../defs/common.json#/$defs/timestamp"
+            }
           },
           "additionalProperties": false
         }
@@ -158,6 +242,17 @@
           "pattern": "^[a-z][a-z0-9_-]*(/[A-Za-z0-9._-]+)+$"
         },
         "uniqueItems": true
+      },
+      "playback": {
+        "oneOf": [
+          {
+            "$ref": "../defs/recording.json#/$defs/recording_playback"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Prepared local playback file, or null if not prepared, missing, or invalidated by track discard. prepare_recording creates or repairs it without transcription or external sending."
       }
     },
     "additionalProperties": false
@@ -193,7 +288,9 @@
           "external_send_policy": "local_only",
           "language": "ja",
           "self_name": "岡村",
-          "vocab_hints": ["gaia-library"]
+          "vocab_hints": [
+            "gaia-library"
+          ]
         },
         "recording": {
           "started_at": "2026-08-27T03:05:00Z",

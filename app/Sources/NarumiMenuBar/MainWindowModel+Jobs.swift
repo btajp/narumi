@@ -54,11 +54,17 @@ extension MainWindowModel {
         jobs = jobState.jobs
         notifyJobActivity()
         let selectedFinished = refreshed.contains { job in
-            previousJobs[job.jobID]?.isActive == true && !job.isActive
+            RecordingPlaybackPresentation.shouldRefreshDetail(after: job, previous: previousJobs[job.jobID])
                 && job.meetingID == selectedMeetingID
         }
-        if isPolling && selectedFinished {
+        let playbackPrepared = refreshed.contains { job in
+            job.meetingID == selectedMeetingID
+                && RecordingPlaybackPresentation.shouldRefreshPlayback(after: job, previous: previousJobs[job.jobID])
+        }
+        if isPolling && (selectedFinished || playbackPrepared) {
             await loadDetail()
+        }
+        if isPolling && selectedFinished {
             minutes = nil
             transcript = nil
             await tabChanged()

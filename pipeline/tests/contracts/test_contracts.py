@@ -37,6 +37,8 @@ TOOL_FILE_KEYS = (
 EXPECTED_TOOLS = {
     "get_server_info",
     "configure_recording_permission",
+    "list_recording_displays",
+    "prepare_recording",
     "start_recording",
     "stop_recording",
     "get_recording_status",
@@ -575,6 +577,7 @@ def test_read_only_tools_have_no_request_id_and_write_tools_require_it(
     read_only = {name for name, tool in contracts.tools.items() if tool.read_only}
     write = set(contracts.tools) - read_only
     assert read_only == {
+        "list_recording_displays",
         "get_server_info",
         "get_recording_status",
         "list_meetings",

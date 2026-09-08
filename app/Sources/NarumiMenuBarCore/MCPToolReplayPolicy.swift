@@ -4,7 +4,8 @@ public enum MCPToolReplayPolicy {
     public static func allowsSessionRetry(tool: String, refreshingPermissions: Bool = false) -> Bool {
         if tool == ToolCatalog.getServerInfo { return !refreshingPermissions }
         let reads: Set<String> = [
-            ToolCatalog.getRecordingStatus, ToolCatalog.listMeetings, ToolCatalog.searchTranscripts,
+            ToolCatalog.getRecordingStatus, ToolCatalog.listRecordingDisplays,
+            ToolCatalog.listMeetings, ToolCatalog.searchTranscripts,
             ToolCatalog.getMeeting, ToolCatalog.getMinutes, ToolCatalog.getTranscript,
             ToolCatalog.listExportDestinations, ToolCatalog.getJobStatus, ToolCatalog.listProfiles,
             ToolCatalog.getProfile, ToolCatalog.getGaiaConnection,
@@ -17,9 +18,10 @@ public enum MCPToolReplayPolicy {
         tool: String, autoProcess: Bool? = nil, autoRegenerate: Bool? = nil
     ) -> Bool {
         switch tool {
-        case ToolCatalog.regenerate, ToolCatalog.exportMinutes, ToolCatalog.prepareProviderRuntime:
+        case ToolCatalog.regenerate, ToolCatalog.exportMinutes, ToolCatalog.prepareProviderRuntime,
+            ToolCatalog.prepareRecording, ToolCatalog.stopRecording:
             return true
-        case ToolCatalog.importRecording, ToolCatalog.stopRecording:
+        case ToolCatalog.importRecording:
             return autoProcess != false
         case ToolCatalog.registerContext:
             return autoRegenerate == true

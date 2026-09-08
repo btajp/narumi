@@ -69,7 +69,8 @@ public actor RecorderSession {
 
         sink.emit(.started(StartedEvent(
             startedAt: Timestamps.iso8601(now),
-            tracks: .standard(includeVideo: options.includeVideo)
+            tracks: .standard(includeVideo: options.includeVideo),
+            display: info.display
         )))
         var detail = "capturing display \(info.display.id) (\(info.display.name))"
         if let dims = info.videoDimensions {

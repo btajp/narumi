@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 from pathlib import Path
@@ -98,6 +99,8 @@ def test_start_stop_roundtrip(bundle: Bundle):
     assert ctl.available()
     started = ctl.start(bundle)
     assert set(started.tracks) == {"screen", "mic", "system"}
+    assert started.display["id"] == 1
+    assert started.display["is_main"]
     assert ctl.is_active and ctl.active_meeting_id == bundle.meeting_id
     assert ctl.process_alive
     with pytest.raises(BusyError):
@@ -113,6 +116,106 @@ def test_start_stop_roundtrip(bundle: Bundle):
     started = ctl.start(bundle, no_video=True)
     assert set(started.tracks) == {"mic", "system"}
     assert set(ctl.stop().tracks) == {"mic", "system"}
+
+
+def test_start_selects_requested_display(bundle: Bundle):
+    ctl = RecordingController(FAKE_RECORDER)
+    try:
+        started = ctl.start(bundle, display_id=2)
+        assert started.display["id"] == 2
+        assert not started.display["is_main"]
+    finally:
+        ctl.abort()
+
+
+@pytest.mark.parametrize("display_id", [0, -1, 2**32, True, 1.5, "2"])
+def test_start_rejects_invalid_display_id_without_launching(bundle: Bundle, display_id):
+    ctl = RecordingController(FAKE_RECORDER)
+    with pytest.raises(InvalidArgumentError):
+        ctl.start(bundle, display_id=display_id)
+    assert not ctl.process_alive
+
+
+def test_start_disconnected_display_does_not_fall_back(bundle: Bundle):
+    ctl = RecordingController(FAKE_RECORDER)
+    with pytest.raises(RecorderUnavailableError) as exc:
+        ctl.start(bundle, display_id=9)
+    assert exc.value.details["recorder_code"] == "no_display"
+    assert not ctl.is_active
+
+
+def test_list_displays_is_recording_free():
+    ctl = RecordingController(FAKE_RECORDER)
+    displays = ctl.list_displays()
+    assert [display["id"] for display in displays] == [2, 1]
+    assert [display["id"] for display in displays if display["is_main"]] == [1]
+    assert not ctl.is_active and not ctl.process_alive
+
+
+@pytest.mark.parametrize(
+    "report",
+    ["invalid", "{}", "[null]", '[{"id":true}]', "[1]"],
+)
+def test_list_displays_rejects_malformed_report(monkeypatch, report):
+    monkeypatch.setenv("FAKE_RECORDER_DISPLAYS", report)
+    with pytest.raises(RecorderUnavailableError):
+        RecordingController(FAKE_RECORDER).list_displays()
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("id", 0),
+        ("id", 2**32),
+        ("id", True),
+        ("name", ""),
+        ("width", -1),
+        ("height", True),
+        ("is_main", "true"),
+    ],
+)
+def test_display_fields_are_validated_in_list_and_started(monkeypatch, key, value):
+    display = {"id": 1, "name": "Main", "width": 1920, "height": 1080, "is_main": True}
+    display[key] = value
+    monkeypatch.setenv("FAKE_RECORDER_DISPLAYS", json.dumps([display]))
+    with pytest.raises(RecorderUnavailableError):
+        RecordingController(FAKE_RECORDER).list_displays()
+    with pytest.raises(RecorderUnavailableError):
+        StartedEvent.parse({"started_at": "x", "tracks": {"mic": "mic.wav"}, "display": display})
+
+
+@pytest.mark.parametrize("same_id", [True, False])
+def test_list_displays_rejects_duplicate_ids_or_main_flags(monkeypatch, same_id):
+    display = {"id": 1, "name": "Main", "width": 1920, "height": 1080, "is_main": True}
+    other = {**display, "id": 1 if same_id else 2}
+    monkeypatch.setenv("FAKE_RECORDER_DISPLAYS", json.dumps([display, other]))
+    with pytest.raises(RecorderUnavailableError):
+        RecordingController(FAKE_RECORDER).list_displays()
+
+
+def test_list_displays_maps_recorder_error(monkeypatch):
+    monkeypatch.setenv("FAKE_RECORDER_DISPLAYS_EXIT", "1")
+    monkeypatch.setenv(
+        "FAKE_RECORDER_DISPLAYS",
+        json.dumps({"event": "error", "code": "permission_denied", "message": "screen denied"}),
+    )
+    with pytest.raises(RecorderUnavailableError) as exc:
+        RecordingController(FAKE_RECORDER).list_displays()
+    assert exc.value.details["recorder_code"] == "permission_denied"
+
+
+def test_list_displays_timeout_is_bounded(monkeypatch):
+    monkeypatch.setenv("FAKE_RECORDER_DISPLAYS_DELAY", "5")
+    monkeypatch.setattr("narumi_server.recording.CHECK_TIMEOUT", 0.1)
+    with pytest.raises(RecorderUnavailableError):
+        RecordingController(FAKE_RECORDER).list_displays()
+
+
+def test_list_displays_accepts_empty_and_rejects_missing_binary(monkeypatch, tmp_path):
+    monkeypatch.setenv("FAKE_RECORDER_DISPLAYS", "[]")
+    assert RecordingController(FAKE_RECORDER).list_displays() == []
+    with pytest.raises(RecorderUnavailableError):
+        RecordingController(tmp_path / "missing").list_displays()
 
 
 def test_missing_binary(bundle: Bundle, tmp_path: Path):

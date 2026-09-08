@@ -175,11 +175,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // process job it can never finish (ctx.close would wait on it until our
                     // SIGKILL cuts it mid-transcription). An external server stays alive and
                     // runs the job as usual.
-                    _ = try await client.callTool(ToolCatalog.stopRecording, arguments: [
+                    let result = try await client.callTool(ToolCatalog.stopRecording, arguments: [
                         "request_id": .string(UUID().uuidString),
                         "auto_process": .bool(!stopServer),
+                        "prepare_playback": .bool(!stopServer),
                     ])
                     session.confirmStoppedForShutdown()
+                    if let warning = try recordingStopWarning(from: result) {
+                        presentMessage(title: "録画の保存に問題があります", text: warning)
+                    }
                 } catch {
                     // The managed server finalizes the recording itself at shutdown (without the
                     // process job); an external one does not, so the user must know.
@@ -321,7 +325,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.image = image
         statusItem.button?.toolTip = session.accessibilityLabel
         statusItem.button?.setAccessibilityLabel(session.accessibilityLabel)
-        if recording, let elapsed = session.recording.elapsedSec {
+        if session.recordingNeedsFinalization {
+            stopItem.title = "録画を保存"
+        } else if recording, let elapsed = session.recording.elapsedSec {
             stopItem.title = "録画停止（\(NarumiFormat.duration(elapsed))）"
         } else {
             stopItem.title = "録画停止"
@@ -381,11 +387,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         applyState()
-        guard let options = promptForRecordingOptions() else {
-            session.cancelStart(token)
-            applyState()
-            return
-        }
         Task {
             guard session.isCurrentOperation(token) else {
                 presentMessage(
@@ -398,9 +399,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Task { await refreshServerStatus() }
             }
             do {
+                let displayResult = try await client.callTool(ToolCatalog.listRecordingDisplays, arguments: [:])
+                let currentDisplayGeneration = await client.operationSessionGeneration
+                guard session.isCurrentOperation(token), let displayGeneration = displayResult.sessionGeneration,
+                    displayGeneration == currentDisplayGeneration
+                else { throw MCPConnectionError.connectionChanged }
+                guard let content = displayResult.structuredContent else {
+                    throw MCPClientError.protocolError("録画対象の画面一覧が返されませんでした")
+                }
+                let response = try JSONDecoder().decode(
+                    ListRecordingDisplaysResponse.self, from: content.serialized())
+                let defaultIndex = try response.defaultSelectionIndex()
+                guard let options = promptForRecordingOptions(displays: response.displays, defaultIndex: defaultIndex) else {
+                    session.cancelStart(token)
+                    return
+                }
+                let currentStartGeneration = await client.operationSessionGeneration
+                guard session.isCurrentOperation(token), displayGeneration == currentStartGeneration
+                else { throw MCPConnectionError.connectionChanged }
                 var arguments: [String: JSONNode] = [
                     "meeting_name": .string(options.meetingName),
                     "request_id": .string(UUID().uuidString),
+                    "display_id": .number(Double(options.display.id)),
                 ]
                 if let profile = options.profile {
                     arguments["profile"] = .string(profile)
@@ -408,7 +428,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if let scope = options.scope {
                     arguments["scope"] = .string(scope)
                 }
-                let result = try await client.callTool(ToolCatalog.startRecording, arguments: arguments)
+                let result = try await client.callTool(
+                    ToolCatalog.startRecording, arguments: arguments, expectedSessionGeneration: displayGeneration)
+                let currentResultGeneration = await client.operationSessionGeneration
+                guard result.sessionGeneration == displayGeneration, displayGeneration == currentResultGeneration
+                else { throw MCPConnectionError.connectionChanged }
+                let recordedDisplay: RecordingDisplay?
+                if let data = try result.structuredContent?["display"]?.serialized() {
+                    recordedDisplay = try JSONDecoder().decode(RecordingDisplay?.self, from: data)
+                } else {
+                    recordedDisplay = nil
+                }
                 let accepted = session.finishStart(
                     token,
                     recording: RecordingStatus(
@@ -416,7 +446,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         meetingID: result.structuredContent?["meeting_id"]?.stringValue,
                         meetingName: options.meetingName,
                         startedAt: result.structuredContent?["started_at"]?.stringValue,
-                        elapsedSec: 0))
+                        elapsedSec: 0, display: recordedDisplay))
                 if accepted {
                     mainWindowModel?.showToast("録画を開始しました")
                 } else {
@@ -431,6 +461,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func stopRecording() {
+        let finalizingEndedRecording = session.recordingNeedsFinalization
         guard let token = session.beginStop() else {
             return
         }
@@ -447,16 +478,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let result = try await client.callTool(ToolCatalog.stopRecording, arguments: [
                     "request_id": .string(UUID().uuidString),
                 ])
+                let warning = try recordingStopWarning(from: result)
                 if session.finishStop(token) {
                     if let jobID = result.structuredContent?["job_id"]?.stringValue {
                         ensureMainWindowModel().track(jobID: jobID)
                     }
-                    mainWindowModel?.showToast("録画を停止して保存しました")
+                    if let warning {
+                        presentMessage(title: "録画の保存に問題があります", text: warning)
+                    } else {
+                        mainWindowModel?.showToast(finalizingEndedRecording ? "録画を保存しました" : "録画を停止して保存しました")
+                    }
                     await mainWindowModel?.refresh()
                 }
             } catch {
                 if session.failOperation(token) {
-                    presentError(title: "録画を停止できません", error: error)
+                    presentError(title: finalizingEndedRecording ? "録画を保存できません" : "録画を停止できません", error: error)
                 }
             }
         }
@@ -471,7 +507,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if recording {
             guard confirm(
-                message: "録画中です。サーバーを再起動すると録画は停止されます。",
+                message: session.recordingNeedsFinalization
+                    ? "録画の保存が完了していません。サーバーを再起動する前に録画を確定します。"
+                    : "録画中です。サーバーを再起動すると録画は停止されます。",
                 informative: "録画は停止時に確定されますが、自動処理は行われません。続行しますか？",
                 confirmTitle: "再起動する")
             else {
@@ -607,6 +645,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             await client.reset()
         }
         applyServerState()
+        if session.shouldFinalizeInterruptedRecording {
+            stopRecording()
+        }
         if session.serverReachable {
             // Continue tracking jobs after the window closes, so a deferred update can
             // resume when transcription/export has finished.
@@ -621,28 +662,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var meetingName: String
         var profile: String?
         var scope: String?
+        var display: RecordingDisplay
     }
 
     /// Start dialog: 会議名 (required), プロファイル and scope (optional; empty = server-side
     /// default profile / unscoped).
-    private func promptForRecordingOptions() -> RecordingOptions? {
+    private func promptForRecordingOptions(displays: [RecordingDisplay], defaultIndex: Int) -> RecordingOptions? {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "録画を開始します"
-        alert.informativeText = "会議名を入力してください。プロファイル・scope は空なら既定（既定プロファイル / scope なし）です。"
+        alert.informativeText = "会議名と録画する画面を確認してください。メイン画面を既定で選択します。プロファイル・scope は空なら既定（既定プロファイル / scope なし）です。"
         alert.addButton(withTitle: "録画開始")
         alert.addButton(withTitle: "キャンセル")
 
-        let nameField = NSTextField(frame: NSRect(x: 0, y: 56, width: 280, height: 24))
+        let displayLabel = NSTextField(labelWithString: "録画する画面")
+        displayLabel.frame = NSRect(x: 0, y: 120, width: 400, height: 18)
+        let displayPopup = NSPopUpButton(frame: NSRect(x: 0, y: 86, width: 400, height: 28), pullsDown: false)
+        displayPopup.addItems(withTitles: displays.map(\.selectionTitle))
+        displayPopup.selectItem(at: defaultIndex)
+        displayPopup.setAccessibilityLabel("録画する画面")
+        let nameField = NSTextField(frame: NSRect(x: 0, y: 56, width: 400, height: 24))
         nameField.placeholderString = "会議名"
-        let profileField = NSTextField(frame: NSRect(x: 0, y: 28, width: 280, height: 24))
+        let profileField = NSTextField(frame: NSRect(x: 0, y: 28, width: 400, height: 24))
         profileField.placeholderString = "プロファイル（空 = 既定）"
-        let scopeField = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        let scopeField = NSTextField(frame: NSRect(x: 0, y: 0, width: 400, height: 24))
         scopeField.placeholderString = "scope（空 = scope なし）"
         nameField.nextKeyView = profileField
         profileField.nextKeyView = scopeField
-        scopeField.nextKeyView = nameField
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 80))
+        scopeField.nextKeyView = displayPopup
+        displayPopup.nextKeyView = nameField
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 138))
+        accessory.addSubview(displayLabel)
+        accessory.addSubview(displayPopup)
         accessory.addSubview(nameField)
         accessory.addSubview(profileField)
         accessory.addSubview(scopeField)
@@ -661,12 +712,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return RecordingOptions(
             meetingName: name,
             profile: profile.isEmpty ? nil : profile,
-            scope: scope.isEmpty ? nil : scope)
+            scope: scope.isEmpty ? nil : scope,
+            display: displays[displayPopup.indexOfSelectedItem])
+    }
+
+    private func recordingStopWarning(from result: ToolCallResult) throws -> String? {
+        guard let content = result.structuredContent else {
+            throw MCPClientError.protocolError("録画の保存結果が返されませんでした")
+        }
+        return try JSONDecoder().decode(RecordingStopFeedback.self, from: content.serialized()).warningMessage
     }
 
     private func confirmStopRecordingBeforeQuit() -> Bool {
         confirm(
-            message: "録画中です。停止してから終了しますか？",
+            message: session.recordingNeedsFinalization
+                ? "録画の保存が完了していません。保存してから終了しますか？"
+                : "録画中です。停止してから終了しますか？",
             informative: "録画を停止して確定してから、サーバーを停止して終了します。",
             confirmTitle: "停止して終了")
     }

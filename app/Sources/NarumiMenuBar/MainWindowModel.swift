@@ -75,6 +75,7 @@ final class MainWindowModel: ObservableObject {
     @Published var transcript: Transcript?
     @Published var selectedTranscriptSource: String?
     @Published var transcriptUnavailable: String?
+    @Published var preparingPlaybackMeetingID: String?
 
     // MARK: Server-wide data
 

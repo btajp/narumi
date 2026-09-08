@@ -26,6 +26,7 @@ from narumi_server.handlers.common import (
     sync_catalog,
     validated_config,
 )
+from narumi_server.handlers.playback import enqueue_playback, has_screen_track
 from narumi_server.handlers.processing import enqueue_process
 from narumi_server.locks import HANDLER_WAIT_SECONDS
 from narumi_server.recording import StoppedEvent
@@ -80,7 +81,8 @@ def _start_recording(
             config=config,
         )
     try:
-        started = ctx.recorder.start(bundle)
+        selected = {"display_id": args["display_id"]} if "display_id" in args else {}
+        started = ctx.recorder.start(bundle, **selected)
     except BaseException:
         shutil.rmtree(bundle.path, ignore_errors=True)  # no orphan bundle for a failed start
         raise
@@ -92,6 +94,8 @@ def _start_recording(
         for name, file_name in started.tracks.items()
     }
     recording.recorder = {"binary": str(recorder_path), "started": jsonable(started.raw)}
+    if started.display is not None:
+        recording.recorder["started"]["display"] = dict(started.display)
     bundle.manifest.status = "recording"
     bundle.save()
     sync_catalog(ctx, bundle)
@@ -100,12 +104,19 @@ def _start_recording(
         "start_recording",
         {"meeting_id": bundle.meeting_id, "scope": bundle.manifest.scope},
     )
-    return {
+    result: dict[str, Any] = {
         "meeting_id": bundle.meeting_id,
         "started_at": started.started_at,
         "bundle_path": str(bundle.path),
         "tracks": {name: record.path for name, record in recording.tracks.items()},
     }
+    if started.display is not None:
+        result["display"] = dict(started.display)
+    return result
+
+
+def list_recording_displays(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
+    return {"displays": ctx.recorder.list_displays()}
 
 
 def configure_recording_permission(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
@@ -164,26 +175,37 @@ def stop_recording(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
             "duration_sec": stopped.duration_sec,
             "tracks": {name: record.model_dump(mode="json") for name, record in tracks.items()},
         }
+        if stopped.error is not None:
+            result["recorder_error"] = stopped.error
+        if ctx._closed:
+            return result
         if args.get("auto_process", True):
             result["job_id"] = enqueue_process(ctx, meeting_id)
+        elif args.get("prepare_playback", True) and has_screen_track(bundle):
+            result["job_id"] = enqueue_playback(ctx, meeting_id)
     return result
 
 
 def get_recording_status(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
-    """Recorder state + the recording meeting's manifest; ``{"active": false}`` when idle."""
+    """Active session and capture liveness; a completed process still awaits the stop call."""
     meeting_id = ctx.recorder.active_meeting_id
     if meeting_id is None:
         return {"active": False}
     manifest = find_bundle(ctx, meeting_id).manifest
     recording = manifest.recording
+    recorder_alive = ctx.recorder.process_alive
     result: dict[str, Any] = {
         "active": True,
+        "recorder_alive": recorder_alive,
         "meeting_id": meeting_id,
         "meeting_name": manifest.meeting_name,
         "tracks": {name: track.path for name, track in recording.tracks.items()},
     }
+    if display := recording.recorder.get("started", {}).get("display"):
+        result["display"] = display
     if recording.started_at:
         result["started_at"] = recording.started_at
+    if recording.started_at and recorder_alive:
         started = datetime.fromisoformat(recording.started_at)
         if started.tzinfo is None:  # recorder timestamps are RFC3339 UTC; be defensive
             started = started.replace(tzinfo=UTC)

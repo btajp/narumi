@@ -197,7 +197,8 @@ async def test_recording_flow(client: PerCallClient, ctx: ServerContext):
     stopped = await call(client, "stop_recording", {"request_id": rid(), "auto_process": False})
     assert "error" not in stopped
     assert stopped["meeting_id"] == meeting_id
-    assert "job_id" not in stopped
+    job = await wait_job(ctx, stopped["job_id"])
+    assert job["kind"] == "playback" and job["status"] == "succeeded", job
     assert stopped["duration_sec"] >= 0
     for name in ("mic", "system"):
         track = stopped["tracks"][name]
@@ -212,7 +213,8 @@ async def test_recording_flow(client: PerCallClient, ctx: ServerContext):
     assert meeting["recording"]["stopped_at"] == stopped["stopped_at"]
     assert meeting["recording"]["tracks"] == stopped["tracks"]
     assert meeting["latest_minutes"] is None
-    assert meeting["artifacts"] == []
+    assert meeting["artifacts"] == ["recording/playback"]
+    assert Path(meeting["playback"]["path"]).is_file()
     assert (ctx.meetings_root / meeting_id / "tracks" / "mic.wav").is_file()
     assert (ctx.meetings_root / meeting_id / "logs" / "recorder.stderr.log").exists()
 
@@ -275,7 +277,7 @@ async def test_auto_process_job_success(
     assert meeting["meeting"]["latest_minutes_version"] == 1
     assert meeting["latest_minutes"]["version"] == 1
     assert meeting["latest_minutes"]["markdown"].startswith("# 議事録")
-    assert meeting["artifacts"] == ["merged/merged", "minutes/v1"]
+    assert meeting["artifacts"] == ["merged/merged", "minutes/v1", "recording/playback"]
     assert [v["version"] for v in meeting["minutes_versions"]] == [1]
 
     brief = await call(client, "get_meeting", {"meeting_id": meeting_id, "include_minutes": False})

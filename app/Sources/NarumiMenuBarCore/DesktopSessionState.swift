@@ -30,6 +30,9 @@ public struct DesktopSessionState: Equatable, Sendable {
     private var revision: UInt64 = 0
     private var pendingPoll: Token?
     private var pendingOperation: Token?
+    // A failed request may already be saving remotely. Preserve this across reconnects
+    // until a different meeting or an idle status is confirmed; manual retries remain available.
+    private var attemptedInterruptedRecordingFinalization = false
 
     public init() {}
 
@@ -45,7 +48,19 @@ public struct DesktopSessionState: Equatable, Sendable {
             && operation == nil && !terminating && !installingUpdate && !hasPendingStopRequest
     }
 
-    public var menuSymbolName: String { recording.active ? "record.circle.fill" : "waveform" }
+    public var recordingNeedsFinalization: Bool {
+        recording.active && recording.recorderAlive == false
+    }
+
+    public var shouldFinalizeInterruptedRecording: Bool {
+        canStop && recordingIsConfirmed && recordingNeedsFinalization
+            && !attemptedInterruptedRecordingFinalization
+    }
+
+    public var menuSymbolName: String {
+        if recordingNeedsFinalization { return "square.and.arrow.down" }
+        return recording.active ? "record.circle.fill" : "waveform"
+    }
 
     public var accessibilityLabel: String { "narumi: \(statusText)" }
 
@@ -53,7 +68,13 @@ public struct DesktopSessionState: Equatable, Sendable {
         if terminating { return "終了処理中…" }
         if installingUpdate { return "アップデートを適用中…" }
         if operation == .starting { return "録画を開始しています…" }
-        if operation == .stopping { return "録画を停止・保存しています…" }
+        if operation == .stopping {
+            return recordingNeedsFinalization ? "録画を保存しています…" : "録画を停止・保存しています…"
+        }
+        if recordingNeedsFinalization {
+            return recordingIsConfirmed && !hasPendingStopRequest
+                ? "録画は終了しました。保存を待っています" : "録画は終了しました。保存結果を確認中です"
+        }
         if recording.active {
             return recordingIsConfirmed ? "録画中" : "録画中（接続・状態を再確認中）"
         }
@@ -106,6 +127,9 @@ public struct DesktopSessionState: Equatable, Sendable {
         pendingPoll = nil
         serverReachable = true
         recordingCapable = info.recordingCapable
+        if !recording.active || recording.meetingID != self.recording.meetingID {
+            attemptedInterruptedRecordingFinalization = false
+        }
         self.recording = recording
         recordingIsConfirmed = true
         return true
@@ -127,6 +151,7 @@ public struct DesktopSessionState: Equatable, Sendable {
 
     public mutating func beginStop() -> Token? {
         guard canStop else { return nil }
+        if recordingNeedsFinalization { attemptedInterruptedRecordingFinalization = true }
         return beginOperation(.stopping)
     }
 
@@ -147,6 +172,7 @@ public struct DesktopSessionState: Equatable, Sendable {
     public mutating func finishStart(_ token: Token, recording: RecordingStatus) -> Bool {
         guard isCurrentOperation(token, .starting), recording.active else { return false }
         self.recording = recording
+        attemptedInterruptedRecordingFinalization = false
         recordingIsConfirmed = true
         endOperation()
         return true
@@ -156,6 +182,7 @@ public struct DesktopSessionState: Equatable, Sendable {
     public mutating func finishStop(_ token: Token) -> Bool {
         guard isCurrentOperation(token, .stopping) else { return false }
         recording = RecordingStatus(active: false)
+        attemptedInterruptedRecordingFinalization = false
         recordingIsConfirmed = true
         endOperation()
         return true
@@ -194,12 +221,14 @@ public struct DesktopSessionState: Equatable, Sendable {
     /// operation. Update-triggered quits must never take this path with an active recording.
     public mutating func confirmStoppedForShutdown() {
         recording = RecordingStatus(active: false)
+        attemptedInterruptedRecordingFinalization = false
         recordingIsConfirmed = true
         invalidateRequests()
     }
 
     public func updateBlockReason(launcherBusy: Bool, knownJobsBusy: Bool) -> String? {
         if terminating { return "終了処理中のため更新を延期します" }
+        if recordingNeedsFinalization { return "録画の保存が確定するまで更新を延期します" }
         if operation != nil { return "録画の開始・停止操作中のため更新を延期します" }
         if recording.active { return "録画中のため更新を延期します" }
         if permissionSetupBlocked { return "録画の権限設定が完了するまで更新を延期します" }

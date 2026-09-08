@@ -106,7 +106,8 @@ final class DesktopJobRequestStateTests: XCTestCase {
             ["invalid_argument", "not_found", "busy", "policy_violation", "engine_unavailable"]),
         (ToolCatalog.registerContext, ["invalid_argument", "not_found", "busy", "scope_denied"]),
         (ToolCatalog.exportMinutes, ["invalid_argument", "not_found", "busy", "scope_denied"]),
-        (ToolCatalog.stopRecording, ["invalid_argument", "not_found", "busy"]),
+        (ToolCatalog.stopRecording, ["invalid_argument", "not_found", "busy", "recorder_unavailable"]),
+        (ToolCatalog.prepareRecording, ["invalid_argument", "not_found", "busy", "scope_denied", "engine_unavailable"]),
         ("unknown_tool", []),
     ]
     private let failureCodes: [String?] = [

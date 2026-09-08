@@ -1,6 +1,6 @@
 # narumi app（Swift Package）
 
-録画・会議管理・接続設定を扱う Swift アプリ。製品コードは 5 つのターゲットからなる。この README は 0.6.0 の OpenAI 音声認識と、6プロバイダの単独テキスト議事録生成を扱う。配布の公開状況は [GitHub Releases](https://github.com/btajp/narumi/releases) で別に確認する。
+録画・会議管理・接続設定を扱う Swift アプリ。製品コードは 5 つのターゲットからなる。この README は 0.6.1 の録画画面選択・統合録画再生と、OpenAI 音声認識・6プロバイダの単独テキスト議事録生成を扱う。配布の公開状況は [GitHub Releases](https://github.com/btajp/narumi/releases) で別に確認する。
 
 | ターゲット | 種別 | 役割 |
 |---|---|---|
@@ -8,7 +8,7 @@
 | `narumi-recorder` | CLI | server がサブプロセスとして起動する録画ヘルパー。stdout に JSON Lines でイベントを出す |
 | `narumi-keychain` | 専用ヘルパー | プロバイダの API キーと常駐接続トークンを macOS Keychain で扱う。秘密情報は引数や環境変数に置かず、匿名パイプで受け渡す |
 | `NarumiMenuBarCore` | ライブラリ（Foundation / Security） | サーバー設定・起動コマンド・状態表示、同梱ランタイムの同期手順、契約型、表示整形、markdown 分割、ツール名一覧、TLS 起動情報と証明書の検証、Keychain ヘルパーとの通信、プロバイダ設定・認可 URL・確認コード・議事録モデル選択の状態管理。AppKit / Sparkle に依存せず、I/O を差し替えて `swift test` で検証する |
-| `NarumiMenuBar` | メニューバーアプリ `narumi.app` | MCP クライアント。メニューとメインウィンドウから server の公開ツール（`ToolCatalog.allUsed` = 契約 6.0.0 の全 38 ツール）を呼び、会議バンドルや recorder には直接触れない。加えて `narumi-server` のプロセス管理と、接続のための起動情報・Keychain トークンの取得を行う |
+| `NarumiMenuBar` | メニューバーアプリ `narumi.app` | MCP クライアント。メニューとメインウィンドウから server の公開ツール（`ToolCatalog.allUsed` = 契約 6.1.0 の全 40 ツール）を呼び、会議バンドルや recorder には直接触れない。加えて `narumi-server` のプロセス管理と、接続のための起動情報・Keychain トークンの取得を行う |
 
 ## 利用者向けの導入・更新
 
@@ -60,14 +60,14 @@ narumi-recorder list-displays
 narumi-recorder help
 ```
 
-- `record`: `<dir>` を作成し、`screen.mp4`（H.264、幅 1920 上限、10 fps）/ `system.m4a`（AAC 48 kHz ステレオ 128 kbps、自プロセス音声は除外）/ `mic.m4a`（AAC 48 kHz モノラル 96 kbps）を **別ファイル** で書く。`--no-video` で `screen.mp4` を省く。`--display` 省略時は最初のディスプレイ、`--mic` は `AVCaptureDevice.uniqueID`。
+- `record`: `<dir>` を作成し、`screen.mp4`（H.264、幅 1920 上限、10 fps）/ `system.m4a`（AAC 48 kHz ステレオ 128 kbps、自プロセス音声は除外）/ `mic.m4a`（AAC 48 kHz モノラル 96 kbps）を **別ファイル** で書く。`--no-video` で `screen.mp4` を省く。`--display` 省略時は macOS のメインディスプレイ（取得不可ならエラー）、`--mic` は `AVCaptureDevice.uniqueID`。
 - 停止条件: `SIGINT` / `SIGTERM`、または stdin に `stop` 行。stdin が **パイプ** で EOF になった場合（親プロセス消滅）も停止する。`/dev/null` や TTY の EOF は無視する。
 - 終了時に `<dir>/recorder.json` を書く（`stopped` イベントの内容 + `started_at` + `recorder_version`。失敗時は `error` も入る）。
 - 終了コード: 正常 0 / 録画失敗 1 / 引数エラー 2。失敗時は必ず `error` イベントを出す。
 - `check`: `{"screen_recording":"granted|denied","microphone":"granted|denied|unknown"}`。画面収録は CoreGraphics に「未確認」を問い合わせる API が無いため、未確認も `denied` になる。
 - `request-permission`: 対象の OS 許可を要求するだけで、録画・出力ディレクトリ・トラックは作らない。拒否も現在状態を含む正常 JSON として返す。拒否済みのマイクはプロンプトが再表示されないため、設定から変更する。
 - `open-permission-settings`: 対象から決まる固定のプライバシー設定 URL を開く。任意 URL は受け付けず、対象 URL を開けないときだけプライバシー設定トップへ戻る。応答の `settings_opened` は画面を開く要求の受付で、許可済みを意味しない。
-- `list-displays`: `[{"id":1,"width":1728,"height":1117,"name":"Built-in Retina Display"}]`（幅・高さはポイント）。
+- `list-displays`: `[{"id":1,"width":1728,"height":1117,"name":"Built-in Retina Display","is_main":true}]`（幅・高さはポイント）。
 
 ### stdout のイベント（1 行 1 JSON、各行で flush）
 
@@ -78,9 +78,10 @@ narumi-recorder help
 {"event":"log","message":"..."}
 ```
 
+- `started.display` に実際に取り込む画面の ID・名前・幅・高さ・`is_main` を報告する。
 - `--no-video` のときは `tracks` に `screen` が無い。
 - 時刻は UTC・秒精度の ISO 8601。`duration_sec` はミリ秒で丸める。
-- `started` の後にストリームが落ちた場合は `stopped` ではなく `error` を出し、書けたファイルはそのまま残す（`recorder.json` に `error` を記録）。
+- `started` の後にストリームが落ちた場合も書けたファイルを確定し、`stopped` と `error` を報告する（`recorder.json` にも `error` を記録）。アプリはプロセス終了を検知すると公開 `stop_recording` で保存を完了し、中断を警告する。
 - 1 フレームも取れなかった `screen.mp4` は `bytes: 0` / `duration_sec: 0` で報告する（ファイルは存在しない）。
 
 ## TCC（画面収録・マイク）の扱い

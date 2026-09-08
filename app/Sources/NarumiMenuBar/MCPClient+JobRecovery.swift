@@ -126,7 +126,9 @@ extension MCPClient {
         let jobID = result.structuredContent?["job_id"]?.stringValue
         let synchronousExport = tool == ToolCatalog.exportMinutes
             && result.structuredContent?["result"]?["ref"]?.stringValue != nil
-        if (jobID?.isEmpty == false || synchronousExport), jobRequests.confirm(token) {
+        let synchronousStop = tool == ToolCatalog.stopRecording && jobID == nil
+            && Self.isFinalizedRecording(result)
+        if (jobID?.isEmpty == false || synchronousExport || synchronousStop), jobRequests.confirm(token) {
             // The main actor tracks the job before clearing the unknown-request block,
             // so there is no update-allowed gap between response and typed decoding.
             await publishJobRequestState(jobID: jobID)
@@ -134,6 +136,22 @@ extension MCPClient {
             jobRequests.markUncertain(token)
             await publishJobRequestState()
         }
+    }
+
+    /// Audio-only stops and shutdown finalization can legitimately finish without a job.
+    private static func isFinalizedRecording(_ result: ToolCallResult) -> Bool {
+        struct Receipt: Decodable {
+            var meeting_id: String
+            var stopped_at: String
+            var duration_sec: Double
+            var tracks: [String: TrackStatus]
+        }
+        guard let data = try? result.structuredContent?.serialized(),
+            let receipt = try? JSONDecoder().decode(Receipt.self, from: data),
+            receipt.meeting_id.range(of: "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$", options: .regularExpression) != nil,
+            ISO8601DateFormatter().date(from: receipt.stopped_at) != nil,
+            receipt.duration_sec.isFinite, receipt.duration_sec >= 0 else { return false }
+        return true
     }
 
     private func publishJobRequestState(jobID: String? = nil) async {

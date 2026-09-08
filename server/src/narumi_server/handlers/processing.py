@@ -38,6 +38,7 @@ from narumi_server.handlers.common import (
     sync_catalog,
     validated_config,
 )
+from narumi_server.handlers.playback import has_screen_track, prepare_playback
 from narumi_server.jobs import JobProgress
 
 if TYPE_CHECKING:
@@ -175,16 +176,21 @@ def enqueue_process(ctx: ServerContext, meeting_id: str, *, force: bool = False)
     expected_config = find_bundle(ctx, meeting_id).manifest.config.model_copy(deep=True)
 
     def run(progress: JobProgress) -> dict[str, Any]:
-        return run_pipeline_job(
-            ctx,
-            meeting_id,
-            lambda bundle: narumi_pipeline.process_meeting(
+        def process(bundle: Bundle) -> Any:
+            if has_screen_track(bundle):
+                prepare_playback(ctx, bundle, progress)
+            return narumi_pipeline.process_meeting(
                 bundle,
                 force=force,
                 progress=progress,
                 gaia_client_factory=ctx.gaia.client,
                 **_selected_kwargs(ctx, bundle, progress, expected_config),
-            ),
+            )
+
+        return run_pipeline_job(
+            ctx,
+            meeting_id,
+            process,
         )
 
     return ctx.jobs.submit("process", meeting_id, run)

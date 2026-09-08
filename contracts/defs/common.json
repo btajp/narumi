@@ -84,7 +84,7 @@
     },
     "job_kind": {
       "type": "string",
-      "enum": ["process", "regenerate", "export", "provider_setup"]
+      "enum": ["process", "regenerate", "export", "provider_setup", "playback"]
     },
     "job": {
       "type": "object",

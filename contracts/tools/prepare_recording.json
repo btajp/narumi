@@ -1,0 +1,69 @@
+{
+  "name": "prepare_recording",
+  "title": "Prepare recording playback",
+  "description": "Create or repair a local playback MP4 from the retained screen and microphone/system tracks of a stopped meeting. Preserve original separate tracks and mix both audio sources into one playable stream without truncating longer media. No transcription, minutes generation, or external media sending. Runs as a playback job; poll get_job_status and then get_meeting.playback. Reuses an artifact only when input hashes, parameters, producer and output hash match. Scope follows get_meeting. The request_id is an idempotency key; repeat only with identical input. On failure returns an error_envelope (isError=true) with code: not_found, scope_denied, busy, invalid_argument (no retained video or audio), engine_unavailable, internal.",
+  "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "meeting_id": {
+        "$ref": "../defs/common.json#/$defs/meeting_id"
+      },
+      "scope": {
+        "$ref": "../defs/common.json#/$defs/scope"
+      },
+      "request_id": {
+        "$ref": "../defs/common.json#/$defs/request_id"
+      }
+    },
+    "required": [
+      "meeting_id",
+      "request_id"
+    ],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "meeting_id": {
+        "$ref": "../defs/common.json#/$defs/meeting_id"
+      },
+      "job_id": {
+        "$ref": "../defs/common.json#/$defs/job_id"
+      }
+    },
+    "required": [
+      "meeting_id",
+      "job_id"
+    ],
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "request_id": "prepare-recording-001"
+      },
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "request_id": "prepare-recording-002",
+        "scope": "cloudnative"
+      }
+    ],
+    "output": [
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "job_id": "job-0123456789ab"
+      },
+      {
+        "meeting_id": "20260827T030500Z-a1b2c3d4",
+        "job_id": "job-1123456789ab"
+      }
+    ]
+  }
+}

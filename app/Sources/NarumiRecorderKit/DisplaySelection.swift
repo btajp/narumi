@@ -6,12 +6,19 @@ public struct DisplayInfo: Equatable, Sendable, Codable {
     public var width: Int
     public var height: Int
     public var name: String
+    public var isMain: Bool
 
-    public init(id: UInt32, width: Int, height: Int, name: String) {
+    public init(id: UInt32, width: Int, height: Int, name: String, isMain: Bool = false) {
         self.id = id
         self.width = width
         self.height = height
         self.name = name
+        self.isMain = isMain
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, width, height, name
+        case isMain = "is_main"
     }
 
     public func json() -> JSONValue {
@@ -20,6 +27,7 @@ public struct DisplayInfo: Equatable, Sendable, Codable {
             "width": .integer(width),
             "height": .integer(height),
             "name": .string(name),
+            "is_main": .bool(isMain),
         ])
     }
 
@@ -29,7 +37,7 @@ public struct DisplayInfo: Equatable, Sendable, Codable {
 }
 
 public enum DisplaySelection {
-    /// Pick the requested display, or the first one when no id was given.
+    /// Pick the requested display, or the OS main display when no id was given.
     public static func select(from displays: [DisplayInfo], requestedID: UInt32?) throws -> DisplayInfo {
         guard !displays.isEmpty else {
             throw RecorderError(
@@ -37,7 +45,10 @@ public enum DisplaySelection {
                 "no capturable display found (no active display: asleep, locked or headless?)")
         }
         guard let requestedID else {
-            return displays[0]
+            guard let main = displays.first(where: \.isMain) else {
+                throw RecorderError(.noDisplay, "the main display is not available for capture")
+            }
+            return main
         }
         guard let match = displays.first(where: { $0.id == requestedID }) else {
             let known = displays.map { String($0.id) }.joined(separator: ", ")

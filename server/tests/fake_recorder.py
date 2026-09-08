@@ -3,19 +3,24 @@
 
     python3 fake_recorder.py record --output DIR [--no-video] [--display N] [--mic UID]
     python3 fake_recorder.py check
+    python3 fake_recorder.py list-displays
 
-``record`` writes ``DIR/mic.wav`` and ``DIR/system.wav`` (1 s of 16 kHz mono silence) plus an
-empty ``DIR/screen.mp4`` placeholder (omitted with ``--no-video``), prints the ``started`` event,
+``record`` writes ``DIR/mic.wav`` and ``DIR/system.wav`` (1 s of 16 kHz mono silence) plus a
+1 s synthetic black ``DIR/screen.mp4`` fixture (omitted with ``--no-video``), emits ``started``,
 waits for SIGINT / SIGTERM, a ``stop`` line on stdin or stdin EOF, then prints the ``stopped``
 event with byte sizes and exits 0. Environment knobs for failure paths:
 
 * ``FAKE_RECORDER_FAIL=<code>``      emit ``{"event":"error","code":<code>}`` instead of starting
 * ``FAKE_RECORDER_START_DELAY=<s>``  sleep before ``started`` (start-timeout tests)
 * ``FAKE_RECORDER_STOP_DELAY=<s>``   sleep after the stop request before ``stopped``
+* ``FAKE_RECORDER_AUTO_STOP_AFTER=<s>`` end capture without a parent stop request
 * ``FAKE_RECORDER_CRASH_ON_STOP=1``  exit 3 without ``stopped`` (recorder crash tests)
 * ``FAKE_RECORDER_ERROR_AFTER_STOP=<code>`` emit ``stopped`` (tracks finalized) followed by an
   ``error`` event and exit 1 — a capture failure mid-meeting whose audio survived
 * ``FAKE_RECORDER_CHECK=<json>``     what ``check`` prints instead of the all-granted report
+* ``FAKE_RECORDER_DISPLAYS=<json>``  what ``list-displays`` prints instead of two fake displays
+* ``FAKE_RECORDER_DISPLAYS_DELAY=<s>`` delay the display query
+* ``FAKE_RECORDER_DISPLAYS_EXIT=<n>`` display query exit status
 * ``FAKE_RECORDER_PERMISSION_DELAY=<s>`` delay a recording-free permission operation
 * ``FAKE_RECORDER_PERMISSION_RESULT=<json>`` override its JSON response
 * ``FAKE_RECORDER_PERMISSION_EXIT=<n>`` override its exit status
@@ -40,6 +45,11 @@ from typing import Any
 SAMPLE_RATE = 16000
 SILENCE_SECONDS = 1.0
 TRACK_FILES = {"screen": "screen.mp4", "mic": "mic.wav", "system": "system.wav"}
+SCREEN_FIXTURE = Path(__file__).parent / "fixtures" / "recorder-screen.mp4"
+DISPLAYS = [
+    {"id": 2, "name": "External", "width": 3840, "height": 2160, "is_main": False},
+    {"id": 1, "name": "Built-in", "width": 1728, "height": 1117, "is_main": True},
+]
 
 
 def emit(event: dict[str, Any]) -> None:
@@ -69,11 +79,15 @@ def record(args: argparse.Namespace) -> int:
     if fail:
         emit({"event": "error", "code": fail, "message": f"simulated {fail}"})
         return 1
+    display = next((display for display in DISPLAYS if display["id"] == (args.display or 1)), None)
+    if display is None:
+        emit({"event": "error", "code": "no_display", "message": "display not available"})
+        return 1
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
     tracks: dict[str, str] = {}
     if not args.no_video:
-        (out / TRACK_FILES["screen"]).write_bytes(b"")
+        (out / TRACK_FILES["screen"]).write_bytes(SCREEN_FIXTURE.read_bytes())
         tracks["screen"] = TRACK_FILES["screen"]
     for name in ("mic", "system"):
         write_silence(out / TRACK_FILES[name])
@@ -82,7 +96,7 @@ def record(args: argparse.Namespace) -> int:
     time.sleep(_env_float("FAKE_RECORDER_START_DELAY"))
     started_at = now_iso()
     t0 = time.monotonic()
-    emit({"event": "started", "started_at": started_at, "tracks": tracks})
+    emit({"event": "started", "started_at": started_at, "tracks": tracks, "display": display})
 
     stop = threading.Event()
 
@@ -99,6 +113,10 @@ def record(args: argparse.Namespace) -> int:
         stop.set()  # a "stop" line or EOF (parent went away) both end the recording
 
     threading.Thread(target=watch_stdin, name="stdin", daemon=True).start()
+    if delay := _env_float("FAKE_RECORDER_AUTO_STOP_AFTER"):
+        timer = threading.Timer(delay, stop.set)
+        timer.daemon = True
+        timer.start()
     while not stop.wait(0.05):
         pass
 
@@ -112,7 +130,7 @@ def record(args: argparse.Namespace) -> int:
         name: {
             "path": file_name,
             "bytes": (out / file_name).stat().st_size,
-            "duration_sec": SILENCE_SECONDS if file_name.endswith(".wav") else 0.0,
+            "duration_sec": SILENCE_SECONDS,
         }
         for name, file_name in tracks.items()
     }
@@ -154,6 +172,7 @@ def main(argv: list[str] | None = None) -> int:
     rec.add_argument("--no-video", action="store_true")
     rec.add_argument("--mic", default=None)
     sub.add_parser("check")
+    sub.add_parser("list-displays")
     for command in ("request-permission", "open-permission-settings"):
         permissions = sub.add_parser(command)
         permissions.add_argument("permission", choices=("microphone", "screen_recording"))
@@ -162,6 +181,10 @@ def main(argv: list[str] | None = None) -> int:
         report = os.environ.get("FAKE_RECORDER_CHECK")
         print(report or json.dumps({"screen_recording": "granted", "microphone": "granted"}))
         return 0
+    if args.command == "list-displays":
+        time.sleep(_env_float("FAKE_RECORDER_DISPLAYS_DELAY"))
+        print(os.environ.get("FAKE_RECORDER_DISPLAYS", json.dumps(DISPLAYS)), flush=True)
+        return int(os.environ.get("FAKE_RECORDER_DISPLAYS_EXIT") or 0)
     if args.command in {"request-permission", "open-permission-settings"}:
         return configure_permission(args)
     return record(args)

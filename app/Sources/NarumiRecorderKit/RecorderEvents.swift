@@ -43,15 +43,18 @@ public struct StartedTracks: Codable, Equatable, Sendable {
 public struct StartedEvent: Codable, Equatable, Sendable {
     public var startedAt: String
     public var tracks: StartedTracks
+    public var display: DisplayInfo?
 
-    public init(startedAt: String, tracks: StartedTracks) {
+    public init(startedAt: String, tracks: StartedTracks, display: DisplayInfo? = nil) {
         self.startedAt = startedAt
         self.tracks = tracks
+        self.display = display
     }
 
     enum CodingKeys: String, CodingKey {
         case startedAt = "started_at"
         case tracks
+        case display
     }
 }
 
@@ -191,11 +194,15 @@ public enum RecorderEventLine {
     public static func json(for event: RecorderEvent) -> JSONValue {
         switch event {
         case .started(let payload):
-            return .obj([
-                "event": .string("started"),
-                "started_at": .string(payload.startedAt),
-                "tracks": json(for: payload.tracks),
-            ])
+            var members = [
+                JSONMember(key: "event", value: .string("started")),
+                JSONMember(key: "started_at", value: .string(payload.startedAt)),
+                JSONMember(key: "tracks", value: json(for: payload.tracks)),
+            ]
+            if let display = payload.display {
+                members.append(JSONMember(key: "display", value: display.json()))
+            }
+            return .object(members)
         case .stopped(let payload):
             return .obj([
                 "event": .string("stopped"),
@@ -318,7 +325,7 @@ public struct RecorderSummary: Codable, Equatable, Sendable {
 }
 
 public enum NarumiRecorderKit {
-    public static let version = "0.6.0"
+    public static let version = "0.6.1"
 }
 
 // MARK: - Sinks

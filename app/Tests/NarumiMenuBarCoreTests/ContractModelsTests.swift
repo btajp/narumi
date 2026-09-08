@@ -154,6 +154,14 @@ final class ContractModelsTests: XCTestCase {
         XCTAssertEqual(detail.latestMinutes?.version, 2)
         XCTAssertEqual(detail.exports.first?.minutesVersion, 2)
         XCTAssertFalse(detail.artifacts.isEmpty)
+        XCTAssertNil(detail.playback)
+        XCTAssertNil(detail.recording.recorderError)
+    }
+
+    func testPrepareRecording() throws {
+        let receipts = try decodeAll(PrepareRecordingResponse.self, tool: "prepare_recording")
+        XCTAssertEqual(receipts[0].meetingID, "20260827T030500Z-a1b2c3d4")
+        XCTAssertEqual(receipts[0].jobID, "job-0123456789ab")
     }
 
     func testGetMinutes() throws {

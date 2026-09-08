@@ -184,7 +184,8 @@ async def test_stop_without_auto_process_then_regenerate(client: PerCallClient, 
     )
     meeting_id = started["meeting_id"]
     stopped = await call(client, "stop_recording", {"request_id": rid(), "auto_process": False})
-    assert "job_id" not in stopped
+    playback = await wait_job(ctx, stopped["job_id"])
+    assert playback["kind"] == "playback" and playback["status"] == "succeeded", playback
     assert (await call(client, "get_meeting", {"meeting_id": meeting_id}))["meeting"]["status"] == (
         "recorded"
     )
@@ -247,7 +248,8 @@ async def test_policy_violation_inside_the_job_fails_it(client: PerCallClient, c
         {"meeting_name": "policy in job", "config": FAKE_CONFIG, "request_id": rid()},
     )
     meeting_id = started["meeting_id"]
-    await call(client, "stop_recording", {"request_id": rid(), "auto_process": False})
+    stopped = await call(client, "stop_recording", {"request_id": rid(), "auto_process": False})
+    assert (await wait_job(ctx, stopped["job_id"]))["status"] == "succeeded"
     # bypass the handler's config check by editing the manifest on disk (someone edited the
     # bundle by hand): regenerate's fail-fast check catches it before enqueueing …
     bundle = Bundle.find(ctx.meetings_root, meeting_id)
