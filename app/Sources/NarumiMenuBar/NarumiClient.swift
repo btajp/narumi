@@ -153,7 +153,8 @@ struct NarumiClient: Sendable {
     }
 
     func meeting(id: String, scope: String?) async throws -> MeetingDetail {
-        var args: [String: JSONNode] = ["meeting_id": .string(id)]
+        // Minutes load independently; missing generated text must not hide retained recordings.
+        var args: [String: JSONNode] = ["meeting_id": .string(id), "include_minutes": .bool(false)]
         if let scope {
             args["scope"] = .string(scope)
         }

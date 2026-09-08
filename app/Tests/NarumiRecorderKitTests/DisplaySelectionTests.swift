@@ -5,15 +5,24 @@ import XCTest
 final class DisplaySelectionTests: XCTestCase {
     private let displays = [
         DisplayInfo(id: 1, width: 1728, height: 1117, name: "Built-in Retina Display"),
-        DisplayInfo(id: 2, width: 3840, height: 2160, name: "LG UltraFine"),
+        DisplayInfo(id: 2, width: 3840, height: 2160, name: "LG UltraFine", isMain: true),
     ]
 
-    func testDefaultsToFirstDisplay() throws {
-        XCTAssertEqual(try DisplaySelection.select(from: displays, requestedID: nil), displays[0])
+    func testDefaultsToMainDisplayEvenWhenItIsNotFirstOrBuiltIn() throws {
+        XCTAssertEqual(try DisplaySelection.select(from: displays, requestedID: nil), displays[1])
+        XCTAssertEqual(try DisplaySelection.select(from: displays.reversed(), requestedID: nil), displays[1])
     }
 
     func testSelectsRequestedDisplay() throws {
-        XCTAssertEqual(try DisplaySelection.select(from: displays, requestedID: 2), displays[1])
+        XCTAssertEqual(try DisplaySelection.select(from: displays, requestedID: 1), displays[0])
+    }
+
+    func testUnavailableMainDoesNotFallBackToSecondaryDisplay() throws {
+        let secondaryOnly = [displays[0]]
+        XCTAssertThrowsError(try DisplaySelection.select(from: secondaryOnly, requestedID: nil)) { error in
+            XCTAssertEqual((error as? RecorderError)?.code, .noDisplay)
+        }
+        XCTAssertEqual(try DisplaySelection.select(from: secondaryOnly, requestedID: 1), displays[0])
     }
 
     func testUnknownDisplayIsNoDisplayError() {
@@ -32,7 +41,7 @@ final class DisplaySelectionTests: XCTestCase {
     func testListDisplaysJSON() {
         XCTAssertEqual(
             DisplayInfo.jsonArray(displays),
-            #"[{"id":1,"width":1728,"height":1117,"name":"Built-in Retina Display"},{"id":2,"width":3840,"height":2160,"name":"LG UltraFine"}]"#
+            #"[{"id":1,"width":1728,"height":1117,"name":"Built-in Retina Display","is_main":false},{"id":2,"width":3840,"height":2160,"name":"LG UltraFine","is_main":true}]"#
         )
         XCTAssertEqual(DisplayInfo.jsonArray([]), "[]")
     }

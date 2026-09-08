@@ -1,0 +1,54 @@
+{
+  "name": "list_recording_displays",
+  "title": "List recording displays",
+  "description": "List currently capturable displays on the server host, including the macOS main display. Does not start a recording. Display IDs may change after display reconfiguration; refresh before selecting. Screen capture permission is required. On failure returns an error_envelope (isError=true) with code: recorder_unavailable, busy, internal.",
+  "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "displays": {
+        "type": "array",
+        "items": {
+          "$ref": "../defs/recording.json#/$defs/recording_display"
+        }
+      }
+    },
+    "required": [
+      "displays"
+    ],
+    "additionalProperties": false
+  },
+  "examples": {
+    "input": [
+      {},
+      {}
+    ],
+    "output": [
+      {
+        "displays": [
+          {
+            "id": 1,
+            "name": "Built-in display",
+            "width": 1728,
+            "height": 1117,
+            "is_main": true
+          }
+        ]
+      },
+      {
+        "displays": []
+      }
+    ]
+  }
+}

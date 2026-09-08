@@ -1,7 +1,7 @@
 {
   "name": "get_recording_status",
   "title": "Get recording status",
-  "description": "Return whether a recording is currently running. `active=false` means no recording is running and every other key is absent. When active, `meeting_id` / `meeting_name` identify the meeting being recorded, `started_at` is the UTC capture start, `elapsed_sec` the seconds recorded so far, and `tracks` maps track name (screen / mic / system) to its file path relative to the bundle. Poll this to render a menu-bar recording indicator; use stop_recording to end the recording. Read-only, takes no arguments. On failure returns an error_envelope (isError=true) with code: internal.",
+  "description": "Return whether a recording is currently running. `active=false` means no recording is running and every other key is absent. When active, `meeting_id` / `meeting_name` identify the meeting being recorded, `started_at` is the UTC capture start, `elapsed_sec` the seconds recorded so far, and `tracks` maps track name (screen / mic / system) to its file path relative to the bundle. Poll this to render a menu-bar recording indicator; use stop_recording to end the recording. Read-only, takes no arguments. On failure returns an error_envelope (isError=true) with code: internal. An active session with recorder_alive=false has already stopped capturing and awaits stop_recording to finalize saved tracks. This query does not finalize or enqueue work.",
   "annotations": {
     "readOnlyHint": true,
     "destructiveHint": false,
@@ -17,13 +17,17 @@
   },
   "outputSchema": {
     "type": "object",
-    "required": ["active"],
+    "required": [
+      "active"
+    ],
     "properties": {
       "active": {
         "type": "boolean",
         "description": "True while a recording is running. When false, no other key is present."
       },
-      "meeting_id": { "$ref": "../defs/common.json#/$defs/meeting_id" },
+      "meeting_id": {
+        "$ref": "../defs/common.json#/$defs/meeting_id"
+      },
       "meeting_name": {
         "type": "string",
         "description": "Name of the meeting being recorded.",
@@ -41,13 +45,26 @@
       "tracks": {
         "type": "object",
         "description": "Track name (screen / mic / system) → file path relative to the bundle (e.g. tracks/mic.m4a).",
-        "additionalProperties": { "type": "string", "minLength": 1 }
+        "additionalProperties": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "display": {
+        "$ref": "../defs/recording.json#/$defs/recording_display"
+      },
+      "recorder_alive": {
+        "type": "boolean",
+        "description": "While active, whether capture subprocess is still running. False means original tracks await stop_recording finalization; active stays true to preserve the save path. elapsed_sec is omitted once the process has ended. The app finalizes via stop_recording, not via this read-only query."
       }
     },
     "additionalProperties": false
   },
   "examples": {
-    "input": [{}, {}],
+    "input": [
+      {},
+      {}
+    ],
     "output": [
       {
         "active": false

@@ -6,6 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from narumi import playback as narumi_playback
 from narumi.bundle import Bundle
 from narumi.catalog import row_to_summary
 from narumi.errors import NotFoundError
@@ -64,6 +65,11 @@ def get_meeting(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
             )
         latest = {"version": record.version, "markdown": path.read_text(encoding="utf-8")}
     recording = manifest.recording
+    provenance: dict[str, Any] = {}
+    if display := recording.recorder.get("started", {}).get("display"):
+        provenance["display"] = display
+    if recorder_error := recording.recorder.get("error"):
+        provenance["recorder_error"] = recorder_error
     return {
         "meeting": meeting_summary(manifest),
         "bundle_path": str(bundle.path),
@@ -73,7 +79,9 @@ def get_meeting(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
             "stopped_at": recording.stopped_at,
             "duration_sec": recording.duration_sec,
             "tracks": {name: t.model_dump(mode="json") for name, t in recording.tracks.items()},
+            **provenance,
         },
+        "playback": narumi_playback.playback_info(bundle),
         "contexts": [
             {
                 "context_id": c.context_id,

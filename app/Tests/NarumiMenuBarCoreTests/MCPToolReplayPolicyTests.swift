@@ -6,7 +6,8 @@ import XCTest
 final class MCPToolReplayPolicyTests: XCTestCase {
     func testOnlyKnownLocalReadsCanRetrySession() {
         let reads: Set<String> = [
-            ToolCatalog.getServerInfo, ToolCatalog.getRecordingStatus, ToolCatalog.listMeetings,
+            ToolCatalog.getServerInfo, ToolCatalog.getRecordingStatus, ToolCatalog.listRecordingDisplays,
+            ToolCatalog.listMeetings,
             ToolCatalog.searchTranscripts, ToolCatalog.getMeeting, ToolCatalog.getMinutes,
             ToolCatalog.getTranscript, ToolCatalog.listExportDestinations, ToolCatalog.getJobStatus,
             ToolCatalog.listProfiles, ToolCatalog.getProfile, ToolCatalog.getGaiaConnection,
@@ -36,7 +37,9 @@ final class MCPToolReplayPolicyTests: XCTestCase {
             (ToolCatalog.importRecording, false, true, false),
             (ToolCatalog.stopRecording, nil, nil, true),
             (ToolCatalog.stopRecording, true, false, true),
-            (ToolCatalog.stopRecording, false, true, false),
+            (ToolCatalog.stopRecording, false, true, true),
+            (ToolCatalog.prepareRecording, nil, nil, true),
+            (ToolCatalog.prepareRecording, false, false, true),
             (ToolCatalog.registerContext, nil, nil, false),
             (ToolCatalog.registerContext, true, false, false),
             (ToolCatalog.registerContext, false, true, true),
@@ -53,6 +56,7 @@ final class MCPToolReplayPolicyTests: XCTestCase {
         let jobTools: Set<String> = [
             ToolCatalog.regenerate, ToolCatalog.exportMinutes, ToolCatalog.importRecording,
             ToolCatalog.stopRecording, ToolCatalog.registerContext, ToolCatalog.prepareProviderRuntime,
+            ToolCatalog.prepareRecording,
         ]
         let flags: [Bool?] = [nil, false, true]
         for tool in ToolCatalog.allUsed + ["future_unknown_tool"] where !jobTools.contains(tool) {

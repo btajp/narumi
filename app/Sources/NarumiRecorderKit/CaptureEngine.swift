@@ -35,10 +35,12 @@ public actor CaptureEngine {
 
     static func displayInfos(_ displays: [SCDisplay]) async -> [DisplayInfo] {
         var infos: [DisplayInfo] = []
+        let mainDisplayID = CGMainDisplayID()
         for display in displays {
             let id = display.displayID
             let name = await displayName(for: id)
-            infos.append(DisplayInfo(id: id, width: display.width, height: display.height, name: name))
+            infos.append(DisplayInfo(
+                id: id, width: display.width, height: display.height, name: name, isMain: id == mainDisplayID))
         }
         return infos
     }

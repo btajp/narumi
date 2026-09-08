@@ -71,6 +71,7 @@ public enum NarumiFormat {
         case "process": return "処理"
         case "regenerate": return "再生成"
         case "export": return "エクスポート"
+        case "playback": return "録画ファイル生成"
         default: return kind
         }
     }
@@ -92,7 +93,7 @@ public enum NarumiFormat {
         var text = "\(jobKindLabel(kind)) \(jobStatusLabel(status))"
         var parts: [String] = []
         if let stage = progress?.stage, !stage.isEmpty {
-            parts.append(stage)
+            parts.append(stage == "recording/playback" ? "録画ファイル生成" : stage)
         }
         if let fraction = progress?.fraction {
             let clamped = min(max(fraction, 0), 1)

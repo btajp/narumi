@@ -4,6 +4,18 @@ import XCTest
 @testable import NarumiRecorderKit
 
 final class RecorderEventsTests: XCTestCase {
+    func testStartedReportsActualSelectedDisplay() throws {
+        let display = DisplayInfo(id: 42, width: 2560, height: 1440, name: "External", isMain: false)
+        let event = RecorderEvent.started(StartedEvent(
+            startedAt: "2026-08-27T03:05:00Z", tracks: .standard(includeVideo: true), display: display))
+        let data = Data(RecorderEventLine.encode(event).utf8)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let selected = try XCTUnwrap(object["display"] as? [String: Any])
+        XCTAssertEqual(selected["id"] as? Int, 42)
+        XCTAssertEqual(selected["is_main"] as? Bool, false)
+        XCTAssertEqual(try JSONDecoder().decode(RecorderEvent.self, from: data), event)
+    }
+
     func testStartedLineMatchesProtocol() {
         let event = RecorderEvent.started(
             StartedEvent(startedAt: "2026-08-27T03:05:00Z", tracks: .standard(includeVideo: true)))

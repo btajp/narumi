@@ -79,7 +79,7 @@ actor MCPClient {
             if confidential {
                 _ = try MCPHTTPTransport.confidentialEndpoint(serverURL)
             }
-            if name == ToolCatalog.configureRecordingPermission
+            if name == ToolCatalog.configureRecordingPermission || name == ToolCatalog.startRecording
                 || (name == ToolCatalog.getServerInfo && arguments["refresh_permissions"]?.boolValue == true) {
                 return try await performToolCall(
                     name, arguments: arguments, confidential: confidential,
@@ -304,7 +304,7 @@ actor MCPClient {
         _ body: JSONNode, confidential: Bool, expectedSessionGeneration: UInt64? = nil
     ) async throws -> (Data, HTTPURLResponse) {
         if let expectedSessionGeneration, expectedSessionGeneration != permissionSession.generation {
-            throw MCPClientError.protocolError("権限操作の確認後に接続が変わりました。診断から状態を再確認してください。")
+            throw MCPClientError.protocolError("操作の確認後に接続が変わりました。状態を再確認してください。")
         }
         if body["method"]?.stringValue == "tools/call", let tool = body["params"]?["name"]?.stringValue {
             let refreshing = body["params"]?["arguments"]?["refresh_permissions"]?.boolValue == true

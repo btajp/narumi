@@ -160,6 +160,61 @@ def test_explicit_request_id_wins(cli: click.Group, dispatched: dict[str, Any]):
     assert dispatched["args"]["request_id"] == "my-request-01"
 
 
+def test_prepare_recording_command_forwards_meeting_and_scope(
+    cli: click.Group, dispatched: dict[str, Any]
+):
+    result = invoke(
+        cli,
+        [
+            "--in-process",
+            "prepare-recording",
+            "--meeting-id",
+            MEETING_A,
+            "--scope",
+            "private",
+            "--request-id",
+            "playback-repair-01",
+        ],
+    )
+    assert result.exit_code == 0, result.stderr
+    assert dispatched["tool"] == "prepare_recording"
+    assert dispatched["args"] == {
+        "meeting_id": MEETING_A,
+        "scope": "private",
+        "request_id": "playback-repair-01",
+    }
+
+
+def test_list_recording_displays_command_has_no_extra_arguments(
+    cli: click.Group, dispatched: dict[str, Any]
+):
+    result = invoke(cli, ["--in-process", "list-recording-displays"])
+    assert result.exit_code == 0, result.stderr
+    assert dispatched["tool"] == "list_recording_displays"
+    assert dispatched["args"] == {}
+
+
+def test_start_recording_display_id_is_integer_and_omission_is_preserved(
+    cli: click.Group, contracts: ContractSet, monkeypatch: pytest.MonkeyPatch
+):
+    calls: list[dict[str, Any]] = []
+
+    def capture(_state, tool, arguments):
+        assert tool == "start_recording"
+        contracts.validate_input(tool, arguments)
+        calls.append(arguments)
+        return {"ok": True}, False
+
+    monkeypatch.setattr(cli_tools, "_call", capture)
+    result = invoke(cli, ["start-recording", "--display-id", "4294967295"])
+    assert result.exit_code == 0, result.stderr
+    assert calls[0]["display_id"] == 4294967295
+    assert UUID4_RE.match(calls[0]["request_id"])
+    result = invoke(cli, ["start-recording"])
+    assert result.exit_code == 0, result.stderr
+    assert "display_id" not in calls[1]
+
+
 def test_array_option_takes_json(cli: click.Group, dispatched: dict[str, Any]):
     result = invoke(
         cli,

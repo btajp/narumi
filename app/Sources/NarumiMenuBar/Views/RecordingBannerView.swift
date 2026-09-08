@@ -11,7 +11,7 @@ struct RecordingBannerView: View {
         HStack(spacing: 14) {
             Image(systemName: session.menuSymbolName)
                 .font(.title2)
-                .foregroundStyle(session.recording.active ? .red : .secondary)
+                .foregroundStyle(session.recordingNeedsFinalization ? Color.accentColor : session.recording.active ? .red : .secondary)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 4) {
                 Text(session.statusText)
@@ -29,7 +29,7 @@ struct RecordingBannerView: View {
                 }
             }
             Spacer(minLength: 12)
-            if session.recording.active, let elapsed = session.recording.elapsedSec {
+            if session.recording.active, !session.recordingNeedsFinalization, let elapsed = session.recording.elapsedSec {
                 Text(NarumiFormat.duration(elapsed))
                     .font(.title3.monospacedDigit())
                     .accessibilityLabel("録画経過時間 \(NarumiFormat.duration(elapsed))")
@@ -40,10 +40,11 @@ struct RecordingBannerView: View {
             }
             if session.recording.active {
                 Button(action: model.stopRecordingFromBanner) {
-                    Label("録画停止", systemImage: "stop.circle.fill")
+                    Label(session.recordingNeedsFinalization ? "録画を保存" : "録画停止",
+                        systemImage: session.recordingNeedsFinalization ? "square.and.arrow.down" : "stop.circle.fill")
                 }
                 .disabled(!session.canStop)
-                .help("録画を停止して保存します")
+                .help(session.recordingNeedsFinalization ? "終了した録画の保存を再試行します" : "録画を停止して保存します")
             } else if model.permissionSetup.needsSetup || model.permissionSetup.blocked {
                 Button(action: model.openPermissionSetup) {
                     Label(model.permissionSetupButtonTitle, systemImage: "lock.shield")
@@ -61,11 +62,12 @@ struct RecordingBannerView: View {
         }
         .labelStyle(.titleAndIcon)
         .buttonStyle(.borderedProminent)
-        .tint(.red)
+        .tint(session.recordingNeedsFinalization ? .accentColor : .red)
         .controlSize(.large)
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
-        .background(session.recording.active ? Color.red.opacity(0.08) : Color.primary.opacity(0.03))
+        .background(session.recordingNeedsFinalization ? Color.accentColor.opacity(0.08)
+            : session.recording.active ? Color.red.opacity(0.08) : Color.primary.opacity(0.03))
         Divider()
     }
 }

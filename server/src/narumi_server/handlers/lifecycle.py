@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from narumi.errors import InvalidArgumentError, NotFoundError
 
 from narumi_server.handlers.common import locked_bundle, sync_catalog
+from narumi_server.handlers.playback import discard_playback
 
 if TYPE_CHECKING:
     from narumi_server.context import ServerContext
@@ -56,6 +57,8 @@ def discard_tracks(ctx: ServerContext, args: dict[str, Any]) -> dict[str, Any]:
                     " run the process job first",
                     details={"meeting_id": bundle.meeting_id, "track": name, "artifact": key},
                 )
+        if to_discard:
+            discard_playback(bundle)
         for name in to_discard:
             record = tracks[name]
             path = bundle.abspath(record.path)

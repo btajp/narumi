@@ -5,6 +5,7 @@ Swift recorder in ``app/`` must match — see ``app/Sources/NarumiRecorderKit/Re
 
 * ``{"event": "started", "started_at": <RFC3339 UTC>, "tracks": {<track>: <file name>}}``
   — emitted once capture runs; file names are relative to ``--output`` (``tracks/`` of the bundle)
+  and optional ``display`` reports the actual target as ``{id, name, width, height, is_main}``
 * ``{"event": "stopped", "stopped_at": <RFC3339 UTC>, "duration_sec": <number>,
   "tracks": {<track>: {"path": <file name>, "bytes": <int>, "duration_sec": <number>}}}``
   — emitted after finalization; the process then exits 0
@@ -20,6 +21,7 @@ Swift recorder in ``app/`` must match — see ``app/Sources/NarumiRecorderKit/Re
 ``<recorder> check`` prints ``{"screen_recording": <status>, "microphone": <status>}`` with
 ``granted`` / ``denied`` / ``unknown`` (macOS reports screen recording as ``denied`` until it was
 granted once; the first ``record`` run triggers the prompt).
+``<recorder> list-displays`` prints the available display objects as a JSON array without recording.
 
 The controller launches ``<recorder> record --output <bundle>/tracks``, stops with SIGINT (the
 recorder also accepts a ``stop`` line on stdin) and never hard-codes track file names: they come
@@ -91,6 +93,7 @@ class StartedEvent:
     tracks: dict[str, str]
     """Track name → file name relative to the recorder output directory."""
     raw: dict[str, Any] = field(default_factory=dict, compare=False)
+    display: dict[str, Any] | None = None
 
     @classmethod
     def parse(cls, event: Mapping[str, Any]) -> StartedEvent:
@@ -105,7 +108,8 @@ class StartedEvent:
             if not isinstance(name, str) or not isinstance(value, str) or not value:
                 raise _malformed("started", f"bad track entry {name!r}", event)
             parsed[name] = value
-        return cls(started_at=started_at, tracks=parsed, raw=dict(event))
+        display = _parse_display(event["display"]) if "display" in event else None
+        return cls(started_at=started_at, tracks=parsed, raw=dict(event), display=display)
 
 
 @dataclass(frozen=True)
@@ -162,6 +166,21 @@ def _malformed(name: str, why: str, event: Mapping[str, Any]) -> RecorderUnavail
         f"recorder emitted a malformed {name!r} event: {why}",
         details={"event": dict(event)},
     )
+
+
+def _parse_display(value: Any) -> dict[str, Any]:
+    """Validate the recorder display boundary before exposing it through MCP."""
+    if not isinstance(value, dict):
+        raise RecorderUnavailableError("recorder returned a malformed display")
+    for key in ("id", "width", "height"):
+        number = value.get(key)
+        if type(number) is not int or number <= 0 or (key == "id" and number > 0xFFFFFFFF):
+            raise RecorderUnavailableError(f"recorder returned a malformed display {key}")
+    if not isinstance(value.get("name"), str) or not value["name"].strip():
+        raise RecorderUnavailableError("recorder returned a malformed display name")
+    if type(value.get("is_main")) is not bool:
+        raise RecorderUnavailableError("recorder returned a malformed display is_main")
+    return {key: value[key] for key in ("id", "name", "width", "height", "is_main")}
 
 
 def recorder_error(event: Mapping[str, Any]) -> NarumiError:
@@ -364,6 +383,38 @@ class RecordingController:
             )
         return path
 
+    def list_displays(self) -> list[dict[str, Any]]:
+        """Enumerate capturable displays without starting a recording."""
+        with self.recording_operation():
+            path = self.require_available()
+            args = [*recorder_command(path), "list-displays"]
+            try:
+                completed = subprocess.run(  # noqa: S603 - argv list, no shell
+                    args, capture_output=True, timeout=CHECK_TIMEOUT, check=False
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise RecorderUnavailableError(f"recorder could not list displays: {exc}") from exc
+            try:
+                report = json.loads(completed.stdout)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise RecorderUnavailableError(
+                    "recorder returned a malformed display list"
+                ) from exc
+            if completed.returncode != 0:
+                if isinstance(report, dict) and report.get("event") == "error":
+                    raise recorder_error(report)
+                raise RecorderUnavailableError(
+                    "recorder could not list displays", details={"returncode": completed.returncode}
+                )
+            if not isinstance(report, list):
+                raise RecorderUnavailableError("recorder returned a malformed display list")
+            displays = [_parse_display(value) for value in report]
+            if len({display["id"] for display in displays}) != len(displays):
+                raise RecorderUnavailableError("recorder returned duplicate display IDs")
+            if sum(display["is_main"] for display in displays) > 1:
+                raise RecorderUnavailableError("recorder returned more than one main display")
+            return displays
+
     # ------------------------------------------------------------------ state
     @property
     def active_meeting_id(self) -> str | None:
@@ -382,8 +433,14 @@ class RecordingController:
         return self._proc is not None and self._proc.poll() is None
 
     # ------------------------------------------------------------------ start / stop
-    def start(self, bundle: Bundle, *, no_video: bool = False) -> StartedEvent:
+    def start(
+        self, bundle: Bundle, *, no_video: bool = False, display_id: int | None = None
+    ) -> StartedEvent:
         """Launch the recorder for ``bundle`` and wait for its ``started`` event."""
+        if display_id is not None and (
+            type(display_id) is not int or not 1 <= display_id <= 0xFFFFFFFF
+        ):
+            raise InvalidArgumentError("display_id must be a positive uint32")
         with self.recording_operation(), self._lock:
             if self._active_meeting_id is not None:
                 raise BusyError(
@@ -396,6 +453,8 @@ class RecordingController:
             args = [*recorder_command(path), "record", "--output", str(out_dir)]
             if no_video:
                 args.append("--no-video")
+            if display_id is not None:
+                args.extend(["--display", str(display_id)])
             args.extend(self._extra_args)
             stderr = self._stderr_path.open("ab")
             try:

@@ -96,7 +96,7 @@ public struct DesktopJobRequestState: Equatable, Sendable {
         return true
     }
 
-    /// Only the first attempt can prove a preflight rejection. A replay error cannot
+    /// Only the first attempt can prove rejection or finalized local failure. A replay error cannot
     /// rule out work accepted before the original response was lost.
     @discardableResult
     public mutating func finishFailure(_ token: Token, errorCode: String?) -> Bool {
@@ -179,7 +179,10 @@ public struct DesktopJobRequestState: Equatable, Sendable {
             // explicit configuration preflight in regenerate/import_recording.
             return ["invalid_argument", "not_found", "busy", "scope_denied"].contains(code)
         case ToolCatalog.stopRecording:
-            return ["invalid_argument", "not_found", "busy"].contains(code)
+            // The controller clears the recording before returning this failure; no job was queued.
+            return ["invalid_argument", "not_found", "busy", "recorder_unavailable"].contains(code)
+        case ToolCatalog.prepareRecording:
+            return ["invalid_argument", "not_found", "busy", "scope_denied", "engine_unavailable"].contains(code)
         default:
             return false
         }
