@@ -22,15 +22,15 @@ narumi は、macOS 上でローカルに会議を録画し、終了後に議事�
 
 統合ファイルは会議フォルダ内の `playback/recording.mp4` です。「会議フォルダを Finder で表示」は元データや議事録も含むフォルダ全体を表示します。`tracks/` にある映像・マイク・システム音声は統合前の元データで、そのまま保持します。
 
-MP4 の生成時にはマイクとシステム音声の音量をそれぞれ補正してから混合します。音割れを避けるピーク制限と増幅の上限を設け、無音・微小音は増幅しません。過去の MP4 にも「録画ファイルを再生成」で適用できます。元の音声や文字起こしは変更せず、処理はこの Mac 内で完結します。
+MP4 の生成時にはマイクとシステム音声の音量をそれぞれ補正してから混合します。増幅量には上限を設け、一時的な大音量はリミッターで抑えます。無音・微小音は増幅しません。過去の MP4 にも「録画ファイルを再生成」で適用できます。元の音声や文字起こしは変更せず、処理はこの Mac 内で完結します。
 
-ffmpeg / ffprobe は別途必要です。アプリの「診断」で検出状態を確認できます。初回導入後の更新は GitHub Releases を自動確認し、利用者の操作で適用します。手動確認はメニューバーの「narumi」→「アップデートを確認…」です。毎回 DMG を入れ直す必要はありません。録画中やアプリが把握している処理の実行中は更新を延期します。別の CLI / MCP クライアントから処理している間は更新しないでください。会議データはアプリ本体とは別の Application Support 配下に保存するため、通常の更新で削除されません。
+FFmpeg 5.1 以降の ffmpeg / ffprobe は別途必要です。アプリの「診断」で検出状態を確認できます。初回導入後の更新は GitHub Releases を自動確認し、利用者の操作で適用します。手動確認はメニューバーの「narumi」→「アップデートを確認…」です。毎回 DMG を入れ直す必要はありません。録画中やアプリが把握している処理の実行中は更新を延期します。別の CLI / MCP クライアントから処理している間は更新しないでください。会議データはアプリ本体とは別の Application Support 配下に保存するため、通常の更新で削除されません。
 
 ## 開発環境の要件
 
 - macOS 15 以降（マイク取り込みに ScreenCaptureKit の `captureMicrophone` を使うため）
 - [uv](https://docs.astral.sh/uv/)（Python 3.12 以降を管理。`.venv` はリポジトリ直下に作られます）
-- ffmpeg / ffprobe（`brew install ffmpeg`）
+- FFmpeg 5.1 以降の ffmpeg / ffprobe（`brew install ffmpeg`）
 - Xcode Command Line Tools（`xcode-select --install`。録画アプリのビルドに Swift 6.0 以降が必要。6.3.3 で検証）。`swift test` だけは XCTest を含む Xcode 本体が必要で、`xcode-select` が CLT を指す環境では `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` で実行する（`swift build` は CLT だけで通る）
 - 任意: gaia-library（無くてもテストは全て通ります）
 
@@ -422,7 +422,7 @@ scripts/build-app.sh --runtime    # dist/narumi.app（ランタイム同梱、ad
 
 `--runtime` は `Contents/Resources/runtime/` に uv、narumi / narumi-server の wheel、ハッシュ付き `requirements.txt`、契約ファイル、Codex CLI 0.150.1、Apache-2.0 の LICENSE / NOTICE、runtime manifest を同梱します。Codex は OpenAI 公式 `rust-v0.150.1` の Apple Silicon 用 artifact を使用し、URL・tag commit・archive SHA256・展開後 SHA256・サイズ・arm64・OpenAI の Developer ID Team を `scripts/runtime.lock.json` で固定し、実行時 trust anchor との完全一致もビルド前に確認します。展開後 binary は 228,986,048 bytes（約 218.4 MiB）で、上流署名を保持します。署名前後の inventory と署名を検査し、未列挙ファイルや変更を拒否します。
 
-初回起動と更新時に、必要に応じて `NARUMI_HOME/runtime/` の Python 3.13 と venv を準備します。**リポジトリのチェックアウト、uv、Codex CLI の事前インストールは不要**ですが、Python 依存の初回取得にはネットワークが必要で、ffmpeg / ffprobe は別途必要です。Codex の準備と版確認はオフラインで完了しますが、ChatGPT ログイン・モデル照会・議事録生成には通信が必要です。進捗はアプリに表示し、ログは `~/Library/Logs/narumi/runtime.log` に保存します。
+初回起動と更新時に、必要に応じて `NARUMI_HOME/runtime/` の Python 3.13 と venv を準備します。**リポジトリのチェックアウト、uv、Codex CLI の事前インストールは不要**ですが、Python 依存の初回取得にはネットワークが必要で、FFmpeg 5.1 以降の ffmpeg / ffprobe は別途必要です。Codex の準備と版確認はオフラインで完了しますが、ChatGPT ログイン・モデル照会・議事録生成には通信が必要です。進捗はアプリに表示し、ログは `~/Library/Logs/narumi/runtime.log` に保存します。
 
 版は `VERSION` ファイルが正本（`CFBundleShortVersionString`）、`CFBundleVersion` は `git rev-list --count HEAD` です。Python パッケージ、サーバー、録画ヘルパー、`CHANGELOG.md` の版との一致は `scripts/check-version.sh` で検査します。
 

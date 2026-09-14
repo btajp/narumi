@@ -23,28 +23,30 @@ def _stderr(integrated, peak) -> bytes:
 
 
 @pytest.mark.parametrize(
-    ("integrated", "peak", "gain", "reason"),
+    ("integrated", "peak", "gain", "reason", "limiting"),
     [
-        (-30, -20, 12, "matched_target"),
-        (-14, -5, -4, "matched_target"),
-        (-18, -10, 0, "matched_target"),
-        (-50, -40, 24, "boost_limited"),
-        (-40, -12, 10, "peak_limited"),
-        (-50, -26, 24, "peak_limited"),
-        (-42, -40, 24, "matched_target"),
-        (-26, -10, 8, "matched_target"),
-        (-18, -1, -1, "peak_limited"),
-        (-55, -70, 0, "below_floor"),
-        (-54.999, -50, 24, "boost_limited"),
-        (-60, -1, -1, "peak_limited"),
-        (None, None, 0, "silence"),
-        (None, -95, 0, "below_measurement_gate"),
-        (None, -12.04, 0, "below_measurement_gate"),
-        (None, -1, -1, "peak_limited"),
-        (-30.123456789, -40, 12.123457, "matched_target"),
+        (-30, -20, 12, "target_gain", False),
+        (-14, -5, -4, "target_gain", False),
+        (-18, -10, 0, "target_gain", False),
+        (-50, -40, 24, "boost_limited", False),
+        (-40, -12, 22, "target_gain", True),
+        (-50, -26, 24, "boost_limited", False),
+        (-42, -40, 24, "target_gain", False),
+        (-26, -10, 8, "target_gain", False),
+        (-18, -1, 0, "target_gain", True),
+        (-55, -70, 0, "below_floor", False),
+        (-54.999, -50, 24, "boost_limited", False),
+        (-60, -1, 0, "below_floor", True),
+        (None, None, 0, "silence", False),
+        (None, -95, 0, "below_measurement_gate", False),
+        (None, -12.04, 0, "below_measurement_gate", False),
+        (None, -1, 0, "below_measurement_gate", True),
+        (-30.123456789, -40, 12.123457, "target_gain", False),
     ],
 )
-def test_normalization_respects_target_noise_floor_and_peak(integrated, peak, gain, reason):
+def test_normalization_keeps_loudness_gain_and_records_peak_limiting(
+    integrated, peak, gain, reason, limiting
+):
     measured = LoudnessMeasurement(integrated, peak)
 
     result = compute_normalization(measured)
@@ -52,8 +54,7 @@ def test_normalization_respects_target_noise_floor_and_peak(integrated, peak, ga
     assert result.measurement == measured
     assert result.gain_db == gain
     assert result.reason == reason
-    if peak is not None:
-        assert peak + result.gain_db <= -2 + 1e-6
+    assert result.to_record()["peak_limiting_expected"] is limiting
     assert result.gain_db <= 24
 
 
@@ -161,7 +162,8 @@ def test_normalization_record_requires_the_same_tracks_and_consistent_gain():
         "integrated_lufs": -19,
         "true_peak_dbfs": -20,
         "gain_db": 1.0,
-        "reason": "matched_target",
+        "reason": "target_gain",
+        "peak_limiting_expected": False,
     }
     assert valid_normalization_records({"mic": record}, ["mic"])
     assert not valid_normalization_records({"mic": record}, ["mic", "system"])
@@ -171,6 +173,7 @@ def test_normalization_record_requires_the_same_tracks_and_consistent_gain():
         {"gain_db": True},
         {"gain_db": float("nan")},
         {"reason": "boost_limited"},
+        {"peak_limiting_expected": True},
         {"integrated_lufs": None, "true_peak_dbfs": None},
         {"true_peak_dbfs": None},
     ]:

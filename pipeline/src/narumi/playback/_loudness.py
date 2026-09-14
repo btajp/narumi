@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from narumi.playback._limiter import LIMITER_SETTINGS, PEAK_CEILING_DBFS
 from narumi.playback._process import CancelCheck, run_media_tool
 from narumi.preprocess.ffmpeg import FfmpegError, ffmpeg_path
 
@@ -17,15 +18,15 @@ AUDIO_FORMAT_FILTER = (
 )
 TARGET_LUFS = -18.0
 MAX_BOOST_DB = 24.0
-PEAK_CEILING_DBFS = -2.0
 MIN_LOUDNESS_LUFS = -55.0
 NORMALIZATION_SETTINGS = {
-    "method": "ebu_r128_bounded_static_gain",
+    "method": "ebu_r128_static_gain_with_peak_limiter",
     "target_lufs": TARGET_LUFS,
     "max_boost_db": MAX_BOOST_DB,
     "peak_ceiling_dbfs": PEAK_CEILING_DBFS,
     "minimum_loudness_lufs": MIN_LOUDNESS_LUFS,
     "measurement_filter": AUDIO_FORMAT_FILTER,
+    "limiter": dict(LIMITER_SETTINGS),
 }
 
 
@@ -47,6 +48,10 @@ class TrackNormalization:
             "true_peak_dbfs": self.measurement.true_peak_dbfs,
             "gain_db": self.gain_db,
             "reason": self.reason,
+            "peak_limiting_expected": (
+                self.measurement.true_peak_dbfs is not None
+                and self.measurement.true_peak_dbfs + self.gain_db > PEAK_CEILING_DBFS
+            ),
         }
 
 
@@ -109,22 +114,13 @@ def compute_normalization(measurement: LoudnessMeasurement) -> TrackNormalizatio
     loudness, peak = measurement.integrated_lufs, measurement.true_peak_dbfs
     if peak is None:
         return TrackNormalization(measurement, 0.0, "silence")
-    peak_gain = PEAK_CEILING_DBFS - peak
     if loudness is None or loudness <= MIN_LOUDNESS_LUFS:
         # Below the EBU measurement gate, including short clips, never increase noise.
-        gain = min(0.0, peak_gain)
         reason = "below_measurement_gate" if loudness is None else "below_floor"
-        return TrackNormalization(
-            measurement, round(gain, 6), "peak_limited" if gain < 0 else reason
-        )
+        return TrackNormalization(measurement, 0.0, reason)
     target_gain = TARGET_LUFS - loudness
-    gain = min(target_gain, MAX_BOOST_DB, peak_gain)
-    if peak_gain < target_gain and peak_gain <= MAX_BOOST_DB:
-        reason = "peak_limited"
-    elif MAX_BOOST_DB < target_gain:
-        reason = "boost_limited"
-    else:
-        reason = "matched_target"
+    gain = min(target_gain, MAX_BOOST_DB)
+    reason = "boost_limited" if MAX_BOOST_DB < target_gain else "target_gain"
     return TrackNormalization(measurement, round(gain, 6), reason)
 
 
@@ -166,7 +162,11 @@ def valid_normalization_records(records: Any, tracks: list[str]) -> bool:
     if not isinstance(records, dict) or set(records) != set(tracks):
         return False
     for record in records.values():
-        if not isinstance(record, dict) or not _finite_number(record.get("gain_db")):
+        if (
+            not isinstance(record, dict)
+            or not _finite_number(record.get("gain_db"))
+            or not isinstance(record.get("peak_limiting_expected"), bool)
+        ):
             return False
         try:
             measurement = LoudnessMeasurement(record["integrated_lufs"], record["true_peak_dbfs"])

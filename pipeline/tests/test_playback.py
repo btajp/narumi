@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 from narumi.bundle import Bundle, TrackRecord, sha256_file, sha256_params
-from narumi.errors import CancelledError, InvalidArgumentError, NotFoundError
+from narumi.errors import (
+    CancelledError,
+    EngineUnavailableError,
+    InvalidArgumentError,
+    NotFoundError,
+)
 from narumi.playback import ARTIFACT_KEY, OUTPUT_PATH, playback_info, run_playback
 from narumi.playback._loudness import LoudnessMeasurement
 from narumi.playback._media import MediaStream
@@ -128,10 +133,41 @@ def test_old_recipe_is_regenerated_and_new_cache_skips_measurement(
     assert current.record.params["recipe_version"] == 2
     tracks = current.record.params["normalization_tracks"]
     assert tracks["mic"]["gain_db"] == pytest.approx(23.09)
-    assert tracks["system"]["gain_db"] == pytest.approx(3.2)
-    assert tracks["system"]["reason"] == "peak_limited"
+    assert tracks["system"]["gain_db"] == pytest.approx(3.8)
+    assert tracks["system"]["reason"] == "target_gain"
+    assert tracks["system"]["peak_limiting_expected"]
     assert run_playback(Bundle.open(recorded_bundle.path)).skipped
     assert len(measurements) == 2
+
+
+def test_limiter_settings_invalidate_previous_static_gain_recipe(recorded_bundle, fake_media):
+    previous = run_playback(recorded_bundle)
+    previous.record.params["normalization"]["method"] = "ebu_r128_bounded_static_gain"
+    del previous.record.params["normalization"]["limiter"]
+    previous.record.params_hash = sha256_params(previous.record.params)
+    recorded_bundle.save()
+
+    revised = run_playback(recorded_bundle)
+
+    assert not revised.skipped and len(fake_media) == 2
+    assert revised.record.params["recipe_version"] == 2
+    limiter = revised.record.params["normalization"]["limiter"]
+    assert limiter["auto_level"] is False
+    assert limiter["latency_compensation"] is True
+    assert limiter["oversample_rate"] == 192000
+    assert run_playback(Bundle.open(recorded_bundle.path)).skipped
+
+
+def test_old_ffmpeg_is_rejected_before_loudness_scan(recorded_bundle, fake_media, monkeypatch):
+    monkeypatch.setattr("narumi.playback.stage.ffmpeg_version", lambda: "5.0.1")
+    monkeypatch.setattr(
+        "narumi.playback.stage.measure_loudness",
+        lambda *args, **kwargs: pytest.fail("unsupported ffmpeg must fail before measuring audio"),
+    )
+    with pytest.raises(EngineUnavailableError, match="5.1"):
+        run_playback(recorded_bundle)
+    assert not fake_media
+    assert not recorded_bundle.abspath(OUTPUT_PATH).exists()
 
 
 @pytest.mark.parametrize(
