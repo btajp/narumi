@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from narumi.errors import InvalidArgumentError
+from narumi.playback._loudness import AUDIO_FORMAT_FILTER
 from narumi.playback._process import CancelCheck, run_media_tool
 from narumi.preprocess.ffmpeg import FfmpegError, ffmpeg_path, ffprobe_path
 
@@ -77,8 +79,16 @@ def inspect_media(path: Path, *, should_cancel: CancelCheck = None) -> dict[str,
 
 
 def mix_recording(
-    video: Path, audio: list[Path], output: Path, *, should_cancel: CancelCheck = None
+    video: Path,
+    audio: list[Path],
+    output: Path,
+    *,
+    gains_db: list[float] | None = None,
+    should_cancel: CancelCheck = None,
 ) -> None:
+    gains = [0.0] * len(audio) if gains_db is None else gains_db
+    if not audio or len(gains) != len(audio) or not all(math.isfinite(gain) for gain in gains):
+        raise InvalidArgumentError("playback needs one finite gain per audio track")
     args = [
         str(ffmpeg_path()),
         "-y",
@@ -96,9 +106,8 @@ def mix_recording(
     for path in audio:
         args.extend(["-err_detect", "explode", "-i", str(path)])
     filters = [
-        f"[{index}:a:0]aresample={SAMPLE_RATE}:async=1:first_pts=0,"
-        f"aformat=sample_fmts=fltp:channel_layouts=stereo[a{index}]"
-        for index in range(1, len(audio) + 1)
+        f"[{index}:a:0]{AUDIO_FORMAT_FILTER},volume={gain:.6f}dB[a{index}]"
+        for index, gain in enumerate(gains, start=1)
     ]
     labels = "".join(f"[a{index}]" for index in range(1, len(audio) + 1))
     # Fixed averaging avoids clipping and the gain jump when a shorter source ends.

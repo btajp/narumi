@@ -11,13 +11,19 @@ from typing import Any
 from narumi.bundle import ArtifactRecord, Bundle, StageResult, sha256_params, utc_now_iso
 from narumi.bundle.manifest import Producer
 from narumi.errors import InvalidArgumentError, NotFoundError
+from narumi.playback._loudness import (
+    NORMALIZATION_SETTINGS,
+    compute_normalization,
+    measure_loudness,
+    valid_normalization_records,
+)
 from narumi.playback._media import MediaStream, inspect_media, mix_recording, validate_output
 from narumi.playback._process import CancelCheck, check_cancelled
 from narumi.preprocess.ffmpeg import ffmpeg_version
 
 ARTIFACT_KEY = "recording/playback"
 OUTPUT_PATH = "playback/recording.mp4"
-RECIPE_VERSION = 1
+RECIPE_VERSION = 2
 
 
 def _local_path(bundle: Bundle, relative: str) -> Path:
@@ -124,29 +130,41 @@ def run_playback(bundle: Bundle, *, should_cancel: CancelCheck = None) -> StageR
         "timeline": "copyts_aresample_first_pts_zero",
         "duration": "longest",
         "verify_video_decode": True,
+        "normalization": dict(NORMALIZATION_SETTINGS),
         "streams": {name: asdict(info) for name, info in streams.items()},
     }
+    audio_names = [name for name in sources if name != "screen"]
     producer = Producer(name="ffmpeg", version=ffmpeg_version())
-    params_hash = sha256_params(params)
     existing = bundle.artifact(ARTIFACT_KEY)
     if (
         existing is not None
         and existing.path == OUTPUT_PATH
         and existing.inputs == inputs
-        and existing.params_hash == params_hash
+        and {key: value for key, value in existing.params.items() if key != "normalization_tracks"}
+        == params
+        and valid_normalization_records(existing.params.get("normalization_tracks"), audio_names)
+        and existing.params_hash == sha256_params(existing.params)
         and existing.producer == producer
         and output.is_file()
         and _file_hash(output, should_cancel) == existing.sha256
     ):
         return StageResult(key=ARTIFACT_KEY, path=output, record=existing, skipped=True)
+    normalizations = {
+        name: compute_normalization(measure_loudness(sources[name], should_cancel=should_cancel))
+        for name in audio_names
+    }
+    params["normalization_tracks"] = {
+        name: normalization.to_record() for name, normalization in normalizations.items()
+    }
+    params_hash = sha256_params(params)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".recording-", dir=output.parent) as work:
         candidate = Path(work) / "recording.mp4"
-        audio_names = [name for name in sources if name != "screen"]
         mix_recording(
             sources["screen"],
             [sources[name] for name in audio_names],
             candidate,
+            gains_db=[normalizations[name].gain_db for name in audio_names],
             should_cancel=should_cancel,
         )
         if not candidate.is_file() or candidate.stat().st_size == 0:

@@ -11,6 +11,15 @@ public struct RecordingPlayback: Codable, Equatable, Sendable {
         self.sha256 = sha256
         self.bytes = bytes
     }
+
+    /// File actions use only the exact, existing file returned by the server.
+    public static func availableFileURL(at path: String) -> URL? {
+        guard path.hasPrefix("/") else { return nil }
+        let url = URL(fileURLWithPath: path)
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey]),
+            values.isRegularFile == true else { return nil }
+        return url
+    }
 }
 
 public struct PrepareRecordingResponse: Codable, Equatable, Sendable {
@@ -59,7 +68,7 @@ public struct RecordingPlaybackPresentation: Equatable, Sendable {
         if let unavailable {
             message = unavailable
         } else if playbackPath != nil {
-            message = "画面と音声をまとめた録画です。"
+            message = "画面と音声を1本にまとめた MP4 です。Finder で表示するとコピー・共有できます。"
         } else {
             message = detail.playback == nil
                 ? "画面とマイク・システム音声をまとめた録画ファイルを、この Mac 上で生成します。"

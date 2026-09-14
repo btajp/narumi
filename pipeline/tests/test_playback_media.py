@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from narumi.bundle import TrackRecord, sha256_file
 from narumi.playback import ARTIFACT_KEY, OUTPUT_PATH, run_playback
+from narumi.playback._loudness import measure_loudness
 from narumi.playback._media import inspect_media, mix_recording
 from narumi.preprocess.ffmpeg import FfmpegError, ffmpeg_path, ffprobe_path, run_tool
 
@@ -19,12 +20,24 @@ from .media_fixtures import _ffmpeg, make_bundle_with_tracks, make_sine_wav, mak
 SAMPLE_RATE = 48000
 
 
-def _aac_tone(path: Path, *, frequency: int, seconds: float, delay: float = 0) -> Path:
+def _aac_tone(
+    path: Path, *, frequency: int, seconds: float, delay: float = 0, gain_db: float = 0
+) -> Path:
     source = make_sine_wav(
         path.with_suffix(".wav"), seconds=seconds, freq=frequency, sample_rate=SAMPLE_RATE
     )
     # Independent recorder writers retain an offset from their common session start.
-    _ffmpeg("-i", str(source), "-c:a", "aac", "-output_ts_offset", str(delay), str(path))
+    _ffmpeg(
+        "-i",
+        str(source),
+        "-af",
+        f"volume={gain_db}dB",
+        "-c:a",
+        "aac",
+        "-output_ts_offset",
+        str(delay),
+        str(path),
+    )
     return path
 
 
@@ -69,7 +82,9 @@ def _amplitude(samples: array, frequency: int, start: float, end: float) -> floa
 def test_playback_preserves_audio_delay_tail_and_reproducible_output(tmp_path: Path):
     bundle = make_bundle_with_tracks(tmp_path, tracks=())
     video = make_test_video(bundle.abspath("tracks/screen.mp4"), seconds=3)
-    mic = _aac_tone(bundle.abspath("tracks/mic.m4a"), frequency=440, seconds=2, delay=1.25)
+    mic = _aac_tone(
+        bundle.abspath("tracks/mic.m4a"), frequency=440, seconds=2, delay=1.25, gain_db=-18
+    )
     system = _aac_tone(bundle.abspath("tracks/system.m4a"), frequency=660, seconds=5)
     for name, path in {"screen": video, "mic": mic, "system": system}.items():
         bundle.manifest.recording.tracks[name] = TrackRecord(
@@ -77,6 +92,7 @@ def test_playback_preserves_audio_delay_tail_and_reproducible_output(tmp_path: P
         )
     bundle.save()
     assert inspect_media(mic)["audio"].start == pytest.approx(1.25, abs=0.03)
+    assert measure_loudness(system).integrated_lufs - measure_loudness(mic).integrated_lufs > 17
 
     result = run_playback(bundle)
     assert not result.skipped
@@ -89,7 +105,7 @@ def test_playback_preserves_audio_delay_tail_and_reproducible_output(tmp_path: P
     assert _amplitude(samples, 440, 0.2, 0.5) < 0.001
     mic_level = _amplitude(samples, 440, 1.4, 1.7)
     system_level = _amplitude(samples, 660, 1.4, 1.7)
-    assert 0.05 < mic_level < 0.08
+    assert 0.07 < mic_level < 0.13
     assert mic_level == pytest.approx(system_level, rel=0.15)
     assert _amplitude(samples, 660, 4.5, 4.8) == pytest.approx(system_level, rel=0.15)
     assert _amplitude(samples, 440, 3.5, 3.8) < 0.001
@@ -144,6 +160,43 @@ def test_mix_recording_preserves_single_audio_delay_and_level(tmp_path: Path):
     samples = _mono_samples(output)
     assert _amplitude(samples, 440, 0.2, 0.5) < 0.001
     assert _amplitude(samples, 440, 1.4, 1.7) == pytest.approx(0.125, rel=0.15)
+
+
+@pytest.mark.parametrize("audio_kind", ["silence", "quiet_noise", "short_tone"])
+def test_playback_does_not_amplify_silence_noise_or_unmeasurable_short_audio(
+    tmp_path: Path, audio_kind
+):
+    bundle = make_bundle_with_tracks(tmp_path, tracks=())
+    video = make_test_video(bundle.abspath("tracks/screen.mp4"), seconds=3)
+    audio = bundle.abspath("tracks/mic.m4a")
+    if audio_kind == "short_tone":
+        _aac_tone(audio, frequency=440, seconds=0.25)
+    else:
+        source = (
+            "anullsrc=sample_rate=48000:channel_layout=mono:duration=3"
+            if audio_kind == "silence"
+            else "anoisesrc=color=white:amplitude=0.0003:duration=3:sample_rate=48000:seed=7"
+        )
+        _ffmpeg("-f", "lavfi", "-i", source, "-c:a", "aac", str(audio))
+    originals = {}
+    for name, path in {"screen": video, "mic": audio}.items():
+        originals[name] = sha256_file(path)
+        bundle.manifest.recording.tracks[name] = TrackRecord(
+            path=bundle.relpath(path), sha256=originals[name]
+        )
+    bundle.save()
+
+    result = run_playback(bundle)
+
+    normalization = result.record.params["normalization_tracks"]["mic"]
+    assert normalization["gain_db"] == 0
+    assert normalization["reason"] in {"silence", "below_floor", "below_measurement_gate"}
+    samples = _mono_samples(result.path)
+    if audio_kind in {"silence", "quiet_noise"}:
+        assert math.sqrt(sum(value * value for value in samples) / len(samples)) < 0.0003
+    assert inspect_media(result.path)["video"].end == pytest.approx(3, abs=0.03)
+    assert sha256_file(audio) == originals["mic"]
+    assert sha256_file(video) == originals["screen"]
 
 
 @pytest.mark.parametrize("damaged_track", ["screen", "mic"])

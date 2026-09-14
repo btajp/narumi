@@ -23,6 +23,21 @@ final class RecordingPlaybackTests: XCTestCase {
         RecordingPlayback(path: "/recordings/meeting/playback.mp4", sha256: String(repeating: "a", count: 64), bytes: 4500)
     }
 
+    func testFileActionSelectsTheExistingMP4Itself() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("recording.mp4")
+        try Data([1, 2, 3]).write(to: file)
+
+        XCTAssertEqual(RecordingPlayback.availableFileURL(at: file.path), file)
+        XCTAssertNil(RecordingPlayback.availableFileURL(at: directory.path), "Never select a folder in place of the MP4")
+        XCTAssertNil(RecordingPlayback.availableFileURL(at: "recording.mp4"), "Do not resolve a relative path against the app directory")
+
+        try FileManager.default.removeItem(at: file)
+        XCTAssertNil(RecordingPlayback.availableFileURL(at: file.path), "Recheck the file when an action is invoked")
+    }
+
     func testExistingRecordingWithoutMinutesCanPreparePlayback() throws {
         let detail = try detail()
         XCTAssertNil(detail.playback)
