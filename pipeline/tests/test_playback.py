@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import pytest
-from narumi.bundle import Bundle, TrackRecord, sha256_file
+from narumi.bundle import Bundle, TrackRecord, sha256_file, sha256_params
 from narumi.errors import CancelledError, InvalidArgumentError, NotFoundError
 from narumi.playback import ARTIFACT_KEY, OUTPUT_PATH, playback_info, run_playback
+from narumi.playback._loudness import LoudnessMeasurement
 from narumi.playback._media import MediaStream
 from narumi.preprocess.ffmpeg import FfmpegError
 
@@ -39,6 +40,10 @@ def fake_media(monkeypatch):
     monkeypatch.setattr("narumi.playback.stage.mix_recording", mix)
     monkeypatch.setattr("narumi.playback.stage.validate_output", lambda *args, **kwargs: None)
     monkeypatch.setattr("narumi.playback.stage.ffmpeg_version", lambda: "9.0")
+    monkeypatch.setattr(
+        "narumi.playback.stage.measure_loudness",
+        lambda *args, **kwargs: LoudnessMeasurement(-18.0, -6.0),
+    )
     return calls
 
 
@@ -93,9 +98,61 @@ def test_producer_and_recipe_changes_invalidate_cache(recorded_bundle, fake_medi
     run_playback(recorded_bundle)
     monkeypatch.setattr("narumi.playback.stage.ffmpeg_version", lambda: "9.1")
     assert not run_playback(recorded_bundle).skipped
-    monkeypatch.setattr("narumi.playback.stage.RECIPE_VERSION", 2)
+    monkeypatch.setattr("narumi.playback.stage.RECIPE_VERSION", 3)
     assert not run_playback(recorded_bundle).skipped
     assert len(fake_media) == 3
+
+
+def test_old_recipe_is_regenerated_and_new_cache_skips_measurement(
+    recorded_bundle, fake_media, monkeypatch
+):
+    old = run_playback(recorded_bundle)
+    old.record.params["recipe_version"] = 1
+    del old.record.params["normalization"]
+    del old.record.params["normalization_tracks"]
+    old.record.params_hash = sha256_params(old.record.params)
+    recorded_bundle.save()
+    measurements = []
+
+    def measure(path, **kwargs):
+        measurements.append(path)
+        return (
+            LoudnessMeasurement(-41.09, -25.96)
+            if path.stem == "mic"
+            else LoudnessMeasurement(-21.8, -5.2)
+        )
+
+    monkeypatch.setattr("narumi.playback.stage.measure_loudness", measure)
+    current = run_playback(recorded_bundle)
+    assert not current.skipped and len(fake_media) == 2 and len(measurements) == 2
+    assert current.record.params["recipe_version"] == 2
+    tracks = current.record.params["normalization_tracks"]
+    assert tracks["mic"]["gain_db"] == pytest.approx(23.09)
+    assert tracks["system"]["gain_db"] == pytest.approx(3.2)
+    assert tracks["system"]["reason"] == "peak_limited"
+    assert run_playback(Bundle.open(recorded_bundle.path)).skipped
+    assert len(measurements) == 2
+
+
+@pytest.mark.parametrize(
+    "failure", [FfmpegError("measurement failed"), CancelledError("cancelled")]
+)
+def test_measurement_failure_preserves_existing_playback(
+    recorded_bundle, fake_media, monkeypatch, failure
+):
+    previous = run_playback(recorded_bundle)
+    old_bytes = previous.path.read_bytes()
+    recorded_bundle.abspath("tracks/mic.m4a").write_bytes(b"changed original")
+
+    def fail(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr("narumi.playback.stage.measure_loudness", fail)
+    with pytest.raises(type(failure)):
+        run_playback(recorded_bundle)
+    assert previous.path.read_bytes() == old_bytes
+    assert recorded_bundle.artifact(ARTIFACT_KEY) == previous.record
+    assert len(fake_media) == 1
 
 
 @pytest.mark.parametrize("failure", [FfmpegError("broken media"), CancelledError("cancelled")])

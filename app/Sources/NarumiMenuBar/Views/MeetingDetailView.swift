@@ -53,8 +53,9 @@ struct MeetingDetailView: View {
                 Button {
                     model.openBundleInFinder()
                 } label: {
-                    Label("バンドルを Finder で開く", systemImage: "folder")
+                    Label("会議フォルダを Finder で表示", systemImage: "folder")
                 }
+                .help("元の録画・音声データと議事録を含む会議フォルダを表示します。統合 MP4 は下の「MP4 を Finder で表示」から開けます。")
             }
         }
         .padding(.horizontal, 12)
@@ -72,29 +73,15 @@ struct MeetingDetailView: View {
                         Text(error.message).font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                HStack(alignment: .center, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("統合録画").font(.subheadline.bold())
-                        Text(presentation.message).font(.caption).foregroundStyle(.secondary)
-                        if let display = model.detail?.recording.display {
-                            Text("録画画面: \(display.name) (\(display.width) × \(display.height))")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                    Spacer()
-                    if presentation.playbackPath != nil {
-                        Button {
-                            Task { await model.playRecording() }
-                        } label: {
-                            Label("再生", systemImage: "play.fill")
-                        }
-                    }
-                    if presentation.canPrepare {
-                        Button(presentation.preparationLabel) {
-                            Task { await model.preparePlayback() }
-                        }
-                        .disabled(model.playbackBusy || !model.desktopSession.serverReachable)
-                    }
+                Text("録画ファイル（MP4）").font(.subheadline.bold())
+                Text(presentation.message).font(.caption).foregroundStyle(.secondary)
+                if let display = model.detail?.recording.display {
+                    Text("録画画面: \(display.name) (\(display.width) × \(display.height))")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 12) { playbackActions(presentation) }
+                    VStack(alignment: .leading, spacing: 8) { playbackActions(presentation) }
                 }
                 if model.playbackBusy {
                     HStack(spacing: 6) {
@@ -110,8 +97,42 @@ struct MeetingDetailView: View {
                         .font(.caption).foregroundStyle(.red)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
+        }
+    }
+
+    @ViewBuilder
+    private func playbackActions(_ presentation: RecordingPlaybackPresentation) -> some View {
+        if presentation.playbackPath != nil {
+            Button {
+                Task { await model.revealRecordingInFinder() }
+            } label: {
+                Label("MP4 を Finder で表示", systemImage: "doc")
+            }
+            .buttonStyle(.borderedProminent)
+            Button {
+                Task { await model.playRecording() }
+            } label: {
+                Label("録画を再生", systemImage: "play.fill")
+            }
+            .buttonStyle(.bordered)
+        }
+        if presentation.canPrepare {
+            if presentation.playbackPath == nil {
+                Button(presentation.preparationLabel) {
+                    Task { await model.preparePlayback() }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.playbackBusy || !model.desktopSession.serverReachable)
+            } else {
+                Button(presentation.preparationLabel) {
+                    Task { await model.preparePlayback() }
+                }
+                .buttonStyle(.borderless)
+                .disabled(model.playbackBusy || !model.desktopSession.serverReachable)
+            }
         }
     }
 }

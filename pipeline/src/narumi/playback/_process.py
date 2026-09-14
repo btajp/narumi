@@ -20,9 +20,13 @@ def check_cancelled(should_cancel: CancelCheck) -> None:
 
 
 def run_media_tool(
-    args: list[str], *, should_cancel: CancelCheck = None, timeout: float | None = None
+    args: list[str],
+    *,
+    should_cancel: CancelCheck = None,
+    timeout: float | None = None,
+    capture_stderr: bool = False,
 ) -> bytes:
-    """Keep logs off pipes, poll cancellation, and always reap an interrupted child."""
+    """Return stdout (or measurement stderr), polling cancellation and reaping the child."""
     check_cancelled(should_cancel)
     tool = Path(args[0]).name
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
@@ -67,5 +71,6 @@ def run_media_tool(
                 f"{tool} failed with exit code {returncode}",
                 details={"tool": tool, "returncode": returncode, "stderr_tail": tail},
             )
-        stdout.seek(0)
-        return stdout.read()
+        captured = stderr if capture_stderr else stdout
+        captured.seek(0)
+        return captured.read()
