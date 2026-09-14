@@ -11,6 +11,7 @@ from typing import Any
 from narumi.bundle import ArtifactRecord, Bundle, StageResult, sha256_params, utc_now_iso
 from narumi.bundle.manifest import Producer
 from narumi.errors import InvalidArgumentError, NotFoundError
+from narumi.playback._limiter import ensure_limiter_supported
 from narumi.playback._loudness import (
     NORMALIZATION_SETTINGS,
     compute_normalization,
@@ -135,6 +136,7 @@ def run_playback(bundle: Bundle, *, should_cancel: CancelCheck = None) -> StageR
     }
     audio_names = [name for name in sources if name != "screen"]
     producer = Producer(name="ffmpeg", version=ffmpeg_version())
+    ensure_limiter_supported(producer.version)
     existing = bundle.artifact(ARTIFACT_KEY)
     if (
         existing is not None

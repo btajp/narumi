@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from narumi.errors import InvalidArgumentError
+from narumi.playback._limiter import LIMITER_FILTER
 from narumi.playback._loudness import AUDIO_FORMAT_FILTER
 from narumi.playback._process import CancelCheck, run_media_tool
 from narumi.preprocess.ffmpeg import FfmpegError, ffmpeg_path, ffprobe_path
@@ -106,7 +107,7 @@ def mix_recording(
     for path in audio:
         args.extend(["-err_detect", "explode", "-i", str(path)])
     filters = [
-        f"[{index}:a:0]{AUDIO_FORMAT_FILTER},volume={gain:.6f}dB[a{index}]"
+        f"[{index}:a:0]{AUDIO_FORMAT_FILTER},volume={gain:.6f}dB,{LIMITER_FILTER}[a{index}]"
         for index, gain in enumerate(gains, start=1)
     ]
     labels = "".join(f"[a{index}]" for index in range(1, len(audio) + 1))
